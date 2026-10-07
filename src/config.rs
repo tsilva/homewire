@@ -7,6 +7,28 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub(crate) fn save_private(path: &Path, value: &impl Serialize) -> Result<()> {
+    let bytes = serde_json::to_vec(value)?;
+    if bytes.len() > 8192 {
+        return Err(error("Device state exceeds 8 KiB"));
+    }
+    let tmp = path.with_extension(format!("json.tmp-{}", std::process::id()));
+    let mut file = private_options().write(true).create_new(true).open(&tmp)?;
+    let result = (|| -> Result<()> {
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        fs::rename(&tmp, path)?;
+        if let Some(parent) = path.parent() {
+            File::open(parent)?.sync_all()?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -148,7 +170,7 @@ impl Store {
     }
 }
 
-fn private_options() -> OpenOptions {
+pub(crate) fn private_options() -> OpenOptions {
     let mut options = OpenOptions::new();
     #[cfg(unix)]
     {
@@ -157,7 +179,7 @@ fn private_options() -> OpenOptions {
     }
     options
 }
-fn private_permissions(path: &Path) -> Result<()> {
+pub(crate) fn private_permissions(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -170,7 +192,7 @@ fn private_permissions(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn read_bounded(path: &Path, label: &str) -> std::io::Result<Vec<u8>> {
+pub(crate) fn read_bounded(path: &Path, label: &str) -> std::io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     File::open(path)?.take(8193).read_to_end(&mut bytes)?;
     if bytes.len() > 8192 {

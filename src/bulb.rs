@@ -1,0 +1,615 @@
+//! Named Tapo L430C/L900 lights, verified controls and retained overheating faults.
+use crate::{
+    Result,
+    config::{private_options, private_permissions, read_bounded},
+    error, fault, klap, light_schedule,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs::File,
+    net::{IpAddr, SocketAddr},
+    path::{Path, PathBuf},
+    thread,
+    time::{Duration, Instant},
+};
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum Model {
+    #[default]
+    L430C,
+    L900,
+}
+impl Model {
+    fn max_temperature(self) -> u16 {
+        match self {
+            Self::L430C => 6500,
+            Self::L900 => 9000,
+        }
+    }
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::L430C => "L430C",
+            Self::L900 => "L900",
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Endpoint {
+    pub name: String,
+    #[serde(default)]
+    pub model: Model,
+    pub host: IpAddr,
+    pub device_id: String,
+    pub auth_hash: String,
+    #[serde(default = "port")]
+    pub port: u16,
+    #[serde(default)]
+    pub connect: Option<SocketAddr>,
+}
+fn port() -> u16 {
+    80
+}
+fn timeout() -> u64 {
+    8
+}
+fn settle() -> u64 {
+    2
+}
+fn poll() -> u64 {
+    30
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Config {
+    #[serde(alias = "lights")]
+    pub bulbs: Vec<Endpoint>,
+    #[serde(default = "timeout")]
+    pub timeout_seconds: u64,
+    #[serde(default = "settle")]
+    pub settle_seconds: u64,
+    #[serde(default = "poll")]
+    pub poll_seconds: u64,
+    #[serde(default)]
+    pub automation: Option<light_schedule::Config>,
+}
+impl Config {
+    pub fn load(path: &Path) -> Result<Self> {
+        private_permissions(path)?;
+        let config: Self = serde_json::from_slice(&read_bounded(path, "Bulb configuration")?)
+            .map_err(|_| error("Invalid bulb configuration; use the documented schema"))?;
+        config.validate()?;
+        Ok(config)
+    }
+    pub fn validate(&self) -> Result<()> {
+        if self.bulbs.is_empty()
+            || self.bulbs.len() > 8
+            || !(1..=30).contains(&self.timeout_seconds)
+            || self.settle_seconds > 10
+            || self.timeout_seconds <= self.settle_seconds
+            || !(5..=300).contains(&self.poll_seconds)
+        {
+            return Err(error(
+                "Configure 1–8 bulbs; timeout 1–30 seconds and greater than settle (0–10); poll 5–300 seconds",
+            ));
+        }
+        let mut names = BTreeSet::new();
+        let mut ids = BTreeSet::new();
+        for bulb in &self.bulbs {
+            if bulb.name.is_empty()
+                || bulb.name.len() > 32
+                || !bulb
+                    .name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+                || !names.insert(&bulb.name)
+                || bulb.device_id.is_empty()
+                || bulb.device_id.len() > 64
+                || !bulb.device_id.bytes().all(|b| b.is_ascii_alphanumeric())
+                || !ids.insert(&bulb.device_id)
+                || bulb.port == 0
+                || bulb.connect.is_some_and(|a| a.port() == 0)
+            {
+                return Err(error(
+                    "Invalid or duplicate bulb name/device identity, or invalid port",
+                ));
+            }
+            bulb.key()?;
+        }
+        if let Some(automation) = &self.automation {
+            automation.validate()?;
+            if self.poll_seconds > 30 {
+                return Err(error("Light automation requires poll_seconds of 5–30"));
+            }
+            if !self
+                .bulbs
+                .iter()
+                .any(|b| b.name == automation.light && b.model == Model::L900)
+            {
+                return Err(error("Light automation requires a configured L900 target"));
+            }
+        }
+        Ok(())
+    }
+}
+impl Endpoint {
+    fn key(&self) -> Result<[u8; 32]> {
+        klap::auth_hash(&self.auth_hash)
+    }
+    fn identity(&self) -> String {
+        let identity = format!("{}:{}:{}", self.host, self.port, self.device_id);
+        if self.model == Model::L900 {
+            format!("{identity}:L900")
+        } else {
+            identity
+        }
+    }
+    fn connect(&self, timeout: Duration) -> Result<NetworkDevice<'_>> {
+        let address = SocketAddr::new(self.host, self.port);
+        Ok(NetworkDevice {
+            endpoint: self,
+            delay: Duration::ZERO,
+            client: klap::Client::connect(
+                self.connect.unwrap_or(address),
+                address.to_string(),
+                &self.key()?,
+                timeout,
+            )?,
+        })
+    }
+}
+
+// The original bulb interface remains usable; the shared light interface names
+// both bulbs and strips consistently without registering duplicate MCP tools.
+pub fn canonical_tool(name: &str) -> &str {
+    match name {
+        "light_list" => "bulb_list",
+        "light_status" => "bulb_status",
+        "light_apply" => "bulb_apply",
+        "light_check" => "bulb_check",
+        _ => name,
+    }
+}
+pub fn light_arguments(name: &str, mut args: Value) -> Result<Value> {
+    if name.starts_with("light_")
+        && let Some(object) = args.as_object_mut()
+    {
+        if object.contains_key("bulb") {
+            return Err(error("Light tools require light, not bulb"));
+        }
+        if let Some(value) = object.remove("light") {
+            object.insert("bulb".into(), value);
+        }
+    }
+    Ok(args)
+}
+pub fn light_output(mut value: Value) -> Value {
+    match &mut value {
+        Value::Object(object) => {
+            if let Some(name) = object.remove("bulb") {
+                object.insert("light".into(), name);
+            }
+            if let Some(lights) = object.remove("bulbs") {
+                object.insert("lights".into(), lights);
+            }
+            for item in object.values_mut() {
+                *item = light_output(item.take());
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                *item = light_output(item.take());
+            }
+        }
+        _ => {}
+    }
+    value
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Status {
+    pub bulb: String,
+    pub model: Model,
+    pub power: bool,
+    pub brightness_percent: u8,
+    pub hue: u16,
+    pub saturation_percent: u8,
+    pub color_temperature_k: u16,
+    pub temperature_range_k: [u16; 2],
+    pub overheated: Option<bool>,
+    pub effect_active: Option<bool>,
+}
+#[derive(Deserialize)]
+struct Effect {
+    enable: u8,
+}
+#[derive(Deserialize)]
+struct Info {
+    model: String,
+    device_id: String,
+    device_on: bool,
+    brightness: u8,
+    hue: u16,
+    saturation: u8,
+    color_temp: u16,
+    color_temp_range: [u16; 2],
+    overheated: Option<bool>,
+    lighting_effect: Option<Effect>,
+    dynamic_light_effect_enable: Option<bool>,
+    music_rhythm_enable: Option<bool>,
+}
+impl Status {
+    pub fn from_info(name: &str, device_id: &str, value: Value) -> Result<Self> {
+        Self::from_model_info(name, device_id, Model::L430C, value)
+    }
+    pub fn from_model_info(
+        name: &str,
+        device_id: &str,
+        model: Model,
+        value: Value,
+    ) -> Result<Self> {
+        let info: Info = serde_json::from_value(value)
+            .map_err(|_| error("Incomplete or invalid bulb status"))?;
+        let [min, max] = info.color_temp_range;
+        if info.model != model.as_str() || info.device_id != device_id {
+            return Err(error("Bulb model or identity does not match configuration"));
+        }
+        if !(1..=100).contains(&info.brightness)
+            || info.hue > 360
+            || info.saturation > 100
+            || min < 2500
+            || max > model.max_temperature()
+            || min > max
+            || info.color_temp != 0 && !(min..=max).contains(&info.color_temp)
+        {
+            return Err(error("Invalid bulb measurement range"));
+        }
+        let effect = match info.lighting_effect {
+            Some(Effect { enable: 0 }) => Some(false),
+            Some(Effect { enable: 1 }) => Some(true),
+            Some(_) => return Err(error("Invalid light effect status")),
+            None => info.dynamic_light_effect_enable,
+        };
+        let effect_active = match (effect, info.music_rhythm_enable) {
+            (Some(true), _) | (_, Some(true)) => Some(true),
+            (Some(false), Some(false)) => Some(false),
+            _ => None,
+        };
+        Ok(Self {
+            bulb: name.to_owned(),
+            model,
+            power: info.device_on,
+            brightness_percent: info.brightness,
+            hue: info.hue,
+            saturation_percent: info.saturation,
+            color_temperature_k: info.color_temp,
+            temperature_range_k: info.color_temp_range,
+            overheated: info.overheated,
+            effect_active,
+        })
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct Change {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub power: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub brightness_percent: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hue: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub saturation_percent: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color_temperature_k: Option<u16>,
+}
+impl Change {
+    pub fn validate(&self) -> Result<()> {
+        if self.power.is_none()
+            && self.brightness_percent.is_none()
+            && self.hue.is_none()
+            && self.saturation_percent.is_none()
+            && self.color_temperature_k.is_none()
+            || self
+                .brightness_percent
+                .is_some_and(|v| !(1..=100).contains(&v))
+            || self.hue.is_some_and(|v| v > 360)
+            || self.saturation_percent.is_some_and(|v| v > 100)
+            || self.hue.is_some() != self.saturation_percent.is_some()
+            || self
+                .color_temperature_k
+                .is_some_and(|v| !(2500..=9000).contains(&v))
+            || self.color_temperature_k.is_some() && self.hue.is_some()
+        {
+            return Err(error(
+                "Specify absolute power/brightness (1–100), paired hue (0–360)/saturation (0–100), or white temperature (2500–9000 K within the light's range); do not mix colour and white",
+            ));
+        }
+        Ok(())
+    }
+    pub fn matches(&self, status: &Status) -> bool {
+        self.power.is_none_or(|v| v == status.power)
+            && self
+                .brightness_percent
+                .is_none_or(|v| v == status.brightness_percent)
+            && self
+                .hue
+                .is_none_or(|v| status.color_temperature_k == 0 && v == status.hue)
+            && self
+                .saturation_percent
+                .is_none_or(|v| v == status.saturation_percent)
+            && self
+                .color_temperature_k
+                .is_none_or(|v| v == status.color_temperature_k)
+    }
+    fn params(&self) -> Value {
+        let mut value = json!({});
+        if let Some(v) = self.power {
+            value["device_on"] = json!(v);
+        }
+        if let Some(v) = self.brightness_percent {
+            value["brightness"] = json!(v);
+        }
+        if let Some(v) = self.hue {
+            value["hue"] = json!(v);
+            value["color_temp"] = json!(0);
+        }
+        if let Some(v) = self.saturation_percent {
+            value["saturation"] = json!(v);
+        }
+        if let Some(v) = self.color_temperature_k {
+            value["color_temp"] = json!(v);
+        }
+        value
+    }
+    fn off_only(&self) -> bool {
+        self.power == Some(false)
+            && self.brightness_percent.is_none()
+            && self.hue.is_none()
+            && self.color_temperature_k.is_none()
+    }
+}
+pub trait Device {
+    fn read(&mut self) -> Result<Status>;
+    fn set(&mut self, change: &Change) -> Result<()>;
+    fn settle(&mut self) -> Result<()>;
+}
+struct NetworkDevice<'a> {
+    endpoint: &'a Endpoint,
+    client: klap::Client,
+    delay: Duration,
+}
+impl Device for NetworkDevice<'_> {
+    fn read(&mut self) -> Result<Status> {
+        Status::from_model_info(
+            &self.endpoint.name,
+            &self.endpoint.device_id,
+            self.endpoint.model,
+            self.client.read_info()?,
+        )
+    }
+    fn set(&mut self, change: &Change) -> Result<()> {
+        self.client
+            .query("set_device_info", Some(change.params()))?;
+        Ok(())
+    }
+    fn settle(&mut self) -> Result<()> {
+        thread::sleep(self.delay);
+        Ok(())
+    }
+}
+#[derive(Serialize)]
+pub struct Applied {
+    pub applied: bool,
+    pub status: Status,
+}
+pub fn apply(device: &mut impl Device, change: &Change) -> Result<Applied> {
+    change.validate()?;
+    let before = device
+        .read()
+        .map_err(|e| error(format!("Light pre-control read failed: {e}")))?;
+    if before.model == Model::L900
+        && before.effect_active != Some(false)
+        && (change.brightness_percent.is_some()
+            || change.hue.is_some()
+            || change.color_temperature_k.is_some())
+    {
+        return Err(error(
+            "L900 effect status is active or unknown; disable effects/music mode in the Tapo app before fixed light settings",
+        ));
+    }
+    if change.color_temperature_k.is_some_and(|v| {
+        !(before.temperature_range_k[0]..=before.temperature_range_k[1]).contains(&v)
+    }) {
+        return Err(error(
+            "Requested temperature is outside the bulb's reported range",
+        ));
+    }
+    if change.matches(&before) {
+        return Ok(Applied {
+            applied: false,
+            status: before,
+        });
+    }
+    if before.overheated != Some(false) && !change.off_only() {
+        return Err(error(
+            "Bulb reports overheating or its fault status is unknown; only power-off is allowed",
+        ));
+    }
+    device
+        .set(change)
+        .map_err(|e| error(format!("Light control failed (no automatic retry): {e}")))?;
+    device.settle()?;
+    let after = device.read().map_err(|e| {
+        error(format!(
+            "Light verification read failed (outcome uncertain): {e}"
+        ))
+    })?;
+    if before.model == Model::L900
+        && (change.brightness_percent.is_some()
+            || change.hue.is_some()
+            || change.color_temperature_k.is_some())
+        && after.effect_active != Some(false)
+    {
+        return Err(error(
+            "L900 effect state changed during verification; no automatic retry",
+        ));
+    }
+    if !change.matches(&after) {
+        return Err(error(
+            "Bulb verification failed; outcome may be uncertain, no automatic retry",
+        ));
+    }
+    Ok(Applied {
+        applied: true,
+        status: after,
+    })
+}
+
+pub struct Manager {
+    pub config: Config,
+    pub monitor: fault::Monitor,
+    state_path: PathBuf,
+    _lock: File,
+    started: Instant,
+    pub scheduler: Option<light_schedule::Controller>,
+}
+#[derive(Serialize)]
+pub struct Check {
+    pub events: Vec<fault::Event>,
+    pub statuses: Vec<Status>,
+    pub unavailable: Vec<Unavailable>,
+    pub active_faults: BTreeMap<String, Vec<String>>,
+}
+#[derive(Serialize)]
+pub struct Unavailable {
+    pub bulb: String,
+    pub error: String,
+}
+impl Manager {
+    pub fn open(path: &Path) -> Result<Self> {
+        let config = Config::load(path)?;
+        let lock = private_options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path.with_extension("json.lock"))?;
+        lock.try_lock()
+            .map_err(|_| error("Another Homewire instance owns this bulb configuration"))?;
+        let state_path = path.with_extension("state.json");
+        let identities = config
+            .bulbs
+            .iter()
+            .map(|b| (b.name.clone(), b.identity()))
+            .collect();
+        let monitor = fault::Monitor::load(&state_path, &identities)?;
+        let scheduler = if let Some(automation) = &config.automation {
+            let endpoint = config
+                .bulbs
+                .iter()
+                .find(|b| b.name == automation.light)
+                .ok_or_else(|| error("Missing scheduled light"))?;
+            Some(light_schedule::Controller::open(
+                automation.clone(),
+                &path.with_extension("schedule.state.json"),
+                &endpoint.identity(),
+                chrono::Utc::now(),
+            )?)
+        } else {
+            None
+        };
+        Ok(Self {
+            config,
+            scheduler,
+            monitor,
+            state_path,
+            _lock: lock,
+            started: Instant::now(),
+        })
+    }
+    fn endpoint(&self, name: &str) -> Result<&Endpoint> {
+        self.config
+            .bulbs
+            .iter()
+            .find(|b| b.name == name)
+            .ok_or_else(|| error("Unknown configured bulb"))
+    }
+    pub fn list(&self) -> Value {
+        json!({"bulbs":self.config.bulbs.iter().map(|b|json!({"name":b.name,"host":b.host,"model":b.model})).collect::<Vec<_>>()})
+    }
+    pub fn status(&self, name: &str) -> Result<Status> {
+        self.endpoint(name)?
+            .connect(Duration::from_secs(self.config.timeout_seconds))?
+            .read()
+    }
+    pub fn apply(&self, name: &str, change: &Change) -> Result<Applied> {
+        change.validate()?;
+        let mut device = self
+            .endpoint(name)?
+            .connect(Duration::from_secs(self.config.timeout_seconds))?;
+        device.delay = Duration::from_secs(self.config.settle_seconds);
+        apply(&mut device, change)
+    }
+    pub fn schedule_tick(&mut self) -> Result<Option<Applied>> {
+        let mut scheduler = self
+            .scheduler
+            .take()
+            .ok_or_else(|| error("No light automation configured"))?;
+        let result = (|| {
+            let mut device = self
+                .endpoint(&scheduler.config.light)?
+                .connect(Duration::from_secs(self.config.timeout_seconds))?;
+            device.delay = Duration::from_secs(self.config.settle_seconds);
+            scheduler.tick(chrono::Utc::now(), &mut device)
+        })();
+        self.scheduler = Some(scheduler);
+        result
+    }
+    pub fn check(&mut self) -> Result<Check> {
+        let original = self.monitor.clone();
+        let mut check = Check {
+            events: vec![],
+            statuses: vec![],
+            unavailable: vec![],
+            active_faults: BTreeMap::new(),
+        };
+        for endpoint in &self.config.bulbs {
+            let result = endpoint
+                .connect(Duration::from_secs(self.config.timeout_seconds))
+                .and_then(|mut d| d.read());
+            let faults = result.as_ref().ok().and_then(|s| s.overheated).map(|hot| {
+                if hot {
+                    vec!["overheated".to_owned()]
+                } else {
+                    vec![]
+                }
+            });
+            if let Some(event) = self.monitor.observe_faults(
+                &endpoint.name,
+                &endpoint.identity(),
+                faults.as_deref(),
+                self.started.elapsed().as_secs(),
+            ) {
+                check.events.push(event);
+            }
+            match result {
+                Ok(status) => check.statuses.push(status),
+                Err(e) => check.unavailable.push(Unavailable {
+                    bulb: endpoint.name.clone(),
+                    error: e.to_string(),
+                }),
+            }
+        }
+        if !check.events.is_empty()
+            && let Err(e) = self.monitor.save(&self.state_path)
+        {
+            self.monitor = original;
+            return Err(e);
+        }
+        check.active_faults = self.monitor.active_faults();
+        Ok(check)
+    }
+}

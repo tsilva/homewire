@@ -1,0 +1,342 @@
+use chrono::{DateTime, Duration, Utc};
+use homewire::{
+    Result,
+    bulb::{Change, Device, Model, Status},
+    light_schedule::{Config, Controller, curve},
+    solar,
+};
+use serde_json::json;
+use std::{
+    fs,
+    path::PathBuf,
+    sync::atomic::{AtomicUsize, Ordering},
+};
+fn at(value: &str) -> DateTime<Utc> {
+    value
+        .parse()
+        .expect("valid fixture or expected schedule action")
+}
+fn config() -> Config {
+    Config {
+        light: "strip".into(),
+        timezone: "Europe/London".into(),
+        latitude: 0.0,
+        longitude: 0.0,
+    }
+}
+struct Temp(PathBuf);
+impl Temp {
+    fn new() -> Self {
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "homewire-light-schedule-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&path).expect("valid fixture or expected schedule action");
+        Self(path)
+    }
+    fn state(&self) -> PathBuf {
+        self.0.join("state.json")
+    }
+}
+impl Drop for Temp {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+struct Fake {
+    state: Status,
+    sets: usize,
+    fail_read: bool,
+    fail_set: bool,
+}
+impl Fake {
+    fn new(power: bool) -> Self {
+        Self {state:Status::from_model_info("strip","syntheticStrip",Model::L900,json!({"model":"L900","device_id":"syntheticStrip","device_on":power,"brightness":5,"hue":0,"saturation":0,"color_temp":2500,"color_temp_range":[2500,9000],"overheated":false,"lighting_effect":{"enable":0},"music_rhythm_enable":false})).expect("valid fixture or expected schedule action"),sets:0,fail_read:false,fail_set:false}
+    }
+}
+impl Device for Fake {
+    fn read(&mut self) -> Result<Status> {
+        if self.fail_read {
+            Err(homewire::error("offline"))
+        } else {
+            Ok(self.state.clone())
+        }
+    }
+    fn set(&mut self, c: &Change) -> Result<()> {
+        self.sets += 1;
+        if self.fail_set {
+            return Err(homewire::error("uncertain"));
+        }
+        if let Some(v) = c.power {
+            self.state.power = v;
+        }
+        if let Some(v) = c.brightness_percent {
+            self.state.brightness_percent = v;
+        }
+        if let Some(v) = c.color_temperature_k {
+            self.state.color_temperature_k = v;
+        }
+        Ok(())
+    }
+    fn settle(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+#[test]
+fn sunset_matches_official_noaa_calculator_fixtures_and_utc_rollover() {
+    // Fixtures calculated with NOAA's published main.js, not this implementation.
+    for (date, lat, lon, expected) in [
+        ("2026-06-21", 40.71, -74.01, "2026-06-22T00:30:46Z"),
+        ("2026-12-21", -33.87, 151.21, "2026-12-21T09:05:26Z"),
+        ("2026-03-29", 51.5, -0.12, "2026-03-29T18:28:39Z"),
+    ] {
+        assert_eq!(
+            solar::sunset(
+                date.parse()
+                    .expect("valid fixture or expected schedule action"),
+                lat,
+                lon
+            ),
+            Some(at(expected))
+        );
+    }
+    assert!(
+        solar::sunset(
+            "2026-06-21"
+                .parse()
+                .expect("valid fixture or expected schedule action"),
+            80.,
+            0.
+        )
+        .is_none()
+    );
+    assert!(
+        solar::sunset(
+            "2026-12-21"
+                .parse()
+                .expect("valid fixture or expected schedule action"),
+            80.,
+            0.
+        )
+        .is_none()
+    );
+    assert!(
+        solar::sunset(
+            "2026-06-21"
+                .parse()
+                .expect("valid fixture or expected schedule action"),
+            f64::NAN,
+            0.
+        )
+        .is_none()
+    );
+}
+#[test]
+fn synthetic_curve_points_interpolation_and_ties_even() {
+    for &(minute, b, k) in homewire::light_schedule::POINTS {
+        assert_eq!(curve(f64::from(minute)), (b, k));
+    }
+    assert_eq!(curve(420.), (45, 3850));
+    assert_eq!(curve(1080.), (45, 3850));
+    assert_eq!(curve(366.), (14, 2815));
+    assert_eq!(curve(378.), (20, 3045));
+    for minute in [0., 359., 1200., 1439.] {
+        assert_eq!(curve(minute), (10, 2700));
+    }
+}
+#[test]
+fn curve_uses_local_time_across_dst() -> Result<()> {
+    let c = config();
+    assert_eq!(
+        c.target(at("2026-01-01T08:00:00Z"))?.brightness_percent,
+        Some(80)
+    );
+    assert_eq!(
+        c.target(at("2026-07-01T07:00:00Z"))?.brightness_percent,
+        Some(80)
+    );
+    assert_eq!(
+        c.target(at("2026-03-29T06:00:00Z"))?.brightness_percent,
+        Some(45)
+    );
+    let mut c = config();
+    c.timezone = "Invalid/Zone".into();
+    assert!(c.validate().is_err());
+    c.timezone = "UTC".into();
+    c.latitude = 90.;
+    assert!(c.validate().is_err());
+    Ok(())
+}
+#[test]
+fn off_stays_off_startup_and_external_on_apply_curve_and_matching_state_skips() -> Result<()> {
+    let t = Temp::new();
+    let now = at("2026-10-07T10:00:00Z");
+    let mut c = Controller::open(config(), &t.state(), "strip1", now)?;
+    let mut d = Fake::new(false);
+    assert!(c.tick(now, &mut d)?.is_none());
+    assert_eq!(d.sets, 0);
+    d.state.power = true;
+    assert!(
+        c.tick(now + Duration::seconds(10), &mut d)?
+            .expect("valid fixture or expected schedule action")
+            .applied
+    );
+    assert_eq!(d.state.brightness_percent, 80);
+    assert_eq!(d.state.color_temperature_k, 5000);
+    assert!(c.tick(now + Duration::minutes(1), &mut d)?.is_none());
+    assert_eq!(d.sets, 1);
+    let mut c = Controller::open(config(), &t.state(), "strip1", now + Duration::minutes(2))?;
+    d.state.brightness_percent = 5;
+    assert!(c.tick(now + Duration::minutes(2), &mut d)?.is_some());
+    assert_eq!(d.sets, 2);
+    Ok(())
+}
+#[test]
+fn sunset_turns_on_once_and_does_not_replay_after_restart() -> Result<()> {
+    let t = Temp::new();
+    let sunset = config()
+        .sunset(at("2026-10-07T12:00:00Z"))?
+        .expect("valid fixture or expected schedule action");
+    let mut c = Controller::open(
+        config(),
+        &t.state(),
+        "strip1",
+        sunset - Duration::seconds(20),
+    )?;
+    let mut d = Fake::new(false);
+    assert!(c.tick(sunset - Duration::seconds(10), &mut d)?.is_none());
+    assert!(
+        c.tick(sunset + Duration::seconds(5), &mut d)?
+            .expect("valid fixture or expected schedule action")
+            .applied
+    );
+    assert!(d.state.power);
+    assert_eq!(d.sets, 1);
+    d.state.power = false;
+    assert!(c.tick(sunset + Duration::seconds(20), &mut d)?.is_none());
+    let mut c = Controller::open(
+        config(),
+        &t.state(),
+        "strip1",
+        sunset - Duration::seconds(20),
+    )?;
+    assert!(c.tick(sunset + Duration::seconds(30), &mut d)?.is_none());
+    assert_eq!(d.sets, 1);
+    Ok(())
+}
+#[test]
+fn sunset_is_not_suppressed_by_prior_curve_change_in_same_minute() -> Result<()> {
+    let t = Temp::new();
+    let sunset = config()
+        .sunset(at("2026-10-07T12:00:00Z"))?
+        .expect("valid fixture or expected schedule action");
+    let mut c = Controller::open(
+        config(),
+        &t.state(),
+        "strip1",
+        sunset - Duration::seconds(5),
+    )?;
+    let mut d = Fake::new(true);
+    d.state.brightness_percent = 40;
+    assert!(c.tick(sunset - Duration::seconds(4), &mut d)?.is_some());
+    d.state.power = false;
+    assert!(c.tick(sunset + Duration::seconds(4), &mut d)?.is_some());
+    assert!(d.state.power);
+    assert_eq!(d.sets, 2);
+    Ok(())
+}
+#[test]
+fn missed_sunset_and_start_after_sunset_do_not_catch_up() -> Result<()> {
+    let sunset = config()
+        .sunset(at("2026-10-07T12:00:00Z"))?
+        .expect("valid fixture or expected schedule action");
+    for start in [
+        sunset - Duration::seconds(10),
+        sunset + Duration::seconds(1),
+    ] {
+        let t = Temp::new();
+        let mut c = Controller::open(config(), &t.state(), "strip1", start)?;
+        let mut d = Fake::new(false);
+        assert!(c.tick(sunset + Duration::seconds(61), &mut d)?.is_none());
+        assert_eq!(d.sets, 0);
+    }
+    Ok(())
+}
+#[test]
+fn failed_sunset_read_or_write_is_retained_and_not_retried() -> Result<()> {
+    let sunset = config()
+        .sunset(at("2026-10-07T12:00:00Z"))?
+        .expect("valid fixture or expected schedule action");
+    for read_failure in [true, false] {
+        let t = Temp::new();
+        let mut c = Controller::open(
+            config(),
+            &t.state(),
+            "strip1",
+            sunset - Duration::seconds(20),
+        )?;
+        let mut d = Fake::new(false);
+        d.fail_read = read_failure;
+        d.fail_set = !read_failure;
+        assert!(c.tick(sunset + Duration::seconds(1), &mut d).is_err());
+        assert_eq!(d.sets, usize::from(!read_failure));
+        d.fail_read = false;
+        d.fail_set = false;
+        assert!(c.tick(sunset + Duration::seconds(20), &mut d)?.is_none());
+        assert!(!d.state.power);
+        let mut c = Controller::open(
+            config(),
+            &t.state(),
+            "strip1",
+            sunset - Duration::seconds(20),
+        )?;
+        assert!(c.tick(sunset + Duration::seconds(30), &mut d)?.is_none());
+        assert_eq!(d.sets, usize::from(!read_failure));
+    }
+    Ok(())
+}
+#[test]
+fn persistence_failure_blocks_controls_and_same_minute_failure_survives_restart() -> Result<()> {
+    let t = Temp::new();
+    let now = at("2026-10-07T10:00:00Z");
+    let mut c = Controller::open(config(), &t.0.join("missing/state.json"), "strip1", now)?;
+    let mut d = Fake::new(true);
+    assert!(c.tick(now, &mut d).is_err());
+    assert_eq!(d.sets, 0);
+    let mut c = Controller::open(config(), &t.state(), "strip1", now)?;
+    d.fail_set = true;
+    assert!(c.tick(now, &mut d).is_err());
+    assert_eq!(d.sets, 1);
+    d.fail_set = false;
+    let mut c = Controller::open(config(), &t.state(), "strip1", now)?;
+    assert!(c.tick(now + Duration::seconds(10), &mut d)?.is_none());
+    assert_eq!(d.sets, 1);
+    // A new minute is a fresh curve evaluation, never a blind retransmission.
+    assert!(c.tick(now + Duration::minutes(1), &mut d)?.is_some());
+    assert_eq!(d.sets, 2);
+    Ok(())
+}
+#[test]
+fn optional_schedule_config_is_validated_and_server_flag_requires_control() -> Result<()> {
+    let base = json!({"lights":[{"name":"strip","model":"L900","host":"192.0.2.1","device_id":"synthetic","auth_hash":"00".repeat(32)}],"automation":{"light":"strip","timezone":"Europe/London","latitude":0.0,"longitude":0.0}});
+    let config: homewire::bulb::Config = serde_json::from_value(base.clone())?;
+    config.validate()?;
+    for (key, value) in [
+        ("light", json!("missing")),
+        ("timezone", json!("invalid")),
+        ("latitude", json!(91)),
+    ] {
+        let mut b = base.clone();
+        b["automation"][key] = value;
+        let config: homewire::bulb::Config = serde_json::from_value(b)?;
+        assert!(config.validate().is_err());
+    }
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_homewire"))
+        .args(["serve", "--light-schedule"])
+        .output()?;
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--allow-control"));
+    Ok(())
+}

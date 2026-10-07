@@ -1,7 +1,17 @@
+pub mod awair;
+pub mod bulb;
 pub mod config;
+pub mod fault;
+mod http;
+pub mod ipp;
+pub mod klap;
+pub mod light_schedule;
 pub mod mcp;
 pub mod meaco;
+pub mod plug;
+pub mod printer;
 pub mod schedule;
+pub mod solar;
 pub mod tuya;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;

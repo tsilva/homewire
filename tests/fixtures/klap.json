@@ -1,0 +1,11 @@
+{
+  "provenance": "Synthetic KLAP v2 vector generated with Python hashlib and cryptography AES-CBC/PKCS7, independently of Homewire",
+  "local": "000102030405060708090a0b0c0d0e0f",
+  "remote": "101112131415161718191a1b1c1d1e1f",
+  "auth": "d78d83e19c2672ec7ba29262a5d0b4ca6667c926b2ccc45f31a0975419ee72ec",
+  "sequence": 269190567,
+  "request": "{\"method\":\"get_device_info\"}",
+  "request_frame": "fcc9b6b7ef376d9b26073f5f458b2394ffa1915419d21324331b14b6cdf7a8fce6c00fe732702b6cfeee482f2ed02b67d722f1846846b9527a55ac0560a22f40",
+  "response": "{\"error_code\":0,\"result\":{\"power\":true}}",
+  "response_frame": "6dfed0cafc8985005a8ed3e023dfe9d58c0e911d169d75d214d6a4b420f1ff9b5d3f0d809bcbd21f2f981e79c1efd263dd0cb5900db7a32e003666a3662d49ec920fe084d718038fa45d4ba05ff1baf3"
+}
