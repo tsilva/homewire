@@ -1,0 +1,7 @@
+/target/
+/.local/
+*.state.json
+*.lock.json
+*.json.lock
+*.json.tmp-*
+.DS_Store
