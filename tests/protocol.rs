@@ -57,4 +57,52 @@ fn request_has_command_specific_header_and_no_return_code() -> Result<()> {
 #[test]
 fn requests_are_bounded() {
     assert!(encode_request(1, 7, &vec![0; 16 * 1024], KEY).is_err());
+    assert!(decode_response(&vec![0; 16 * 1024 + 17], KEY).is_err());
+}
+
+#[test]
+fn client_merges_owned_direct_and_nested_data_points_across_status_frames() -> Result<()> {
+    use homewire::{config::Config, tuya::Client};
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        time::Duration,
+    };
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let address = listener.local_addr()?;
+    let worker = std::thread::spawn(move || -> Result<()> {
+        let (mut stream, _) = listener.accept()?;
+        stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+        let mut header = [0; 16];
+        stream.read_exact(&mut header)?;
+        assert_eq!(u32::from_be_bytes(header[8..12].try_into()?), 10);
+        let mut query = vec![0; u32::from_be_bytes(header[12..].try_into()?) as usize];
+        stream.read_exact(&mut query)?;
+        for payload in [
+            json!({"dps":{"1":true,"2":55}}),
+            json!({"data":{"dps":{"4":"manual","19":0}}}),
+        ] {
+            let ciphertext = encrypt(&serde_json::to_vec(&payload)?, KEY);
+            let mut frame = Vec::new();
+            for value in [0x55aa_u32, 1, 8, ciphertext.len() as u32 + 12, 0] {
+                frame.extend_from_slice(&value.to_be_bytes());
+            }
+            frame.extend_from_slice(&ciphertext);
+            frame.extend_from_slice(&crc32fast::hash(&frame).to_be_bytes());
+            frame.extend_from_slice(&0xaa55_u32.to_be_bytes());
+            stream.write_all(&frame)?;
+        }
+        Ok(())
+    });
+    let config: Config = serde_json::from_value(json!({
+        "device_id":"synthetic", "host":"192.0.2.1", "local_key":"0123456789abcdef",
+        "protocol_version":"3.3", "timeout_seconds":2,
+    }))?;
+    let mut client = Client::new(&config, Some(address))?;
+    assert_eq!(
+        client.status()?,
+        serde_json::from_value(json!({"1":true,"2":55,"4":"manual","19":0}))?
+    );
+    worker.join().expect("worker")?;
+    Ok(())
 }

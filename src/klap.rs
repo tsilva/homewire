@@ -2,7 +2,7 @@
 use crate::{Result, error, http};
 use aes::Aes128;
 use cipher::{BlockDecrypt, BlockEncrypt, KeyInit, generic_array::GenericArray};
-use serde_json::{Value, json};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
     net::SocketAddr,
@@ -65,35 +65,44 @@ impl Session {
             .checked_add(1)
             .ok_or_else(|| error("KLAP sequence exhausted"))?;
         let padding = 16 - bytes.len() % 16;
-        let mut body = bytes.to_vec();
-        body.resize(bytes.len() + padding, padding as u8);
+        // Signature and padded ciphertext share one exactly sized allocation.
+        let mut result = Vec::with_capacity(32 + bytes.len() + padding);
+        result.resize(32, 0);
+        result.extend_from_slice(bytes);
+        result.resize(32 + bytes.len() + padding, padding as u8);
         let cipher = Aes128::new(GenericArray::from_slice(&self.key));
         let mut previous = self.iv();
-        for block in body.chunks_exact_mut(16) {
+        for block in result[32..].chunks_exact_mut(16) {
             for (byte, prev) in block.iter_mut().zip(previous) {
                 *byte ^= prev;
             }
             cipher.encrypt_block(GenericArray::from_mut_slice(block));
             previous.copy_from_slice(block);
         }
-        let mut result = hash(&[&self.signature, &self.sequence.to_be_bytes(), &body]).to_vec();
-        result.extend_from_slice(&body);
+        let signature = hash(&[&self.signature, &self.sequence.to_be_bytes(), &result[32..]]);
+        result[..32].copy_from_slice(&signature);
         Ok((result, self.sequence))
     }
     pub fn decrypt(&self, bytes: &[u8]) -> Result<Vec<u8>> {
-        if bytes.len() < 48
-            || bytes.len() > MAX_PAYLOAD + 48
-            || !(bytes.len() - 32).is_multiple_of(16)
-        {
-            return Err(error("Invalid KLAP response size"));
-        }
+        Self::validate_size(bytes.len())?;
+        let mut out = bytes.to_vec();
+        let length = self.decrypt_in_place(&mut out)?.len();
+        out.copy_within(32..32 + length, 0);
+        out.truncate(length);
+        Ok(out)
+    }
+    /// Authenticate before changing the frame, then reuse its ciphertext storage.
+    /// On success the returned slice contains only unpadded plaintext. A frame
+    /// must not be reused after this call, including on a padding error.
+    pub fn decrypt_in_place<'a>(&self, bytes: &'a mut [u8]) -> Result<&'a mut [u8]> {
+        Self::validate_size(bytes.len())?;
         if !equal(
             &bytes[..32],
             &hash(&[&self.signature, &self.sequence.to_be_bytes(), &bytes[32..]]),
         ) {
             return Err(error("KLAP response signature mismatch"));
         }
-        let mut body = bytes[32..].to_vec();
+        let body = &mut bytes[32..];
         let cipher = Aes128::new(GenericArray::from_slice(&self.key));
         let mut previous = self.iv();
         for block in body.chunks_exact_mut(16) {
@@ -113,8 +122,14 @@ impl Session {
         {
             return Err(error("Invalid KLAP padding"));
         }
-        body.truncate(body.len() - padding);
-        Ok(body)
+        let length = body.len() - padding;
+        Ok(&mut body[..length])
+    }
+    fn validate_size(length: usize) -> Result<()> {
+        if !(48..=MAX_PAYLOAD + 48).contains(&length) || !(length - 32).is_multiple_of(16) {
+            return Err(error("Invalid KLAP response size"));
+        }
+        Ok(())
     }
 }
 #[derive(Debug)]
@@ -197,6 +212,7 @@ impl Client {
                 content_type: None,
                 body: Some(&local),
                 cookie: None,
+                max_response_bytes: 48,
             },
         )
         .map_err(|e| handshake_error("handshake1", e))?;
@@ -222,6 +238,7 @@ impl Client {
                 content_type: None,
                 body: Some(&proof),
                 cookie: Some(&cookie),
+                max_response_bytes: 0,
             },
         )
         .map_err(|e| handshake_error("handshake2", e))?;
@@ -267,13 +284,19 @@ impl Client {
         }
     }
     pub fn query(&mut self, method: &str, params: Option<Value>) -> Result<Value> {
-        let mut request = json!({"method":method});
-        if let Some(params) = params {
-            request["params"] = params;
+        #[derive(serde::Serialize)]
+        struct Request<'a> {
+            method: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            params: Option<&'a Value>,
         }
+        let request = Request {
+            method,
+            params: params.as_ref(),
+        };
         let (body, sequence) = self.session.encrypt(&serde_json::to_vec(&request)?)?;
         let path = format!("/app/request?seq={sequence}");
-        let response = http::send(
+        let mut response = http::send(
             self.address,
             &self.authority,
             self.deadline,
@@ -282,6 +305,7 @@ impl Client {
                 content_type: None,
                 body: Some(&body),
                 cookie: Some(&self.cookie),
+                max_response_bytes: MAX_PAYLOAD + 48,
             },
         )
         .map_err(|e| {
@@ -291,11 +315,16 @@ impl Client {
                 error(format!("KLAP request failed: {e}; no automatic retry"))
             }
         })?;
-        let decoded = self.session.decrypt(&response.body)?;
-        let value: Value =
-            serde_json::from_slice(&decoded).map_err(|_| error("Invalid KLAP response JSON"))?;
-        match value.get("error_code").and_then(Value::as_i64) {
-            Some(0) => Ok(value.get("result").cloned().unwrap_or(Value::Null)),
+        let decoded = self.session.decrypt_in_place(&mut response.body)?;
+        #[derive(serde::Deserialize)]
+        struct Reply {
+            error_code: Option<i64>,
+            result: Option<Value>,
+        }
+        let value: Reply =
+            serde_json::from_slice(decoded).map_err(|_| error("Invalid KLAP response JSON"))?;
+        match value.error_code {
+            Some(0) => Ok(value.result.unwrap_or(Value::Null)),
             Some(code) => Err(error(format!(
                 "Tapo rejected request (code {code}); no automatic retry"
             ))),

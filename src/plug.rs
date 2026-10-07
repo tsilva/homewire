@@ -1,18 +1,17 @@
 //! Tapo P100/P110 relays, local P110 metering, and reported overload events.
 use crate::{
     Result,
-    config::{private_options, private_permissions, read_bounded},
+    config::{private_permissions, read_bounded},
     error, fault, klap,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, BTreeSet},
-    fs::File,
+    collections::BTreeSet,
     net::{IpAddr, SocketAddr},
-    path::{Path, PathBuf},
+    path::Path,
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Model {
@@ -328,17 +327,9 @@ pub fn apply(device: &mut impl Device, power: bool) -> Result<Applied> {
 pub struct Manager {
     pub config: Config,
     pub monitor: fault::Monitor,
-    state_path: PathBuf,
-    _lock: File,
-    started: Instant,
+    store: fault::Store,
 }
-#[derive(Serialize)]
-pub struct Check {
-    pub events: Vec<fault::Event>,
-    pub statuses: Vec<Status>,
-    pub unavailable: Vec<Unavailable>,
-    pub active_faults: BTreeMap<String, Vec<String>>,
-}
+pub type Check = fault::Check<Status, Unavailable>;
 #[derive(Serialize)]
 pub struct Unavailable {
     pub plug: String,
@@ -347,27 +338,11 @@ pub struct Unavailable {
 impl Manager {
     pub fn open(path: &Path) -> Result<Self> {
         let config = Config::load(path)?;
-        let lock = private_options()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(path.with_extension("json.lock"))?;
-        lock.try_lock()
-            .map_err(|_| error("Another Homewire instance owns this plug configuration"))?;
-        let state_path = path.with_extension("state.json");
-        let identities = config
-            .plugs
-            .iter()
-            .map(|p| (p.name.clone(), p.identity()))
-            .collect();
-        let monitor = fault::Monitor::load(&state_path, &identities)?;
+        let (store, monitor) = fault::Store::open(path, &config.plugs)?;
         Ok(Self {
             config,
             monitor,
-            state_path,
-            _lock: lock,
-            started: Instant::now(),
+            store,
         })
     }
     fn endpoint(&self, name: &str) -> Result<&Endpoint> {
@@ -396,50 +371,41 @@ impl Manager {
         apply(&mut device, power)
     }
     pub fn check(&mut self) -> Result<Check> {
-        let original = self.monitor.clone();
-        let mut check = Check {
-            events: vec![],
-            statuses: vec![],
-            unavailable: vec![],
-            active_faults: BTreeMap::new(),
-        };
-        for p in &self.config.plugs {
-            let result = p
-                .connect(
-                    Duration::from_secs(self.config.timeout_seconds),
-                    Duration::ZERO,
-                )
-                .and_then(|mut d| d.read());
-            let faults = result.as_ref().ok().and_then(|s| s.overloaded).map(|hot| {
-                if hot {
-                    vec!["overloaded".to_owned()]
-                } else {
-                    vec![]
-                }
-            });
-            if let Some(event) = self.monitor.observe_faults(
-                &p.name,
-                &p.identity(),
-                faults.as_deref(),
-                self.started.elapsed().as_secs(),
-            ) {
-                check.events.push(event);
-            }
-            match result {
-                Ok(status) => check.statuses.push(status),
-                Err(e) => check.unavailable.push(Unavailable {
-                    plug: p.name.clone(),
-                    error: e.to_string(),
-                }),
-            }
+        self.store.check(
+            &mut self.monitor,
+            &self.config.plugs,
+            Duration::from_secs(self.config.timeout_seconds),
+        )
+    }
+    pub fn watch(&mut self) -> Result<fault::Watch<Unavailable>> {
+        self.store.watch(
+            &mut self.monitor,
+            &self.config.plugs,
+            Duration::from_secs(self.config.timeout_seconds),
+        )
+    }
+}
+
+impl fault::Target for Endpoint {
+    type Status = Status;
+    type Unavailable = Unavailable;
+    type Event = fault::Event;
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn identity(&self) -> String {
+        Endpoint::identity(self)
+    }
+    fn read(&self, timeout: Duration) -> Result<Status> {
+        self.connect(timeout, Duration::ZERO)?.read()
+    }
+    fn faults(status: &Status) -> fault::Faults<'_> {
+        fault::Faults::flag(status.overloaded, "overloaded")
+    }
+    fn unavailable(&self, error: String) -> Unavailable {
+        Unavailable {
+            plug: self.name.clone(),
+            error,
         }
-        if !check.events.is_empty()
-            && let Err(e) = self.monitor.save(&self.state_path)
-        {
-            self.monitor = original;
-            return Err(e);
-        }
-        check.active_faults = self.monitor.active_faults();
-        Ok(check)
     }
 }

@@ -34,6 +34,7 @@ pub(crate) fn exchange(
             content_type: Some(content_type),
             body,
             cookie: None,
+            max_response_bytes: MAX_BODY,
         },
     )?
     .body)
@@ -44,6 +45,7 @@ pub(crate) struct Request<'a> {
     pub content_type: Option<&'a str>,
     pub body: Option<&'a [u8]>,
     pub cookie: Option<&'a str>,
+    pub max_response_bytes: usize,
 }
 pub(crate) struct Response {
     pub body: Vec<u8>,
@@ -74,14 +76,21 @@ pub(crate) fn send(
     };
     if let Some(cookie) = request.cookie {
         validate_cookie(cookie)?;
-        header.push_str(&format!("Cookie: TP_SESSIONID={cookie}\r\n"));
+        header.push_str("Cookie: TP_SESSIONID=");
+        header.push_str(cookie);
+        header.push_str("\r\n");
     }
     header.push_str("\r\n");
     stream.write_all(header.as_bytes())?;
     if let Some(bytes) = request.body {
         stream.write_all(bytes)?;
     }
-    read_response(&mut BufReader::new(stream), request.content_type)
+    // Headers are small; large bodies still read directly into their own storage.
+    read_response(
+        &mut BufReader::with_capacity(1024, stream),
+        request.content_type,
+        request.max_response_bytes,
+    )
 }
 fn validate_cookie(value: &str) -> Result<()> {
     if value.is_empty()
@@ -137,9 +146,14 @@ fn line(reader: &mut impl BufRead, budget: &mut usize) -> Result<String> {
     String::from_utf8(bytes).map_err(|_| error("Invalid device HTTP header encoding"))
 }
 pub(crate) fn read_body(reader: &mut impl BufRead, expected_type: &str) -> Result<Vec<u8>> {
-    Ok(read_response(reader, Some(expected_type))?.body)
+    Ok(read_response(reader, Some(expected_type), MAX_BODY)?.body)
 }
-fn read_response(reader: &mut impl BufRead, expected_type: Option<&str>) -> Result<Response> {
+fn read_response(
+    reader: &mut impl BufRead,
+    expected_type: Option<&str>,
+    limit: usize,
+) -> Result<Response> {
+    let limit = limit.min(MAX_BODY);
     let mut session_cookie = None;
     let mut budget = MAX_HEADERS;
     let mut length = None;
@@ -169,38 +183,42 @@ fn read_response(reader: &mut impl BufRead, expected_type: Option<&str>) -> Resu
                 .split_once(':')
                 .ok_or_else(|| error("Invalid device HTTP header"))?;
             let value = value.trim();
-            match name.to_ascii_lowercase().as_str() {
-                "content-length" => {
-                    if length.is_some() {
-                        return Err(error("Duplicate device HTTP content length"));
-                    }
-                    let n = value.parse::<usize>()?;
-                    if n > MAX_BODY {
-                        return Err(error("Device response exceeds 64 KiB"));
-                    }
-                    length = Some(n);
+            if name.eq_ignore_ascii_case("content-length") {
+                if length.is_some() {
+                    return Err(error("Duplicate device HTTP content length"));
                 }
-                "transfer-encoding" => {
-                    if chunked || !value.eq_ignore_ascii_case("chunked") {
-                        return Err(error("Unsupported device HTTP transfer encoding"));
-                    }
-                    chunked = true;
+                let n = value.parse::<usize>()?;
+                // Error bodies are never read. Preserve the typed HTTP rejection
+                // even when its declared body exceeds a handshake's small limit.
+                if code == 200 && n > limit {
+                    return Err(error("Device response exceeds its body limit"));
                 }
-                "content-type" => content_type = Some(value.to_ascii_lowercase()),
-                "set-cookie" => {
-                    if let Some(cookie) = value
+                length = Some(n);
+            } else if name.eq_ignore_ascii_case("transfer-encoding") {
+                if chunked || !value.eq_ignore_ascii_case("chunked") {
+                    return Err(error("Unsupported device HTTP transfer encoding"));
+                }
+                chunked = true;
+            } else if name.eq_ignore_ascii_case("content-type") {
+                content_type = expected_type.map(|expected| {
+                    value
                         .split(';')
                         .next()
-                        .and_then(|v| v.strip_prefix("TP_SESSIONID="))
-                    {
-                        validate_cookie(cookie)?;
-                        if session_cookie.is_some() {
-                            return Err(error("Duplicate device session cookie"));
-                        }
-                        session_cookie = Some(cookie.to_owned());
-                    }
+                        .unwrap_or_default()
+                        .trim()
+                        .eq_ignore_ascii_case(expected)
+                });
+            } else if name.eq_ignore_ascii_case("set-cookie")
+                && let Some(cookie) = value
+                    .split(';')
+                    .next()
+                    .and_then(|v| v.strip_prefix("TP_SESSIONID="))
+            {
+                validate_cookie(cookie)?;
+                if session_cookie.is_some() {
+                    return Err(error("Duplicate device session cookie"));
                 }
-                _ => {}
+                session_cookie = Some(cookie.to_owned());
             }
         }
         if code == 100 {
@@ -216,11 +234,7 @@ fn read_response(reader: &mut impl BufRead, expected_type: Option<&str>) -> Resu
         return Err(error("No final device HTTP response"));
     }
     // Some devices (including HP DeskJet 3630) omit Content-Type.
-    if expected_type.is_some_and(|expected| {
-        content_type
-            .as_deref()
-            .is_some_and(|s| s.split(';').next().map(str::trim) != Some(expected))
-    }) {
+    if content_type == Some(false) {
         return Err(error("Unexpected device HTTP content type"));
     }
     if chunked && length.is_some() {
@@ -240,8 +254,8 @@ fn read_response(reader: &mut impl BufRead, expected_type: Option<&str>) -> Resu
                     session_cookie,
                 });
             }
-            if size > MAX_BODY - body.len() {
-                return Err(error("Device response exceeds 64 KiB"));
+            if size > limit - body.len() {
+                return Err(error("Device response exceeds its body limit"));
             }
             let start = body.len();
             body.resize(start + size, 0);
@@ -257,13 +271,67 @@ fn read_response(reader: &mut impl BufRead, expected_type: Option<&str>) -> Resu
         body.resize(length, 0);
         reader.read_exact(&mut body)?;
     } else {
-        reader.take((MAX_BODY + 1) as u64).read_to_end(&mut body)?;
-        if body.len() > MAX_BODY {
-            return Err(error("Device response exceeds 64 KiB"));
+        reader.take((limit + 1) as u64).read_to_end(&mut body)?;
+        if body.len() > limit {
+            return Err(error("Device response exceeds its body limit"));
         }
     }
     Ok(Response {
         body,
         session_cookie,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn security_rejections_keep_their_status_with_a_zero_body_budget() {
+        let response = "HTTP/1.1 403 Forbidden\r\nContent-Length: 128\r\n\r\n";
+        let err = read_response(&mut Cursor::new(response), None, 0)
+            .err()
+            .expect("rejection");
+        assert_eq!(
+            err.downcast_ref::<StatusError>().expect("HTTP status").0,
+            403
+        );
+    }
+
+    #[test]
+    fn protocol_limits_reject_declared_bodies_before_reading_them() {
+        // No body is provided: the error must be the size guard, not EOF.
+        for response in [
+            "HTTP/1.1 200 OK\r\nContent-Length: 17\r\n\r\n",
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n11\r\n",
+        ] {
+            let err = read_response(&mut Cursor::new(response), None, 16)
+                .err()
+                .expect("oversized body");
+            assert!(err.to_string().contains("body limit"));
+        }
+    }
+
+    #[test]
+    fn protocol_limits_cover_fixed_chunked_and_eof_bodies() -> Result<()> {
+        for headers in [
+            "Content-Length: 4\r\n",
+            "Transfer-Encoding: chunked\r\n",
+            "",
+        ] {
+            let payload = if headers.starts_with("Transfer") {
+                "4\r\ndata\r\n0\r\n\r\n"
+            } else {
+                "data"
+            };
+            let response = format!("HTTP/1.1 200 OK\r\n{headers}\r\n{payload}");
+            assert_eq!(
+                read_response(&mut Cursor::new(&response), None, 4)?.body,
+                b"data"
+            );
+            assert!(read_response(&mut Cursor::new(&response), None, 3).is_err());
+        }
+        Ok(())
+    }
 }

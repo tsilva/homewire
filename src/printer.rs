@@ -1,18 +1,17 @@
 //! Named printers, read-only status, and durable fault transition monitoring.
 use crate::{
     Result,
-    config::{private_options, private_permissions, read_bounded},
-    error,
+    config::{private_permissions, read_bounded},
+    error, fault,
     ipp::{self, Attributes},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
-    collections::{BTreeMap, BTreeSet},
-    fs::File,
+    collections::BTreeSet,
     net::{IpAddr, SocketAddr},
-    path::{Path, PathBuf},
-    time::{Duration, Instant},
+    path::Path,
+    time::Duration,
 };
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -280,6 +279,16 @@ pub struct Event {
     pub faults: Vec<String>,
     pub previous_faults: Vec<String>,
 }
+impl From<fault::Event> for Event {
+    fn from(event: fault::Event) -> Self {
+        Self {
+            printer: event.device,
+            event: event.event,
+            faults: event.faults,
+            previous_faults: event.previous_faults,
+        }
+    }
+}
 impl Monitor {
     pub fn observe(
         &mut self,
@@ -295,29 +304,16 @@ impl Monitor {
                 .map(|s| s.faults.as_slice()),
             now,
         )
-        .map(|e| Event {
-            printer: e.device,
-            event: e.event,
-            faults: e.faults,
-            previous_faults: e.previous_faults,
-        })
+        .map(Event::from)
     }
 }
 
 pub struct Manager {
     pub config: Config,
     pub monitor: Monitor,
-    state_path: PathBuf,
-    _lock: File,
-    started: Instant,
+    store: fault::Store,
 }
-#[derive(Serialize)]
-pub struct Check {
-    pub events: Vec<Event>,
-    pub statuses: Vec<Status>,
-    pub unavailable: Vec<Unavailable>,
-    pub active_faults: BTreeMap<String, Vec<String>>,
-}
+pub type Check = fault::Check<Status, Unavailable, Event>;
 #[derive(Serialize)]
 pub struct Unavailable {
     pub printer: String,
@@ -326,41 +322,11 @@ pub struct Unavailable {
 impl Manager {
     pub fn open(path: &Path) -> Result<Self> {
         let config = Config::load(path)?;
-        let lock = private_options()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(path.with_extension("json.lock"))?;
-        lock.try_lock()
-            .map_err(|_| error("Another Homewire instance owns this printer configuration"))?;
-        let state_path = path.with_extension("state.json");
-        let mut memory: Memory = match read_bounded(&state_path, "Printer alert memory") {
-            Ok(bytes) => {
-                serde_json::from_slice(&bytes).map_err(|_| error("Invalid printer alert memory"))?
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Memory::default(),
-            Err(e) => return Err(e.into()),
-        };
-        memory.devices.retain(|name, saved| {
-            config
-                .printers
-                .iter()
-                .any(|p| &p.name == name && p.identity() == saved.endpoint)
-        });
-        if memory
-            .devices
-            .values()
-            .any(|saved| saved.faults.len() > 64 || saved.faults.iter().any(|f| f.len() > 128))
-        {
-            return Err(error("Invalid printer alert memory bounds"));
-        }
+        let (store, monitor) = fault::Store::open(path, &config.printers)?;
         Ok(Self {
             config,
-            monitor: Monitor::from_memory(memory),
-            state_path,
-            _lock: lock,
-            started: Instant::now(),
+            monitor,
+            store,
         })
     }
     pub fn status(&self, name: &str) -> Result<Status> {
@@ -373,47 +339,45 @@ impl Manager {
         printer.read(Duration::from_secs(self.config.timeout_seconds))
     }
     pub fn check(&mut self) -> Result<Check> {
-        let original = self.monitor.clone();
-        let mut check = Check {
-            events: vec![],
-            statuses: vec![],
-            unavailable: vec![],
-            active_faults: BTreeMap::new(),
-        };
-        for endpoint in &self.config.printers {
-            let result = endpoint.read(Duration::from_secs(self.config.timeout_seconds));
-            if let Some(event) = self.monitor.observe(
-                endpoint,
-                result.as_ref().ok(),
-                self.started.elapsed().as_secs(),
-            ) {
-                check.events.push(event);
-            }
-            match result {
-                Ok(status) => check.statuses.push(status),
-                Err(e) => check.unavailable.push(Unavailable {
-                    printer: endpoint.name.clone(),
-                    error: e.to_string(),
-                }),
-            }
-        }
-        if !check.events.is_empty()
-            && let Err(e) = self.save()
-        {
-            self.monitor = original;
-            return Err(e);
-        }
-        check.active_faults = self
-            .monitor
-            .memory
-            .devices
-            .iter()
-            .filter(|(_, saved)| !saved.faults.is_empty())
-            .map(|(name, saved)| (name.clone(), saved.faults.clone()))
-            .collect();
-        Ok(check)
+        self.store.check(
+            &mut self.monitor,
+            &self.config.printers,
+            Duration::from_secs(self.config.timeout_seconds),
+        )
     }
-    fn save(&self) -> Result<()> {
-        self.monitor.save(&self.state_path)
+    pub fn watch(&mut self) -> Result<fault::Watch<Unavailable, Event>> {
+        self.store.watch(
+            &mut self.monitor,
+            &self.config.printers,
+            Duration::from_secs(self.config.timeout_seconds),
+        )
+    }
+}
+
+impl fault::Target for Endpoint {
+    type Status = Status;
+    type Unavailable = Unavailable;
+    type Event = Event;
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn identity(&self) -> String {
+        Endpoint::identity(self)
+    }
+    fn read(&self, timeout: Duration) -> Result<Status> {
+        Endpoint::read(self, timeout)
+    }
+    fn faults(status: &Status) -> fault::Faults<'_> {
+        if status.faults_known {
+            fault::Faults::Many(&status.faults)
+        } else {
+            fault::Faults::Unknown
+        }
+    }
+    fn unavailable(&self, error: String) -> Unavailable {
+        Unavailable {
+            printer: self.name.clone(),
+            error,
+        }
     }
 }

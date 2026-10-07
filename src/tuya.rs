@@ -37,12 +37,7 @@ impl Client {
         let t = timestamp()?.to_string();
         let payload =
             json!({"gwId":self.device_id,"devId":self.device_id,"uid":self.device_id,"t":t});
-        let result = self.exchange(10, &payload, true)?;
-        let dps = result
-            .get("dps")
-            .or_else(|| result.get("data").and_then(|x| x.get("dps")));
-        dps.and_then(Value::as_object)
-            .cloned()
+        take_dps(self.exchange(10, &payload, true)?)
             .ok_or_else(|| error("Device response contains no data points"))
     }
 
@@ -87,17 +82,15 @@ impl Client {
             // STATUS updates may precede the query response. Merge only within
             // this bounded query, never across old connections or failed reads.
             if need_data {
-                if let Some(dps) = response
-                    .get("dps")
-                    .or_else(|| response.get("data").and_then(|x| x.get("dps")))
-                    .and_then(Value::as_object)
-                {
-                    merged.extend(dps.clone());
+                if let Some(dps) = take_dps(response) {
+                    merged.extend(dps);
                     if ["1", "2", "4", "19"]
                         .iter()
                         .all(|k| merged.contains_key(*k))
                     {
-                        return Ok(json!({"dps":merged}));
+                        let mut result = Map::new();
+                        result.insert("dps".into(), Value::Object(merged));
+                        return Ok(Value::Object(result));
                     }
                 }
             } else if number(&header[4..8])? == sequence || number(&header[8..12])? == command {
@@ -105,6 +98,22 @@ impl Client {
             }
         }
         Err(error("No complete response within 16 device frames"))
+    }
+}
+
+fn take_dps(value: Value) -> Option<Map<String, Value>> {
+    let Value::Object(mut fields) = value else {
+        return None;
+    };
+    let dps = fields.remove("dps").or_else(|| {
+        fields
+            .get_mut("data")
+            .and_then(Value::as_object_mut)
+            .and_then(|data| data.remove("dps"))
+    });
+    match dps {
+        Some(Value::Object(dps)) => Some(dps),
+        _ => None,
     }
 }
 
@@ -156,12 +165,13 @@ pub fn encode_request(
     payload: &[u8],
     key: &[u8; 16],
 ) -> Result<Vec<u8>> {
-    let encrypted = encrypt(payload, key);
     let has_version = !matches!(command, 9 | 10 | 16 | 18);
-    let size = encrypted.len() + if has_version { 15 } else { 0 };
-    if size + 8 > MAX_FRAME {
+    let overhead = 16 - payload.len() % 16 + if has_version { 15 } else { 0 } + 8;
+    if payload.len() > MAX_FRAME - overhead {
         return Err(error("Tuya request exceeds frame limit"));
     }
+    let encrypted = encrypt(payload, key);
+    let size = encrypted.len() + if has_version { 15 } else { 0 };
     let mut frame = Vec::with_capacity(size + 24);
     for n in [PREFIX, sequence, command, (size + 8) as u32] {
         frame.extend_from_slice(&n.to_be_bytes());
@@ -175,7 +185,7 @@ pub fn encode_request(
     Ok(frame)
 }
 pub fn decode_response(frame: &[u8], key: &[u8; 16]) -> Result<Value> {
-    if frame.len() < 28
+    if !(28..=MAX_FRAME + 16).contains(&frame.len())
         || number(&frame[..4])? != PREFIX
         || number(&frame[12..16])? as usize != frame.len() - 16
     {

@@ -29,6 +29,18 @@ pub(crate) fn save_private(path: &Path, value: &impl Serialize) -> Result<()> {
     result
 }
 
+pub(crate) fn lock_configuration(path: &Path) -> Result<File> {
+    let lock = private_options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path.with_extension("json.lock"))?;
+    lock.try_lock()
+        .map_err(|_| error("Another Homewire instance owns this device configuration"))?;
+    Ok(lock)
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -111,15 +123,7 @@ pub struct Store {
 }
 impl Store {
     pub fn open(config_path: &Path, device_id: &str) -> Result<Self> {
-        let lock_path = config_path.with_extension("json.lock");
-        let lock = private_options()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(lock_path)?;
-        lock.try_lock()
-            .map_err(|_| error("Another Homewire instance is using this device configuration"))?;
+        let lock = lock_configuration(config_path)?;
         Ok(Self {
             path: config_path.with_extension("state.json"),
             device_id: device_id.into(),
@@ -150,23 +154,7 @@ impl Store {
         }
     }
     pub fn save(&self, memory: &Memory) -> Result<()> {
-        let tmp = self
-            .path
-            .with_extension(format!("json.tmp-{}", std::process::id()));
-        let mut file = private_options().write(true).create_new(true).open(&tmp)?;
-        let result = (|| -> Result<()> {
-            file.write_all(&serde_json::to_vec(memory)?)?;
-            file.sync_all()?;
-            fs::rename(&tmp, &self.path)?;
-            if let Some(parent) = self.path.parent() {
-                File::open(parent)?.sync_all()?;
-            }
-            Ok(())
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(&tmp);
-        }
-        result
+        save_private(&self.path, memory)
     }
 }
 

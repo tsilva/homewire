@@ -100,6 +100,24 @@ fn oversized_files_are_rejected() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn oversized_save_keeps_the_previous_durable_state() -> Result<()> {
+    let temp = Temp::new()?;
+    let path = temp.config()?;
+    let store = Store::open(&path, "test-device")?;
+    let mut memory = store.read()?;
+    memory.base_mode = Some("purify".into());
+    store.save(&memory)?;
+    let previous = fs::read(path.with_extension("state.json"))?;
+    memory
+        .schedule_attempts
+        .insert("night".into(), "x".repeat(8192));
+    assert!(store.save(&memory).is_err());
+    assert_eq!(fs::read(path.with_extension("state.json"))?, previous);
+    assert_eq!(store.read()?.base_mode.as_deref(), Some("purify"));
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn shared_config_permissions_are_rejected() -> Result<()> {

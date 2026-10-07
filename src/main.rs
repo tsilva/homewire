@@ -133,8 +133,8 @@ impl App {
                 "bulb_list" => Ok(bulbs.list()),
                 "bulb_status" => Ok(serde_json::to_value(bulbs.status(bulb_name)?)?),
                 "bulb_apply" => {
-                    let change: bulb::Change = serde_json::from_value(
-                        args.get("settings").cloned().unwrap_or(Value::Null),
+                    let change: bulb::Change = serde::Deserialize::deserialize(
+                        args.get("settings").unwrap_or(&Value::Null),
                     )
                     .map_err(|_| error("Invalid bulb settings"))?;
                     Ok(serde_json::to_value(bulbs.apply(bulb_name, &change)?)?)
@@ -195,7 +195,7 @@ impl App {
                 .plugs
                 .as_mut()
                 .ok_or_else(|| error("No plugs configured"))?;
-            let check = plugs.check()?;
+            let check = plugs.watch()?;
             self.next_plug_poll = Instant::now() + Duration::from_secs(plugs.config.poll_seconds);
             for event in check.events {
                 eprintln!("Plug event: {}", serde_json::to_string(&event)?);
@@ -209,7 +209,7 @@ impl App {
                 .printers
                 .as_mut()
                 .ok_or_else(|| error("No printers configured"))?;
-            let check = printers.check()?;
+            let check = printers.watch()?;
             self.next_printer_poll =
                 Instant::now() + Duration::from_secs(printers.config.poll_seconds);
             // Stderr preserves the MCP stdout transport; no outbound notifications.
@@ -228,7 +228,7 @@ impl App {
                 .bulbs
                 .as_mut()
                 .ok_or_else(|| error("No bulbs configured"))?;
-            let check = bulbs.check()?;
+            let check = bulbs.watch()?;
             self.next_bulb_poll = Instant::now() + Duration::from_secs(bulbs.config.poll_seconds);
             for event in check.events {
                 eprintln!("Bulb event: {}", serde_json::to_string(&event)?);
@@ -516,7 +516,7 @@ fn run() -> Result<()> {
                 .plugs
                 .as_mut()
                 .ok_or_else(|| error("No plugs configured"))?;
-            let check = plugs.check()?;
+            let check = plugs.watch()?;
             for event in check.events {
                 println!("{}", serde_json::to_string(&event)?);
             }
@@ -583,7 +583,7 @@ fn run() -> Result<()> {
                 .bulbs
                 .as_mut()
                 .ok_or_else(|| error("No bulbs configured"))?;
-            let check = bulbs.check()?;
+            let check = bulbs.watch()?;
             for event in check.events {
                 println!("{}", serde_json::to_string(&event)?);
             }
@@ -609,7 +609,7 @@ fn run() -> Result<()> {
                 .printers
                 .as_mut()
                 .ok_or_else(|| error("No printers configured"))?;
-            let check = printers.check()?;
+            let check = printers.watch()?;
             for event in check.events {
                 println!("{}", serde_json::to_string(&event)?);
             }
@@ -653,7 +653,9 @@ fn run() -> Result<()> {
                 )?;
                 match receiver.recv_timeout(Duration::from_secs(1)) {
                     Ok(Ok(Some(line))) => {
-                        let response = match serde_json::from_str::<Value>(&line) {
+                        let parsed = serde_json::from_str::<Value>(&line);
+                        drop(line);
+                        let response = match parsed {
                             Ok(request) => {
                                 if request.get("jsonrpc") == Some(&json!("2.0"))
                                     && request.get("method")

@@ -60,16 +60,19 @@ pub fn handle(
     )
 }
 pub fn handle_configured(
-    request: Value,
+    mut request: Value,
     tools: ToolSet,
     mut call: impl FnMut(&str, &Value) -> Result<Value>,
 ) -> Option<Value> {
-    let id = request.get("id").cloned();
+    let id = request.get_mut("id").map(Value::take);
     let method = request.get("method").and_then(Value::as_str);
     let valid_id = id
         .as_ref()
         .is_none_or(|v| v.is_string() || v.is_number() || v.is_null());
-    if request.get("jsonrpc") != Some(&json!("2.0")) || method.is_none() || !valid_id {
+    if request.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
+        || method.is_none()
+        || !valid_id
+    {
         return Some(rpc_error(
             if valid_id {
                 id.unwrap_or(Value::Null)
@@ -101,8 +104,16 @@ pub fn handle_configured(
                 "instructions":"Configured home device tools. Plug apply uses absolute relay power and verifies outcomes; P110 overload checks retain faults and energy reads preserve units. Bulb apply uses absolute settings and verifies outcomes; bulb checks retain overheating faults across missing readings. Printer tools read IPP status only. Awair returns fresh local sensor measurements with explicit units; invalid or stale readings fail. Meaco apply verifies each step and never retries an uncertain sleep toggle. Printer checks retain faults across missing readings and debounce transitions."})
         }
         "ping" => json!({}),
-        "tools/list" => json!({"tools":tool_list(tools)}),
+        "tools/list" => {
+            let mut result = json!({"tools":null});
+            result["tools"] = Value::Array(tool_list(tools));
+            result
+        }
         "tools/call" => {
+            let args = request
+                .pointer_mut("/params/arguments")
+                .map(Value::take)
+                .unwrap_or_else(|| json!({}));
             let raw_name = request
                 .pointer("/params/name")
                 .and_then(Value::as_str)
@@ -125,10 +136,6 @@ pub fn handle_configured(
             {
                 return Some(rpc_error(id, -32602, "Unknown tool"));
             }
-            let args = request
-                .pointer("/params/arguments")
-                .cloned()
-                .unwrap_or(json!({}));
             let args = match bulb::light_arguments(raw_name, args) {
                 Ok(args) => args,
                 Err(_) => return Some(rpc_error(id, -32602, "Use light for light tools")),
@@ -179,7 +186,7 @@ pub fn handle_configured(
                 }
                 if name == "bulb_apply"
                     && !object.get("settings").is_some_and(|v| {
-                        serde_json::from_value::<crate::bulb::Change>(v.clone())
+                        <crate::bulb::Change as serde::Deserialize>::deserialize(v)
                             .is_ok_and(|c| c.validate().is_ok())
                     })
                 {
@@ -219,7 +226,11 @@ pub fn handle_configured(
                         } else {
                             value
                         };
-                        json!({"content":[{"type":"text","text":value.to_string()}],"structuredContent":value,"isError":false})
+                        let mut result =
+                            json!({"content":[{"type":"text","text":null}],"isError":false});
+                        result["content"][0]["text"] = Value::String(value.to_string());
+                        result["structuredContent"] = value;
+                        result
                     }
                     Err(e) => tool_error(&e.to_string()),
                 }
@@ -227,7 +238,10 @@ pub fn handle_configured(
         }
         _ => return Some(rpc_error(id, -32601, "Method not found")),
     };
-    Some(json!({"jsonrpc":"2.0","id":id,"result":result}))
+    let mut response = json!({"jsonrpc":"2.0","id":null,"result":null});
+    response["id"] = id;
+    response["result"] = result;
+    Some(response)
 }
 fn tool_list(config: ToolSet) -> Vec<Value> {
     let mut tools = if config.meaco {
@@ -384,7 +398,9 @@ fn tool_error(message: &str) -> Value {
     json!({"content":[{"type":"text","text":message}],"isError":true})
 }
 pub fn rpc_error(id: Value, code: i32, message: &str) -> Value {
-    json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}})
+    let mut response = json!({"jsonrpc":"2.0","id":null,"error":{"code":code,"message":message}});
+    response["id"] = id;
+    response
 }
 pub fn write_message(writer: &mut impl Write, message: &Value) -> Result<()> {
     serde_json::to_writer(&mut *writer, message)?;

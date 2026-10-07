@@ -78,3 +78,39 @@ fn empty_exact_and_partial_blocks_round_trip() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn in_place_decryption_matches_independent_vector_and_keeps_allocation() -> Result<()> {
+    let v = vector();
+    let mut s = session(&v)?;
+    s.encrypt(b"query")?;
+    let mut frame = hex(v["response_frame"].as_str().expect("frame"));
+    let allocation = frame.as_ptr();
+    let capacity = frame.capacity();
+    assert_eq!(
+        s.decrypt_in_place(&mut frame)?,
+        v["response"].as_str().expect("response").as_bytes()
+    );
+    assert_eq!(frame.as_ptr(), allocation);
+    assert_eq!(frame.capacity(), capacity);
+    Ok(())
+}
+
+#[test]
+fn rejected_in_place_frames_are_not_mutated_before_authentication() -> Result<()> {
+    let v = vector();
+    let mut s = session(&v)?;
+    s.encrypt(b"query")?;
+    let frame = hex(v["response_frame"].as_str().expect("frame"));
+    for n in 0..frame.len() {
+        let mut truncated = frame[..n].to_vec();
+        assert!(s.decrypt_in_place(&mut truncated).is_err());
+        assert_eq!(truncated, frame[..n]);
+    }
+    let mut corrupt = frame;
+    corrupt[32] ^= 1;
+    let before = corrupt.clone();
+    assert!(s.decrypt_in_place(&mut corrupt).is_err());
+    assert_eq!(corrupt, before);
+    Ok(())
+}
