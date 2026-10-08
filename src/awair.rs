@@ -1,4 +1,5 @@
 //! Read-only Awair Element local API. No cloud account or persistent connection.
+use crate::device::{Adapter, Hints, Input, Tool};
 use crate::{
     Result,
     config::{private_permissions, read_bounded},
@@ -6,6 +7,7 @@ use crate::{
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::{
     net::{IpAddr, SocketAddr},
     path::Path,
@@ -132,5 +134,23 @@ impl Status {
             tvoc_ppb: reading.voc,
             pm25_ug_m3: reading.pm25,
         })
+    }
+}
+
+impl Adapter for Config {
+    const TOOLS: &'static [Tool] = &[Tool {
+        name: "awair_status",
+        description: "Read fresh Awair Element measurements: temperature (Celsius), humidity (%), CO2 (ppm), TVOC (ppb), PM2.5 (ug/m3), score, and timestamps. Invalid/stale readings fail. No device controls.",
+        input: Input::Empty,
+        hints: Hints::READ,
+    }];
+    fn open(path: &Path) -> Result<Self> {
+        Self::load(path)
+    }
+    fn execute(&mut self, name: &str, _args: &Value) -> Result<Value> {
+        match name {
+            "awair_status" => Ok(serde_json::to_value(self.read()?)?),
+            _ => Err(error("Unknown Awair operation")),
+        }
     }
 }

@@ -1,4 +1,5 @@
 //! Tapo P100/P110 relays, local P110 metering, and reported overload events.
+use crate::device::{Adapter, Field, Hints, Input, Tool};
 use crate::{
     Result,
     config::{private_permissions, read_bounded, valid_unique_labels},
@@ -400,3 +401,88 @@ impl fault::Target for Endpoint {
         }
     }
 }
+
+impl Adapter for Manager {
+    const TOOLS: &'static [Tool] = &[
+        Tool {
+            name: "plug_list",
+            description: "List configured Tapo P100/P110 plugs without network queries or credentials.",
+            input: Input::Empty,
+            hints: Hints::LIST,
+        },
+        Tool {
+            name: "plug_status",
+            description: "Read live relay, overload, auto-off timer state and P110 energy (W, V, A, kWh). Missing readings remain unknown.",
+            input: Input::Named {
+                key: "plug",
+                extra: None,
+                error: "Expected configured plug name and boolean power for apply",
+            },
+            hints: Hints::READ,
+        },
+        Tool {
+            name: "plug_check",
+            description: "Poll plug relays and debounced reported overload/recovery events. Missing readings never clear retained faults. No energy queries.",
+            input: Input::Empty,
+            hints: Hints::CHECK,
+        },
+        Tool {
+            name: "plug_apply",
+            description: "Apply absolute plug power and verify read-back. No toggles or control retries. Turning off may interrupt connected equipment. P110 overload/unknown faults block power-on.",
+            input: Input::Named {
+                key: "plug",
+                extra: Some(POWER_FIELD),
+                error: "Expected configured plug name and boolean power for apply",
+            },
+            hints: Hints {
+                destructive: Some(true),
+                ..Hints::CONTROL
+            },
+        },
+    ];
+    fn open(path: &Path) -> Result<Self> {
+        Self::open(path)
+    }
+    fn execute(&mut self, name: &str, args: &Value) -> Result<Value> {
+        match name {
+            "plug_list" => Ok(self.list()),
+            "plug_status" => Ok(serde_json::to_value(
+                self.status(
+                    args.get("plug")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| error("Missing plug name"))?,
+                )?,
+            )?),
+            "plug_apply" => Ok(serde_json::to_value(
+                self.apply(
+                    args.get("plug")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| error("Missing plug name"))?,
+                    args.get("power")
+                        .and_then(Value::as_bool)
+                        .ok_or_else(|| error("Specify absolute plug power"))?,
+                )?,
+            )?),
+            "plug_check" => Ok(serde_json::to_value(self.check()?)?),
+            _ => Err(error("Unknown plug operation")),
+        }
+    }
+}
+
+impl crate::device::Monitored for Manager {
+    type Unavailable = Unavailable;
+    type Event = fault::Event;
+    fn poll_seconds(&self) -> u64 {
+        self.config.poll_seconds
+    }
+    fn watch(&mut self) -> Result<fault::Watch<Self::Unavailable, Self::Event>> {
+        Manager::watch(self)
+    }
+}
+
+const POWER_FIELD: Field = Field {
+    name: "power",
+    schema: || json!({"type":"boolean"}),
+    valid: Value::is_boolean,
+    error: "Expected configured plug name and boolean power for apply",
+};

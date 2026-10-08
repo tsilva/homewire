@@ -1,7 +1,13 @@
-use crate::{Result, config::Memory, error, tuya::Client};
+use crate::device::{Adapter, Field, Hints, Input, Tool};
+use crate::{
+    Result,
+    config::{Memory, Store},
+    error,
+    tuya::Client,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use std::{thread, time::Duration};
+use std::{path::Path, thread, time::Duration};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct State {
@@ -255,3 +261,130 @@ fn send_verified<D: Device>(device: &mut D, action: &Action) -> Result<State> {
     device.settle();
     device.read()
 }
+
+impl Adapter for Manager {
+    const TOOLS: &'static [Tool] = &[
+        Tool {
+            name: "meaco_status",
+            description: "Read live Meaco power, mode, humidity and fault status.",
+            input: Input::Empty,
+            hints: Hints {
+                destructive: None,
+                idempotent: true,
+                ..Hints::READ
+            },
+        },
+        Tool {
+            name: "meaco_plan",
+            description: "Preview the day/night/off sequence using live state. Sends no controls.",
+            input: Input::Field {
+                field: OPERATION_FIELD,
+                shape_error: "Expected only operation",
+            },
+            hints: Hints {
+                destructive: None,
+                idempotent: false,
+                ..Hints::READ
+            },
+        },
+        Tool {
+            name: "meaco_apply",
+            description: "Apply a verified Meaco sequence: day=normal/50%; night=purify then sleep; off=power off.",
+            input: Input::Field {
+                field: OPERATION_FIELD,
+                shape_error: "Expected only operation",
+            },
+            hints: Hints {
+                destructive: None,
+                idempotent: false,
+                ..Hints::CONTROL
+            },
+        },
+    ];
+    fn open(path: &Path) -> Result<Self> {
+        Self::open(path)
+    }
+    fn execute(&mut self, name: &str, args: &Value) -> Result<Value> {
+        self.operation_call(
+            name,
+            args.get("operation")
+                .and_then(Value::as_str)
+                .and_then(|s| s.parse().ok()),
+        )
+    }
+}
+
+pub struct Manager {
+    device: NetworkDevice,
+    memory: Memory,
+    store: Store,
+}
+impl Manager {
+    fn operation_call(&mut self, name: &str, operation: Option<Operation>) -> Result<Value> {
+        match name {
+            "meaco_status" => Ok(serde_json::to_value(self.device.read()?)?),
+            "meaco_plan" => {
+                let op = operation.ok_or_else(|| error("Missing operation"))?;
+                let state = self.device.read()?;
+                Ok(
+                    json!({"operation":op,"state":state,"steps":plan(&state,op,&self.memory),"settle_seconds":self.device.settle_seconds,
+                    "note":"Provisional plan; execution rechecks state after every command."}),
+                )
+            }
+            "meaco_apply" => {
+                let op = operation.ok_or_else(|| error("Missing operation"))?;
+                Ok(serde_json::to_value(apply(
+                    &mut self.device,
+                    op,
+                    &mut self.memory,
+                    |memory| self.store.save(memory),
+                )?)?)
+            }
+            _ => Err(error("Unknown operation")),
+        }
+    }
+    pub fn open(path: &std::path::Path) -> Result<Self> {
+        Self::open_with_connect(path, None)
+    }
+    pub fn open_with_connect(
+        path: &std::path::Path,
+        connect: Option<std::net::SocketAddr>,
+    ) -> Result<Self> {
+        let config = crate::config::Config::load(path)?;
+        let store = Store::open(path, &config.device_id)?;
+        let memory = store.read()?;
+        Ok(Self {
+            device: NetworkDevice {
+                client: Client::new(&config, connect)?,
+                settle_seconds: config.settle_seconds,
+            },
+            memory,
+            store,
+        })
+    }
+    /// Persist a due attempt before returning it; callers must never replay it.
+    pub fn scheduled_operation(
+        &mut self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<Operation>> {
+        let Some((operation, name, date)) =
+            crate::schedule::due(now, &self.memory.schedule_attempts)
+        else {
+            return Ok(None);
+        };
+        self.memory.schedule_attempts.insert(name, date);
+        self.store.save(&self.memory)?;
+        Ok(Some(operation))
+    }
+}
+
+const OPERATION_FIELD: Field = Field {
+    name: "operation",
+    schema: || json!({"type":"string","enum":["day","night","off"]}),
+    valid: |v| {
+        v.as_str()
+            .and_then(|s| s.parse::<Operation>().ok())
+            .is_some()
+    },
+    error: "Operation must be day, night or off",
+};

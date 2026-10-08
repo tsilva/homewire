@@ -1,4 +1,5 @@
 //! Named printers, read-only status, and durable fault transition monitoring.
+use crate::device::{Adapter, Hints, Input, Tool};
 use crate::{
     Result,
     config::{private_permissions, read_bounded, valid_unique_labels},
@@ -6,7 +7,7 @@ use crate::{
     ipp::{self, Attributes},
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::{
     collections::BTreeSet,
     net::{IpAddr, SocketAddr},
@@ -371,5 +372,60 @@ impl fault::Target for Endpoint {
             printer: self.name.clone(),
             error,
         }
+    }
+}
+
+impl Adapter for Manager {
+    const TOOLS: &'static [Tool] = &[
+        Tool {
+            name: "printer_list",
+            description: "List configured printers without network queries.",
+            input: Input::Empty,
+            hints: Hints::LIST,
+        },
+        Tool {
+            name: "printer_check",
+            description: "Poll all printers and return debounced fault/recovery events plus retained faults. Unavailable readings never clear faults. Use repeatedly in this server for monitoring.",
+            input: Input::Empty,
+            hints: Hints::CHECK,
+        },
+        Tool {
+            name: "printer_status",
+            description: "Read live printer state, reported fault reasons, job count, and ink/toner levels using IPP. Sends no print jobs or controls.",
+            input: Input::Named {
+                key: "printer",
+                extra: None,
+                error: "Expected only a configured printer name",
+            },
+            hints: Hints::READ,
+        },
+    ];
+    fn open(path: &Path) -> Result<Self> {
+        Self::open(path)
+    }
+    fn execute(&mut self, name: &str, args: &Value) -> Result<Value> {
+        match name {
+            "printer_list" => Ok(json!({"printers":self.config.printers})),
+            "printer_status" => Ok(serde_json::to_value(
+                self.status(
+                    args.get("printer")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| error("Missing printer name"))?,
+                )?,
+            )?),
+            "printer_check" => Ok(serde_json::to_value(self.check()?)?),
+            _ => Err(error("Unknown operation")),
+        }
+    }
+}
+
+impl crate::device::Monitored for Manager {
+    type Unavailable = Unavailable;
+    type Event = Event;
+    fn poll_seconds(&self) -> u64 {
+        self.config.poll_seconds
+    }
+    fn watch(&mut self) -> Result<fault::Watch<Self::Unavailable, Self::Event>> {
+        Manager::watch(self)
     }
 }

@@ -14,6 +14,11 @@ Tapo P100/P110 relays, P110 metering and reported overload monitoring.
 - Keep messages, queues, caches, and retained state bounded. Measure resident memory
   on the target device before claiming a memory footprint.
 - Keep device protocol code separate from Meaco behavior, scheduling, and MCP.
+- New device families implement `device::Adapter`, own their command definitions
+  and validation, and register concrete types in `src/device.rs`. Keep discovery
+  and dispatch generated from that catalog; do not add family routing to MCP.
+- Use `device::Monitored` for supported fault monitoring and shared `fault` logic.
+  Keep optional capabilities separate; use static dispatch and bounded storage.
 - Read status and verify outcomes. Never blindly retry sleep: it is a toggle.
 - Printer queries must use Get-Printer-Attributes only. Do not submit print jobs
   or infer faults from ink percentages. Unknown readings never prove recovery.

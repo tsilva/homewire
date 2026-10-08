@@ -1,4 +1,5 @@
 //! Named Tapo L430C/L900 lights, verified controls and retained overheating faults.
+use crate::device::{Adapter, Field, Hints, Input, Tool};
 use crate::{
     Result,
     config::{private_permissions, read_bounded, valid_unique_labels},
@@ -152,52 +153,8 @@ impl Endpoint {
     }
 }
 
-// The original bulb interface remains usable; the shared light interface names
-// both bulbs and strips consistently without registering duplicate MCP tools.
-pub fn canonical_tool(name: &str) -> &str {
-    match name {
-        "light_list" => "bulb_list",
-        "light_status" => "bulb_status",
-        "light_apply" => "bulb_apply",
-        "light_check" => "bulb_check",
-        _ => name,
-    }
-}
-pub fn light_arguments(name: &str, mut args: Value) -> Result<Value> {
-    if name.starts_with("light_")
-        && let Some(object) = args.as_object_mut()
-    {
-        if object.contains_key("bulb") {
-            return Err(error("Light tools require light, not bulb"));
-        }
-        if let Some(value) = object.remove("light") {
-            object.insert("bulb".into(), value);
-        }
-    }
-    Ok(args)
-}
-pub fn light_output(mut value: Value) -> Value {
-    match &mut value {
-        Value::Object(object) => {
-            if let Some(name) = object.remove("bulb") {
-                object.insert("light".into(), name);
-            }
-            if let Some(lights) = object.remove("bulbs") {
-                object.insert("lights".into(), lights);
-            }
-            for item in object.values_mut() {
-                *item = light_output(item.take());
-            }
-        }
-        Value::Array(items) => {
-            for item in items {
-                *item = light_output(item.take());
-            }
-        }
-        _ => {}
-    }
-    value
-}
+// Preserve the public aliases while keeping presentation out of device behavior.
+pub use crate::naming::{canonical_tool, light_arguments, light_output};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Status {
     pub bulb: String,
@@ -573,3 +530,76 @@ impl fault::Target for Endpoint {
         }
     }
 }
+
+impl Adapter for Manager {
+    const TOOLS: &'static [Tool] = &[
+        Tool {
+            name: "bulb_list",
+            description: "List configured Tapo L430C/L900 light names and models without network queries or secrets.",
+            input: Input::Empty,
+            hints: Hints::LIST,
+        },
+        Tool {
+            name: "bulb_status",
+            description: "Read live bulb power, brightness, colour, white temperature and reported overheating.",
+            input: Input::Named {
+                key: "bulb",
+                extra: None,
+                error: "Expected a configured bulb name and settings for apply",
+            },
+            hints: Hints::READ,
+        },
+        Tool {
+            name: "bulb_check",
+            description: "Poll all bulbs and return debounced overheating/recovery events and retained faults. Missing readings never clear faults.",
+            input: Input::Empty,
+            hints: Hints::CHECK,
+        },
+        Tool {
+            name: "bulb_apply",
+            description: "Apply absolute bulb settings and verify them with a fresh read. No toggles or automatic retries. Brightness/colour do not implicitly turn power on.",
+            input: Input::Named {
+                key: "bulb",
+                extra: Some(SETTINGS_FIELD),
+                error: "Expected a configured bulb name and settings for apply",
+            },
+            hints: Hints::CONTROL,
+        },
+    ];
+    fn open(path: &Path) -> Result<Self> {
+        Self::open(path)
+    }
+    fn execute(&mut self, name: &str, args: &Value) -> Result<Value> {
+        let bulb_name = args.get("bulb").and_then(Value::as_str).unwrap_or_default();
+        match name {
+            "bulb_list" => Ok(self.list()),
+            "bulb_status" => Ok(serde_json::to_value(self.status(bulb_name)?)?),
+            "bulb_apply" => {
+                let change: Change =
+                    serde::Deserialize::deserialize(args.get("settings").unwrap_or(&Value::Null))
+                        .map_err(|_| error("Invalid bulb settings"))?;
+                Ok(serde_json::to_value(self.apply(bulb_name, &change)?)?)
+            }
+            "bulb_check" => Ok(serde_json::to_value(self.check()?)?),
+            _ => Err(error("Unknown bulb operation")),
+        }
+    }
+}
+
+impl crate::device::Monitored for Manager {
+    type Unavailable = Unavailable;
+    type Event = fault::Event;
+    fn poll_seconds(&self) -> u64 {
+        self.config.poll_seconds
+    }
+    fn watch(&mut self) -> Result<fault::Watch<Self::Unavailable, Self::Event>> {
+        Manager::watch(self)
+    }
+}
+
+const SETTINGS_FIELD: Field = Field {
+    name: "settings",
+    schema: || json!({"type":"object","properties":{"power":{"type":"boolean"},"brightness_percent":{"type":"integer","minimum":1,"maximum":100},"hue":{"type":"integer","minimum":0,"maximum":360},"saturation_percent":{"type":"integer","minimum":0,"maximum":100},"color_temperature_k":{"type":"integer","minimum":2500,"maximum":9000}},"minProperties":1,"additionalProperties":false,"dependentRequired":{"hue":["saturation_percent"],"saturation_percent":["hue"]}}),
+    valid: |v| <Change as serde::Deserialize>::deserialize(v).is_ok_and(|c| c.validate().is_ok()),
+    error: "Invalid bulb settings",
+};

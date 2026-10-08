@@ -1,6 +1,6 @@
 //! Minimal MCP stdio server. One JSON-RPC message per line, max 64 KiB.
 //! Device operations are serialized by the caller; no web server is needed.
-use crate::{Result, bulb, error, meaco::Operation};
+use crate::{Result, device::Selection, error, meaco::Operation, naming};
 use serde_json::{Value, json};
 use std::io::{BufRead, Read, Write};
 
@@ -59,9 +59,41 @@ pub fn handle(
         },
     )
 }
+/// Compatibility entry point for callers using the original fixed ToolSet.
 pub fn handle_configured(
-    mut request: Value,
+    request: Value,
     tools: ToolSet,
+    call: impl FnMut(&str, &Value) -> Result<Value>,
+) -> Option<Value> {
+    handle_selected(
+        request,
+        Selection::from_filter(|family| match family {
+            "meaco" => tools.meaco,
+            "printers" => tools.printers,
+            "awair" => tools.awair,
+            "bulbs" => tools.bulbs,
+            "plugs" => tools.plugs,
+            _ => false,
+        }),
+        Options {
+            light_names: tools.light_names,
+            allow_control: tools.allow_control,
+        },
+        call,
+    )
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct Options {
+    pub light_names: bool,
+    pub allow_control: bool,
+}
+
+/// MCP knows framing, permission policy and presentation, not adapter families.
+pub fn handle_selected(
+    mut request: Value,
+    selection: Selection,
+    options: Options,
     mut call: impl FnMut(&str, &Value) -> Result<Value>,
 ) -> Option<Value> {
     let id = request.get_mut("id").map(Value::take);
@@ -106,7 +138,7 @@ pub fn handle_configured(
         "ping" => json!({}),
         "tools/list" => {
             let mut result = json!({"tools":null});
-            result["tools"] = Value::Array(tool_list(tools));
+            result["tools"] = Value::Array(tool_list(selection, options));
             result
         }
         "tools/call" => {
@@ -118,27 +150,24 @@ pub fn handle_configured(
                 .pointer("/params/name")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            let name = bulb::canonical_tool(raw_name);
-            let Some(tool) = TOOLS
-                .iter()
-                .find(|tool| tool.0 == name && enabled(tool.0, tools))
-            else {
+            let name = naming::canonical_tool(raw_name);
+            let Some(tool) = selection.tools().find(|tool| tool.name == name) else {
                 return Some(rpc_error(id, -32602, "Unknown tool"));
             };
-            let args = match bulb::light_arguments(raw_name, args) {
+            let args = match naming::light_arguments(raw_name, args) {
                 Ok(args) => args,
                 Err(_) => return Some(rpc_error(id, -32602, "Use light for light tools")),
             };
-            if let Err(message) = tool.2.validate(&args) {
+            if let Err(message) = tool.input.validate(&args) {
                 return Some(rpc_error(id, -32602, message));
             }
-            if name.ends_with("_apply") && !tools.allow_control {
+            if !tool.hints.read_only && !options.allow_control {
                 tool_error("Device control is disabled; restart with --allow-control")
             } else {
                 match call(name, &args) {
                     Ok(value) => {
                         let value = if raw_name.starts_with("light_") {
-                            bulb::light_output(value)
+                            naming::light_output(value)
                         } else {
                             value
                         };
@@ -159,227 +188,31 @@ pub fn handle_configured(
     response["result"] = result;
     Some(response)
 }
-// Advertising, argument validation and dispatch share this bounded registry.
-const TOOLS: &[(&str, &str, Arguments)] = &[
-    (
-        "meaco_status",
-        "Read live Meaco power, mode, humidity and fault status.",
-        Arguments::Empty,
-    ),
-    (
-        "meaco_plan",
-        "Preview the day/night/off sequence using live state. Sends no controls.",
-        Arguments::Operation,
-    ),
-    (
-        "meaco_apply",
-        "Apply a verified Meaco sequence: day=normal/55%; night=purify then sleep; off=power off.",
-        Arguments::Operation,
-    ),
-    (
-        "bulb_list",
-        "List configured Tapo L430C/L900 light names and models without network queries or secrets.",
-        Arguments::Empty,
-    ),
-    (
-        "bulb_status",
-        "Read live bulb power, brightness, colour, white temperature and reported overheating.",
-        Arguments::Named("bulb"),
-    ),
-    (
-        "bulb_check",
-        "Poll all bulbs and return debounced overheating/recovery events and retained faults. Missing readings never clear faults.",
-        Arguments::Empty,
-    ),
-    (
-        "bulb_apply",
-        "Apply absolute bulb settings and verify them with a fresh read. No toggles or automatic retries. Brightness/colour do not implicitly turn power on.",
-        Arguments::Settings,
-    ),
-    (
-        "plug_list",
-        "List configured Tapo P100/P110 plugs without network queries or credentials.",
-        Arguments::Empty,
-    ),
-    (
-        "plug_status",
-        "Read live relay, overload, auto-off timer state and P110 energy (W, V, A, kWh). Missing readings remain unknown.",
-        Arguments::Named("plug"),
-    ),
-    (
-        "plug_check",
-        "Poll plug relays and debounced reported overload/recovery events. Missing readings never clear retained faults. No energy queries.",
-        Arguments::Empty,
-    ),
-    (
-        "plug_apply",
-        "Apply absolute plug power and verify read-back. No toggles or control retries. Turning off may interrupt connected equipment. P110 overload/unknown faults block power-on.",
-        Arguments::Power,
-    ),
-    (
-        "awair_status",
-        "Read fresh Awair Element measurements: temperature (Celsius), humidity (%), CO2 (ppm), TVOC (ppb), PM2.5 (ug/m3), score, and timestamps. Invalid/stale readings fail. No device controls.",
-        Arguments::Empty,
-    ),
-    (
-        "printer_list",
-        "List configured printers without network queries.",
-        Arguments::Empty,
-    ),
-    (
-        "printer_check",
-        "Poll all printers and return debounced fault/recovery events plus retained faults. Unavailable readings never clear faults. Use repeatedly in this server for monitoring.",
-        Arguments::Empty,
-    ),
-    (
-        "printer_status",
-        "Read live printer state, reported fault reasons, job count, and ink/toner levels using IPP. Sends no print jobs or controls.",
-        Arguments::Named("printer"),
-    ),
-];
-
-#[derive(Clone, Copy)]
-enum Arguments {
-    Empty,
-    Operation,
-    Named(&'static str),
-    Settings,
-    Power,
-}
-impl Arguments {
-    fn key(self) -> Option<&'static str> {
-        match self {
-            Self::Named(key) => Some(key),
-            Self::Settings => Some("bulb"),
-            Self::Power => Some("plug"),
-            _ => None,
-        }
-    }
-    fn validate(self, args: &Value) -> std::result::Result<(), &'static str> {
-        let object = args.as_object().ok_or("Arguments must be an object")?;
-        match self {
-            Self::Empty => {
-                if !object.is_empty() {
-                    return Err("This tool takes no arguments");
-                }
-            }
-            Self::Operation => {
-                if object.len() != 1 {
-                    return Err("Expected only operation");
-                }
-                if object
-                    .get("operation")
-                    .and_then(Value::as_str)
-                    .and_then(|s| s.parse::<Operation>().ok())
-                    .is_none()
-                {
-                    return Err("Operation must be day, night or off");
-                }
-            }
-            _ => {
-                let key = self.key().unwrap_or_default();
-                let apply = matches!(self, Self::Settings | Self::Power);
-                if object.len() != if apply { 2 } else { 1 }
-                    || !object
-                        .get(key)
-                        .and_then(Value::as_str)
-                        .is_some_and(|s| !s.is_empty() && s.len() <= 32)
-                    || matches!(self, Self::Power)
-                        && !object.get("power").is_some_and(Value::is_boolean)
-                {
-                    return Err(match key {
-                        "bulb" => "Expected a configured bulb name and settings for apply",
-                        "plug" => "Expected configured plug name and boolean power for apply",
-                        _ => "Expected only a configured printer name",
-                    });
-                }
-                if matches!(self, Self::Settings)
-                    && !object.get("settings").is_some_and(|v| {
-                        <bulb::Change as serde::Deserialize>::deserialize(v)
-                            .is_ok_and(|c| c.validate().is_ok())
-                    })
-                {
-                    return Err("Invalid bulb settings");
-                }
-            }
-        }
-        Ok(())
-    }
-    fn schema(self, light_names: bool) -> Value {
-        let mut schema = json!({"type":"object","properties":{},"additionalProperties":false});
-        if matches!(self, Self::Operation) {
-            schema["properties"]["operation"] =
-                json!({"type":"string","enum":["day","night","off"]});
-            schema["required"] = json!(["operation"]);
-        } else if let Some(key) = self.key() {
-            let key = if key == "bulb" && light_names {
-                "light"
-            } else {
-                key
-            };
-            schema["properties"][key] = json!({"type":"string","minLength":1,"maxLength":32});
-            let mut required =
-                Vec::with_capacity(if matches!(self, Self::Settings | Self::Power) {
-                    2
-                } else {
-                    1
-                });
-            required.push(Value::String(key.into()));
-            match self {
-                Self::Settings => {
-                    schema["properties"]["settings"] = json!({"type":"object","properties":{"power":{"type":"boolean"},"brightness_percent":{"type":"integer","minimum":1,"maximum":100},"hue":{"type":"integer","minimum":0,"maximum":360},"saturation_percent":{"type":"integer","minimum":0,"maximum":100},"color_temperature_k":{"type":"integer","minimum":2500,"maximum":9000}},"minProperties":1,"additionalProperties":false,"dependentRequired":{"hue":["saturation_percent"],"saturation_percent":["hue"]}});
-                    required.push(Value::String("settings".into()));
-                }
-                Self::Power => {
-                    schema["properties"]["power"] = json!({"type":"boolean"});
-                    required.push(Value::String("power".into()));
-                }
-                _ => {}
-            }
-            schema["required"] = Value::Array(required);
-        }
-        schema
-    }
-}
-fn enabled(name: &str, config: ToolSet) -> bool {
-    match name.split_once('_').map(|(family, _)| family) {
-        Some("meaco") => config.meaco,
-        Some("bulb") => config.bulbs,
-        Some("plug") => config.plugs,
-        Some("awair") => config.awair,
-        Some("printer") => config.printers,
-        _ => false,
-    }
-}
-fn tool_list(config: ToolSet) -> Vec<Value> {
-    let visible =
-        |name: &str| enabled(name, config) && (!name.ends_with("_apply") || config.allow_control);
-    let mut tools = Vec::with_capacity(TOOLS.iter().filter(|t| visible(t.0)).count());
-    for &(name, description, arguments) in TOOLS.iter().filter(|t| visible(t.0)) {
-        let apply = name.ends_with("_apply");
-        let meaco = name.starts_with("meaco_");
-        let mut annotations = json!({"readOnlyHint":!apply,
-            "idempotentHint":if meaco { name == "meaco_status" } else { !name.ends_with("_check") },
-            "openWorldHint":!name.ends_with("_list")});
-        if !meaco {
-            annotations["destructiveHint"] = Value::Bool(name == "plug_apply");
-        }
-        let advertised_name = if config.light_names {
-            match name {
+fn tool_list(selection: Selection, options: Options) -> Vec<Value> {
+    let visible = |tool: &&crate::device::Tool| tool.hints.read_only || options.allow_control;
+    let mut tools = Vec::with_capacity(selection.tools().filter(visible).count());
+    for tool in selection.tools().filter(visible) {
+        let advertised_name = if options.light_names {
+            match tool.name {
                 "bulb_list" => "light_list",
                 "bulb_status" => "light_status",
                 "bulb_check" => "light_check",
                 "bulb_apply" => "light_apply",
-                _ => name,
+                other => other,
             }
         } else {
-            name
+            tool.name
         };
-        let mut tool = json!({"name":advertised_name,"description":description});
-        // Move schemas and annotations: json! on an existing Value clones its tree.
-        tool["inputSchema"] = arguments.schema(config.light_names);
-        tool["annotations"] = annotations;
-        tools.push(tool);
+        let key = if options.light_names && tool.name.starts_with("bulb_") {
+            Some("light")
+        } else {
+            None
+        };
+        let mut value = json!({"name":advertised_name,"description":tool.description});
+        value["inputSchema"] = tool.input.schema(key);
+        value["annotations"] =
+            serde_json::to_value(tool.hints).expect("static tool hints serialize");
+        tools.push(value);
     }
     tools
 }

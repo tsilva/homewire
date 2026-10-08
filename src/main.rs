@@ -1,10 +1,9 @@
 use homewire::{
     Result, awair, bulb,
-    config::{Config, Memory, Store},
-    error, mcp,
-    meaco::{self, Device, NetworkDevice, Operation},
-    plug, printer, schedule,
-    tuya::Client,
+    device::{Adapter, Devices, Monitored},
+    error, fault, mcp,
+    meaco::{self, Operation},
+    naming, plug, printer,
 };
 use serde_json::{Value, json};
 use std::{
@@ -18,148 +17,14 @@ use std::{
 
 const HELP: &str = "Homewire — lightweight home automation\n\nUsage: homewire [--config MEACO_JSON] [--printers PRINTERS_JSON] [--awair AWAIR_JSON] [--lights LIGHTS_JSON] [--plugs PLUGS_JSON] COMMAND\n\nCommands:\n  plugs                   List configured Tapo P100/P110 plugs\n  plug-status NAME        Read relay, overload and P110 energy\n  plug-set NAME on|off    Apply and verify absolute relay power\n  plug-check              Poll plugs and retained overload faults\n  watch-plugs             Monitor reported overload events\n  status                  Read Meaco status\n  plan day|night|off       Preview a Meaco sequence\n  apply day|night|off      Apply and verify a Meaco sequence\n  awair-status            Read fresh air-quality measurements\n  printers                List configured printers\n  printer-status NAME     Read printer status and supplies\n  printer-check           Poll printers and retained faults\n  watch-printers          Monitor debounced printer fault events\n  lights                  List configured Tapo bulbs and strips\n  light-status NAME       Read light state and overheating\n  light-set NAME JSON     Apply and verify absolute settings\n  light-check             Poll lights and retained faults\n  light-plan              Preview optional L900 curve and sunset\n  light-schedule          Run optional L900 curve and sunset rules\n  watch-lights            Monitor overheating events\n  bulbs                   Legacy bulb commands (also --bulbs)\n  bulb-status NAME        Read bulb state and overheating status\n  bulb-set NAME JSON      Apply and verify absolute bulb settings\n  bulb-check              Poll bulbs and retained overheating faults\n  watch-bulbs             Monitor debounced overheating events\n  serve [--allow-control] [--schedule] [--light-schedule] [--watch-printers] [--watch-lights] [--watch-plugs]\n                          MCP stdio; read-only by default\n  schedule                Run the daily 09:00/22:00 London Meaco rules\n\n--connect IP:PORT overrides only the Meaco TCP destination.\nPrinter, Awair, light and plug configs may have connect overrides for testing.\nSchedule mode sends controls. Enable it only after disabling the two\ncorresponding Home Assistant rules. Fault monitoring sends no controls.\n";
 
-struct Meaco {
-    device: NetworkDevice,
-    memory: Memory,
-    store: Store,
-}
-impl Meaco {
-    fn call(&mut self, name: &str, operation: Option<Operation>) -> Result<Value> {
-        match name {
-            "meaco_status" => Ok(serde_json::to_value(self.device.read()?)?),
-            "meaco_plan" => {
-                let op = operation.ok_or_else(|| error("Missing operation"))?;
-                let state = self.device.read()?;
-                Ok(
-                    json!({"operation":op,"state":state,"steps":meaco::plan(&state,op,&self.memory),"settle_seconds":self.device.settle_seconds,
-                    "note":"Provisional plan; execution rechecks state after every command."}),
-                )
-            }
-            "meaco_apply" => {
-                let op = operation.ok_or_else(|| error("Missing operation"))?;
-                Ok(serde_json::to_value(meaco::apply(
-                    &mut self.device,
-                    op,
-                    &mut self.memory,
-                    |memory| self.store.save(memory),
-                )?)?)
-            }
-            _ => Err(error("Unknown operation")),
-        }
-    }
-    fn tick(&mut self) -> Result<()> {
-        if let Some((operation, name, date)) =
-            schedule::due(chrono::Utc::now(), &self.memory.schedule_attempts)
-        {
-            // Record the attempt first: restarts or failures cannot replay a toggle.
-            self.memory.schedule_attempts.insert(name, date);
-            self.store.save(&self.memory)?;
-            match self.call("meaco_apply", Some(operation)) {
-                Ok(result) => eprintln!("Schedule completed: {result}"),
-                Err(e) => eprintln!("Schedule failed (no automatic retry): {e}"),
-            }
-        }
-        Ok(())
-    }
-}
 struct App {
-    meaco: Option<Meaco>,
-    printers: Option<printer::Manager>,
-    awair: Option<awair::Config>,
-    bulbs: Option<bulb::Manager>,
-    plugs: Option<plug::Manager>,
+    devices: Devices,
     next_plug_poll: Instant,
     next_bulb_poll: Instant,
     next_light_schedule: Instant,
     next_printer_poll: Instant,
 }
 impl App {
-    fn call(&mut self, name: &str, args: &Value) -> Result<Value> {
-        if name.starts_with("meaco_") {
-            return self
-                .meaco
-                .as_mut()
-                .ok_or_else(|| error("No Meaco configured"))?
-                .call(
-                    name,
-                    args.get("operation")
-                        .and_then(Value::as_str)
-                        .and_then(|s| s.parse().ok()),
-                );
-        }
-        if name == "awair_status" {
-            return Ok(serde_json::to_value(
-                self.awair
-                    .as_ref()
-                    .ok_or_else(|| error("No Awair configured"))?
-                    .read()?,
-            )?);
-        }
-        if name.starts_with("plug_") {
-            let plugs = self
-                .plugs
-                .as_mut()
-                .ok_or_else(|| error("No plugs configured"))?;
-            return match name {
-                "plug_list" => Ok(plugs.list()),
-                "plug_status" => Ok(serde_json::to_value(
-                    plugs.status(
-                        args.get("plug")
-                            .and_then(Value::as_str)
-                            .ok_or_else(|| error("Missing plug name"))?,
-                    )?,
-                )?),
-                "plug_apply" => Ok(serde_json::to_value(
-                    plugs.apply(
-                        args.get("plug")
-                            .and_then(Value::as_str)
-                            .ok_or_else(|| error("Missing plug name"))?,
-                        args.get("power")
-                            .and_then(Value::as_bool)
-                            .ok_or_else(|| error("Specify absolute plug power"))?,
-                    )?,
-                )?),
-                "plug_check" => Ok(serde_json::to_value(plugs.check()?)?),
-                _ => Err(error("Unknown plug operation")),
-            };
-        }
-        if name.starts_with("bulb_") {
-            let bulbs = self
-                .bulbs
-                .as_mut()
-                .ok_or_else(|| error("No bulbs configured"))?;
-            let bulb_name = args.get("bulb").and_then(Value::as_str).unwrap_or_default();
-            return match name {
-                "bulb_list" => Ok(bulbs.list()),
-                "bulb_status" => Ok(serde_json::to_value(bulbs.status(bulb_name)?)?),
-                "bulb_apply" => {
-                    let change: bulb::Change = serde::Deserialize::deserialize(
-                        args.get("settings").unwrap_or(&Value::Null),
-                    )
-                    .map_err(|_| error("Invalid bulb settings"))?;
-                    Ok(serde_json::to_value(bulbs.apply(bulb_name, &change)?)?)
-                }
-                "bulb_check" => Ok(serde_json::to_value(bulbs.check()?)?),
-                _ => Err(error("Unknown bulb operation")),
-            };
-        }
-        let printers = self
-            .printers
-            .as_mut()
-            .ok_or_else(|| error("No printers configured"))?;
-        match name {
-            "printer_list" => Ok(json!({"printers":printers.config.printers})),
-            "printer_status" => Ok(serde_json::to_value(
-                printers.status(
-                    args.get("printer")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| error("Missing printer name"))?,
-                )?,
-            )?),
-            "printer_check" => Ok(serde_json::to_value(printers.check()?)?),
-            _ => Err(error("Unknown operation")),
-        }
-    }
     fn tick(
         &mut self,
         scheduling: bool,
@@ -169,20 +34,28 @@ impl App {
         watching_plugs: bool,
     ) -> Result<()> {
         if scheduling {
-            self.meaco
+            let meaco = self
+                .devices
+                .meaco
                 .as_mut()
-                .ok_or_else(|| error("No Meaco configured"))?
-                .tick()?;
+                .ok_or_else(|| error("No Meaco configured"))?;
+            if let Some(operation) = meaco.scheduled_operation(chrono::Utc::now())? {
+                match meaco.execute("meaco_apply", &json!({"operation":operation})) {
+                    Ok(result) => eprintln!("Schedule completed: {result}"),
+                    Err(e) => eprintln!("Schedule failed (no automatic retry): {e}"),
+                }
+            }
         }
         if light_scheduling && Instant::now() >= self.next_light_schedule {
             let bulbs = self
+                .devices
                 .bulbs
                 .as_mut()
                 .ok_or_else(|| error("No lights configured"))?;
             match bulbs.schedule_tick() {
                 Ok(Some(result)) => eprintln!(
                     "Light schedule completed: {}",
-                    bulb::light_output(serde_json::to_value(result)?)
+                    naming::light_output(serde_json::to_value(result)?)
                 ),
                 Ok(None) => {}
                 Err(e) => eprintln!("Light schedule failed (no immediate retry): {e}"),
@@ -192,52 +65,71 @@ impl App {
         }
         if watching_plugs && Instant::now() >= self.next_plug_poll {
             let plugs = self
+                .devices
                 .plugs
                 .as_mut()
                 .ok_or_else(|| error("No plugs configured"))?;
-            let check = plugs.watch()?;
-            self.next_plug_poll = Instant::now() + Duration::from_secs(plugs.config.poll_seconds);
-            for event in check.events {
-                diagnostic("Plug event", &event)?;
-            }
-            for unavailable in check.unavailable {
-                diagnostic("Plug unavailable", &unavailable)?;
-            }
+            poll_watch(plugs, &mut self.next_plug_poll, "Plug")?;
         }
         if watching && Instant::now() >= self.next_printer_poll {
             let printers = self
+                .devices
                 .printers
                 .as_mut()
                 .ok_or_else(|| error("No printers configured"))?;
-            let check = printers.watch()?;
-            self.next_printer_poll =
-                Instant::now() + Duration::from_secs(printers.config.poll_seconds);
-            // Stderr preserves the MCP stdout transport; no outbound notifications.
-            for event in check.events {
-                diagnostic("Printer event", &event)?;
-            }
-            for unavailable in check.unavailable {
-                diagnostic("Printer unavailable", &unavailable)?;
-            }
+            poll_watch(printers, &mut self.next_printer_poll, "Printer")?;
         }
         if watching_bulbs && Instant::now() >= self.next_bulb_poll {
             let bulbs = self
+                .devices
                 .bulbs
                 .as_mut()
                 .ok_or_else(|| error("No bulbs configured"))?;
-            let check = bulbs.watch()?;
-            self.next_bulb_poll = Instant::now() + Duration::from_secs(bulbs.config.poll_seconds);
-            for event in check.events {
-                diagnostic("Bulb event", &event)?;
-            }
-            for unavailable in check.unavailable {
-                diagnostic("Bulb unavailable", &unavailable)?;
-            }
+            poll_watch(bulbs, &mut self.next_bulb_poll, "Bulb")?;
         }
         Ok(())
     }
 }
-fn diagnostic(label: &str, value: &impl serde::Serialize) -> Result<()> {
+enum WatchOutput {
+    Diagnostics,
+    Events { light_names: bool },
+}
+fn report_watch<U: serde::Serialize, E: serde::Serialize>(
+    check: fault::Watch<U, E>,
+    label: &str,
+    output: WatchOutput,
+) -> Result<()> {
+    for event in check.events {
+        match output {
+            WatchOutput::Diagnostics => diagnostic(format_args!("{label} event"), &event)?,
+            WatchOutput::Events { .. } => mcp::write_message(&mut io::stdout().lock(), &event)?,
+        }
+    }
+    for unavailable in check.unavailable {
+        let prefix = format_args!("{label} unavailable");
+        if matches!(output, WatchOutput::Events { light_names: true }) {
+            diagnostic(
+                prefix,
+                &naming::light_output(serde_json::to_value(unavailable)?),
+            )?;
+        } else {
+            diagnostic(prefix, &unavailable)?;
+        }
+    }
+    Ok(())
+}
+fn poll_watch(device: &mut impl Monitored, next: &mut Instant, label: &str) -> Result<()> {
+    let check = device.watch()?;
+    *next = Instant::now() + Duration::from_secs(device.poll_seconds());
+    report_watch(check, label, WatchOutput::Diagnostics)
+}
+fn watch_loop(device: &mut impl Monitored, label: &str, light_names: bool) -> Result<()> {
+    loop {
+        report_watch(device.watch()?, label, WatchOutput::Events { light_names })?;
+        thread::sleep(Duration::from_secs(device.poll_seconds()));
+    }
+}
+fn diagnostic(label: impl std::fmt::Display, value: &impl serde::Serialize) -> Result<()> {
     let mut stderr = io::stderr().lock();
     write!(stderr, "{label}: ")?;
     mcp::write_message(&mut stderr, value)
@@ -435,21 +327,9 @@ fn run() -> Result<()> {
             "Configure a Meaco, printers, Awair, lights, or plugs for serve",
         ));
     }
-    let meaco = if let Some(path) = config_path {
-        let config = Config::load(&path)?;
-        let store = Store::open(&path, &config.device_id)?;
-        let memory = store.read()?;
-        Some(Meaco {
-            device: NetworkDevice {
-                client: Client::new(&config, connect)?,
-                settle_seconds: config.settle_seconds,
-            },
-            memory,
-            store,
-        })
-    } else {
-        None
-    };
+    let meaco = config_path
+        .map(|path| meaco::Manager::open_with_connect(&path, connect))
+        .transpose()?;
     let printers = printers_path
         .map(|path| printer::Manager::open(&path))
         .transpose()?;
@@ -461,7 +341,7 @@ fn run() -> Result<()> {
                 .unwrap_or(30),
         );
     let awair = awair_path
-        .map(|path| awair::Config::load(&path))
+        .map(|path| awair::Config::open(&path))
         .transpose()?;
     let bulbs = bulbs_path
         .map(|path| bulb::Manager::open(&path))
@@ -481,33 +361,32 @@ fn run() -> Result<()> {
         .transpose()?;
     let first_plug_poll = Instant::now()
         + Duration::from_secs(plugs.as_ref().map(|p| p.config.poll_seconds).unwrap_or(30));
-    let tools = mcp::ToolSet {
-        meaco: meaco.is_some(),
-        printers: printers.is_some(),
-        awair: awair.is_some(),
-        bulbs: bulbs.is_some(),
-        plugs: plugs.is_some(),
-        light_names,
-        allow_control: control,
-    };
     let mut app = App {
-        meaco,
-        printers,
-        awair,
-        bulbs,
-        plugs,
+        devices: Devices {
+            meaco,
+            printers,
+            awair,
+            bulbs,
+            plugs,
+        },
         next_plug_poll: first_plug_poll,
         next_bulb_poll: first_bulb_poll,
         next_light_schedule: Instant::now(),
         next_printer_poll: first_printer_poll,
     };
+    let selection = app.devices.selection();
+    let options = mcp::Options {
+        light_names,
+        allow_control: control,
+    };
     match command {
-        "plugs" => println!("{}", app.call("plug_list", &json!({}))?),
+        "plugs" => println!("{}", app.devices.call("plug_list", &json!({}))?),
         "plug-status" => println!(
             "{}",
-            app.call("plug_status", &json!({"plug":positional[1]}))?
+            app.devices
+                .call("plug_status", &json!({"plug":positional[1]}))?
         ),
-        "plug-check" => println!("{}", app.call("plug_check", &json!({}))?),
+        "plug-check" => println!("{}", app.devices.call("plug_check", &json!({}))?),
         "plug-set" => {
             let power = match positional[2] {
                 "on" => true,
@@ -516,26 +395,23 @@ fn run() -> Result<()> {
             };
             println!(
                 "{}",
-                app.call("plug_apply", &json!({"plug":positional[1],"power":power}))?
+                app.devices
+                    .call("plug_apply", &json!({"plug":positional[1],"power":power}))?
             );
         }
-        "watch-plugs" => loop {
-            let plugs = app
+        "watch-plugs" => {
+            let device = app
+                .devices
                 .plugs
                 .as_mut()
                 .ok_or_else(|| error("No plugs configured"))?;
-            let check = plugs.watch()?;
-            for event in check.events {
-                mcp::write_message(&mut io::stdout().lock(), &event)?;
-            }
-            for unavailable in check.unavailable {
-                diagnostic("Plug unavailable", &unavailable)?;
-            }
-            thread::sleep(Duration::from_secs(plugs.config.poll_seconds));
-        },
+            watch_loop(device, "Plug", false)?;
+        }
+
         "light-plan" => println!(
             "{}",
-            app.bulbs
+            app.devices
+                .bulbs
                 .as_ref()
                 .and_then(|b| b.config.automation.as_ref())
                 .ok_or_else(|| error("No light automation configured"))?
@@ -545,12 +421,12 @@ fn run() -> Result<()> {
             app.tick(false, false, false, true, false)?;
             thread::sleep(Duration::from_secs(1));
         },
-        "status" => println!("{}", app.call("meaco_status", &json!({}))?),
+        "status" => println!("{}", app.devices.call("meaco_status", &json!({}))?),
         "plan" | "apply" => {
             let operation: Operation = positional[1].parse()?;
             println!(
                 "{}",
-                app.call(
+                app.devices.call(
                     if command == "plan" {
                         "meaco_plan"
                     } else {
@@ -560,7 +436,7 @@ fn run() -> Result<()> {
                 )?
             );
         }
-        "awair-status" => println!("{}", app.call("awair_status", &json!({}))?),
+        "awair-status" => println!("{}", app.devices.call("awair_status", &json!({}))?),
         "bulbs" | "bulb-status" | "bulb-set" | "bulb-check" => {
             let (tool, args) = match command {
                 "bulbs" => ("bulb_list", json!({})),
@@ -576,56 +452,41 @@ fn run() -> Result<()> {
                 }
                 _ => ("bulb_check", json!({})),
             };
-            let value = app.call(tool, &args)?;
+            let value = app.devices.call(tool, &args)?;
             println!(
                 "{}",
                 if light_command {
-                    bulb::light_output(value)
+                    naming::light_output(value)
                 } else {
                     value
                 }
             );
         }
-        "watch-bulbs" => loop {
-            let bulbs = app
+        "watch-bulbs" => {
+            let device = app
+                .devices
                 .bulbs
                 .as_mut()
                 .ok_or_else(|| error("No bulbs configured"))?;
-            let check = bulbs.watch()?;
-            for event in check.events {
-                mcp::write_message(&mut io::stdout().lock(), &event)?;
-            }
-            for unavailable in check.unavailable {
-                let value = serde_json::to_value(unavailable)?;
-                let value = if light_command {
-                    bulb::light_output(value)
-                } else {
-                    value
-                };
-                diagnostic("Light unavailable", &value)?;
-            }
-            thread::sleep(Duration::from_secs(bulbs.config.poll_seconds));
-        },
-        "printers" => println!("{}", app.call("printer_list", &json!({}))?),
+            watch_loop(device, "Light", light_command)?;
+        }
+
+        "printers" => println!("{}", app.devices.call("printer_list", &json!({}))?),
         "printer-status" => println!(
             "{}",
-            app.call("printer_status", &json!({"printer":positional[1]}))?
+            app.devices
+                .call("printer_status", &json!({"printer":positional[1]}))?
         ),
-        "printer-check" => println!("{}", app.call("printer_check", &json!({}))?),
-        "watch-printers" => loop {
-            let printers = app
+        "printer-check" => println!("{}", app.devices.call("printer_check", &json!({}))?),
+        "watch-printers" => {
+            let device = app
+                .devices
                 .printers
                 .as_mut()
                 .ok_or_else(|| error("No printers configured"))?;
-            let check = printers.watch()?;
-            for event in check.events {
-                mcp::write_message(&mut io::stdout().lock(), &event)?;
-            }
-            for unavailable in check.unavailable {
-                diagnostic("Printer unavailable", &unavailable)?;
-            }
-            thread::sleep(Duration::from_secs(printers.config.poll_seconds));
-        },
+            watch_loop(device, "Printer", false)?;
+        }
+
         "schedule" => loop {
             app.tick(true, false, false, false, false)?;
             thread::sleep(Duration::from_secs(1));
@@ -689,7 +550,9 @@ fn run() -> Result<()> {
                         {
                             initialized = true;
                         }
-                        mcp::handle_configured(request, tools, |name, args| app.call(name, args))
+                        mcp::handle_selected(request, selection, options, |name, args| {
+                            app.devices.call(name, args)
+                        })
                     }
                     Err(_) => Some(mcp::rpc_error(Value::Null, -32700, "Invalid JSON")),
                 };

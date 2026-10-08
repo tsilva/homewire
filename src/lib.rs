@@ -1,6 +1,7 @@
 pub mod awair;
 pub mod bulb;
 pub mod config;
+pub mod device;
 pub mod fault;
 mod http;
 pub mod ipp;
@@ -8,6 +9,7 @@ pub mod klap;
 pub mod light_schedule;
 pub mod mcp;
 pub mod meaco;
+pub mod naming;
 pub mod plug;
 pub mod printer;
 pub mod schedule;
