@@ -8,7 +8,7 @@ use homewire::{
 };
 use serde_json::{Value, json};
 use std::{
-    io::{self, BufReader},
+    io::{self, BufReader, Write},
     net::SocketAddr,
     path::PathBuf,
     sync::mpsc,
@@ -198,10 +198,10 @@ impl App {
             let check = plugs.watch()?;
             self.next_plug_poll = Instant::now() + Duration::from_secs(plugs.config.poll_seconds);
             for event in check.events {
-                eprintln!("Plug event: {}", serde_json::to_string(&event)?);
+                diagnostic("Plug event", &event)?;
             }
             for unavailable in check.unavailable {
-                eprintln!("Plug unavailable: {}", serde_json::to_string(&unavailable)?);
+                diagnostic("Plug unavailable", &unavailable)?;
             }
         }
         if watching && Instant::now() >= self.next_printer_poll {
@@ -214,13 +214,10 @@ impl App {
                 Instant::now() + Duration::from_secs(printers.config.poll_seconds);
             // Stderr preserves the MCP stdout transport; no outbound notifications.
             for event in check.events {
-                eprintln!("Printer event: {}", serde_json::to_string(&event)?);
+                diagnostic("Printer event", &event)?;
             }
             for unavailable in check.unavailable {
-                eprintln!(
-                    "Printer unavailable: {}",
-                    serde_json::to_string(&unavailable)?
-                );
+                diagnostic("Printer unavailable", &unavailable)?;
             }
         }
         if watching_bulbs && Instant::now() >= self.next_bulb_poll {
@@ -231,15 +228,26 @@ impl App {
             let check = bulbs.watch()?;
             self.next_bulb_poll = Instant::now() + Duration::from_secs(bulbs.config.poll_seconds);
             for event in check.events {
-                eprintln!("Bulb event: {}", serde_json::to_string(&event)?);
+                diagnostic("Bulb event", &event)?;
             }
             for unavailable in check.unavailable {
-                eprintln!("Bulb unavailable: {}", serde_json::to_string(&unavailable)?);
+                diagnostic("Bulb unavailable", &unavailable)?;
             }
         }
         Ok(())
     }
 }
+fn diagnostic(label: &str, value: &impl serde::Serialize) -> Result<()> {
+    let mut stderr = io::stderr().lock();
+    write!(stderr, "{label}: ")?;
+    mcp::write_message(&mut stderr, value)
+}
+
+enum Input {
+    Direct(BufReader<io::Stdin>),
+    Background(mpsc::Receiver<Result<Option<String>>>),
+}
+
 fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() || args.iter().any(|a| a == "--help" || a == "-h") {
@@ -518,10 +526,10 @@ fn run() -> Result<()> {
                 .ok_or_else(|| error("No plugs configured"))?;
             let check = plugs.watch()?;
             for event in check.events {
-                println!("{}", serde_json::to_string(&event)?);
+                mcp::write_message(&mut io::stdout().lock(), &event)?;
             }
             for unavailable in check.unavailable {
-                eprintln!("Plug unavailable: {}", serde_json::to_string(&unavailable)?);
+                diagnostic("Plug unavailable", &unavailable)?;
             }
             thread::sleep(Duration::from_secs(plugs.config.poll_seconds));
         },
@@ -585,7 +593,7 @@ fn run() -> Result<()> {
                 .ok_or_else(|| error("No bulbs configured"))?;
             let check = bulbs.watch()?;
             for event in check.events {
-                println!("{}", serde_json::to_string(&event)?);
+                mcp::write_message(&mut io::stdout().lock(), &event)?;
             }
             for unavailable in check.unavailable {
                 let value = serde_json::to_value(unavailable)?;
@@ -594,7 +602,7 @@ fn run() -> Result<()> {
                 } else {
                     value
                 };
-                eprintln!("Light unavailable: {value}");
+                diagnostic("Light unavailable", &value)?;
             }
             thread::sleep(Duration::from_secs(bulbs.config.poll_seconds));
         },
@@ -611,13 +619,10 @@ fn run() -> Result<()> {
                 .ok_or_else(|| error("No printers configured"))?;
             let check = printers.watch()?;
             for event in check.events {
-                println!("{}", serde_json::to_string(&event)?);
+                mcp::write_message(&mut io::stdout().lock(), &event)?;
             }
             for unavailable in check.unavailable {
-                eprintln!(
-                    "Printer unavailable: {}",
-                    serde_json::to_string(&unavailable)?
-                );
+                diagnostic("Printer unavailable", &unavailable)?;
             }
             thread::sleep(Duration::from_secs(printers.config.poll_seconds));
         },
@@ -626,57 +631,70 @@ fn run() -> Result<()> {
             thread::sleep(Duration::from_secs(1));
         },
         "serve" => {
-            let (sender, receiver) = mpsc::sync_channel(1);
-            thread::Builder::new()
-                .name("mcp-stdin".into())
-                .stack_size(128 * 1024)
-                .spawn(move || {
-                    let mut reader = BufReader::new(io::stdin());
-                    loop {
-                        let item = mcp::read_message(&mut reader);
-                        let finished = !matches!(&item, Ok(Some(_)));
-                        if sender.send(item).is_err() || finished {
-                            break;
+            let background =
+                scheduling || watching || watching_bulbs || light_scheduling || watching_plugs;
+            // Idle MCP needs no worker, queue or periodic wakeup.
+            let mut input = if background {
+                let (sender, receiver) = mpsc::sync_channel(1);
+                thread::Builder::new()
+                    .name("mcp-stdin".into())
+                    .stack_size(128 * 1024)
+                    .spawn(move || {
+                        let mut reader = BufReader::with_capacity(1024, io::stdin());
+                        loop {
+                            let item = mcp::read_message(&mut reader);
+                            let finished = !matches!(&item, Ok(Some(_)));
+                            if sender.send(item).is_err() || finished {
+                                break;
+                            }
                         }
-                    }
-                })?;
+                    })?;
+                Input::Background(receiver)
+            } else {
+                Input::Direct(BufReader::with_capacity(1024, io::stdin()))
+            };
             let mut stdout = io::stdout().lock();
             let mut initialized = false;
             loop {
                 // Handshake must not wait behind printer network timeouts or controls.
-                app.tick(
-                    scheduling && initialized,
-                    watching && initialized,
-                    watching_bulbs && initialized,
-                    light_scheduling && initialized,
-                    watching_plugs && initialized,
-                )?;
-                match receiver.recv_timeout(Duration::from_secs(1)) {
-                    Ok(Ok(Some(line))) => {
-                        let parsed = serde_json::from_str::<Value>(&line);
-                        drop(line);
-                        let response = match parsed {
-                            Ok(request) => {
-                                if request.get("jsonrpc") == Some(&json!("2.0"))
-                                    && request.get("method")
-                                        == Some(&json!("notifications/initialized"))
-                                    && request.get("id").is_none()
-                                {
-                                    initialized = true;
-                                }
-                                mcp::handle_configured(request, tools, |name, args| {
-                                    app.call(name, args)
-                                })
-                            }
-                            Err(_) => Some(mcp::rpc_error(Value::Null, -32700, "Invalid JSON")),
-                        };
-                        if let Some(response) = response {
-                            mcp::write_message(&mut stdout, &response)?;
+                if background {
+                    app.tick(
+                        scheduling && initialized,
+                        watching && initialized,
+                        watching_bulbs && initialized,
+                        light_scheduling && initialized,
+                        watching_plugs && initialized,
+                    )?;
+                }
+                let line = match &mut input {
+                    Input::Direct(reader) => mcp::read_message(reader)?,
+                    Input::Background(receiver) => {
+                        match receiver.recv_timeout(Duration::from_secs(1)) {
+                            Ok(item) => item?,
+                            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                            Err(mpsc::RecvTimeoutError::Timeout) => continue,
                         }
                     }
-                    Ok(Err(e)) => return Err(e),
-                    Ok(Ok(None)) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                };
+                let Some(line) = line else {
+                    break;
+                };
+                let parsed = serde_json::from_str::<Value>(&line);
+                drop(line);
+                let response = match parsed {
+                    Ok(request) => {
+                        if request.get("jsonrpc") == Some(&json!("2.0"))
+                            && request.get("method") == Some(&json!("notifications/initialized"))
+                            && request.get("id").is_none()
+                        {
+                            initialized = true;
+                        }
+                        mcp::handle_configured(request, tools, |name, args| app.call(name, args))
+                    }
+                    Err(_) => Some(mcp::rpc_error(Value::Null, -32700, "Invalid JSON")),
+                };
+                if let Some(response) = response {
+                    mcp::write_message(&mut stdout, &response)?;
                 }
             }
         }

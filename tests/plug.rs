@@ -510,6 +510,69 @@ fn watcher_does_not_block_mcp_handshake_before_initialized() -> Result<()> {
 }
 
 #[test]
+fn stdio_modes_preserve_errors_notifications_and_final_unterminated_message() -> Result<()> {
+    for background in [false, true] {
+        let file = Private::new(Model::P100, Some("127.0.0.1:1".parse()?))?;
+        let mut command = Command::new(env!("CARGO_BIN_EXE_homewire"));
+        command.args(["--plugs", file.path.to_str().expect("path"), "serve"]);
+        if background {
+            command.arg("--watch-plugs");
+        }
+        let mut server = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let mut stdin = server.stdin.take().expect("stdin");
+        stdin.write_all(b"invalid-json\n{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\"}\n{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"ping\"}")?;
+        drop(stdin);
+        let output = server.wait_with_output()?;
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        let responses: Vec<Value> = String::from_utf8(output.stdout)?
+            .lines()
+            .map(serde_json::from_str)
+            .collect::<std::result::Result<_, _>>()?;
+        assert_eq!(responses.len(), 2, "notifications produce no output");
+        assert_eq!(responses[0]["error"]["code"], -32700);
+        assert_eq!(responses[1]["id"], 7);
+        assert_eq!(responses[1]["result"], json!({}));
+    }
+    Ok(())
+}
+
+#[test]
+fn stdio_modes_reject_oversized_and_non_utf8_input() -> Result<()> {
+    for background in [false, true] {
+        for input in [
+            vec![b'x'; homewire::mcp::MAX_MESSAGE + 1],
+            vec![0xff, b'\n'],
+        ] {
+            let file = Private::new(Model::P100, Some("127.0.0.1:1".parse()?))?;
+            let mut command = Command::new(env!("CARGO_BIN_EXE_homewire"));
+            command.args(["--plugs", file.path.to_str().expect("path"), "serve"]);
+            if background {
+                command.arg("--watch-plugs");
+            }
+            let mut server = command
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()?;
+            server.stdin.take().expect("stdin").write_all(&input)?;
+            let output = server.wait_with_output()?;
+            assert!(!output.status.success());
+            assert!(
+                output.stdout.is_empty(),
+                "transport errors never contaminate stdout"
+            );
+            assert!(!output.stderr.is_empty());
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn transient_handshake_rejection_retries_only_authentication_and_only_once() -> Result<()> {
     use homewire::klap::{Session, hash};
     for fail_again in [false, true] {

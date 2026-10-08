@@ -7,6 +7,30 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// Configured groups contain at most eight devices: a stack array avoids
+/// allocating sets just to check names and identities during startup.
+pub(crate) fn valid_unique_labels<'a>(
+    labels: impl Iterator<Item = &'a str>,
+    max_length: usize,
+    separators: &[u8],
+) -> bool {
+    let mut seen = [""; 8];
+    for (index, label) in labels.enumerate() {
+        if index >= seen.len()
+            || label.is_empty()
+            || label.len() > max_length
+            || !label
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || separators.contains(&b))
+            || seen[..index].contains(&label)
+        {
+            return false;
+        }
+        seen[index] = label;
+    }
+    true
+}
+
 pub(crate) fn save_private(path: &Path, value: &impl Serialize) -> Result<()> {
     let bytes = serde_json::to_vec(value)?;
     if bytes.len() > 8192 {

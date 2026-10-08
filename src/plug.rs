@@ -1,13 +1,12 @@
 //! Tapo P100/P110 relays, local P110 metering, and reported overload events.
 use crate::{
     Result,
-    config::{private_permissions, read_bounded},
+    config::{private_permissions, read_bounded, valid_unique_labels},
     error, fault, klap,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeSet,
     net::{IpAddr, SocketAddr},
     path::Path,
     thread,
@@ -82,23 +81,15 @@ impl Config {
                 "Configure 1–8 plugs; timeout 1–30 seconds and greater than settle (0–10); poll 5–300 seconds",
             ));
         }
-        let mut names = BTreeSet::new();
-        let mut ids = BTreeSet::new();
+        if !valid_unique_labels(self.plugs.iter().map(|d| d.name.as_str()), 32, b"-_")
+            || !valid_unique_labels(self.plugs.iter().map(|d| d.device_id.as_str()), 64, b"")
+        {
+            return Err(error(
+                "Invalid or duplicate plug name/device identity, or invalid port",
+            ));
+        }
         for p in &self.plugs {
-            if p.name.is_empty()
-                || p.name.len() > 32
-                || !p
-                    .name
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
-                || !names.insert(&p.name)
-                || p.device_id.is_empty()
-                || p.device_id.len() > 64
-                || !p.device_id.bytes().all(|b| b.is_ascii_alphanumeric())
-                || !ids.insert(&p.device_id)
-                || p.port == 0
-                || p.connect.is_some_and(|a| a.port() == 0)
-            {
+            if p.port == 0 || p.connect.is_some_and(|a| a.port() == 0) {
                 return Err(error(
                     "Invalid or duplicate plug name/device identity, or invalid port",
                 ));

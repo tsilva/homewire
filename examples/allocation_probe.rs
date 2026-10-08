@@ -1,5 +1,10 @@
 //! Development-only allocation probe; no network queries or device controls.
-use homewire::{Result, fault::Monitor, klap::Session};
+use homewire::{
+    Result,
+    fault::Monitor,
+    klap::Session,
+    mcp::{self, ToolSet},
+};
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed},
@@ -68,8 +73,48 @@ fn main() -> Result<()> {
     });
     assert_eq!(result?, br#"{"method":"get_device_info"}"#.len());
     assert_eq!(decrypt_allocations, 0, "KLAP responses reuse their storage");
+    let request = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/list"});
+    let tools = ToolSet {
+        meaco: true,
+        printers: true,
+        awair: true,
+        bulbs: true,
+        plugs: true,
+        light_names: true,
+        allow_control: true,
+    };
+    let (response, list_allocations, list_bytes) =
+        measure(|| mcp::handle_configured(request, tools, |_, _| panic!("No device I/O")));
+    assert_eq!(
+        response.expect("response")["result"]["tools"]
+            .as_array()
+            .expect("tools")
+            .len(),
+        15
+    );
+    assert!(list_allocations <= 400, "MCP tool-list allocation budget");
+    let mut lights: serde_json::Value = serde_json::from_str(include_str!("lights.json"))?;
+    let mut plugs: serde_json::Value = serde_json::from_str(include_str!("plugs.json"))?;
+    for (value, key) in [(&mut lights, "lights"), (&mut plugs, "plugs")] {
+        for endpoint in value[key].as_array_mut().expect("endpoints") {
+            endpoint["auth_hash"] = serde_json::json!("00".repeat(32));
+        }
+    }
+    let lights: homewire::bulb::Config = serde_json::from_value(lights)?;
+    let plugs: homewire::plug::Config = serde_json::from_value(plugs)?;
+    let printers: homewire::printer::Config = serde_json::from_str(include_str!("printers.json"))?;
+    let (result, validation_allocations, validation_bytes) = measure(|| -> Result<()> {
+        lights.validate()?;
+        plugs.validate()?;
+        printers.validate()
+    });
+    result?;
+    assert_eq!(
+        validation_allocations, 0,
+        "valid configuration checks use stack storage"
+    );
     println!(
-        "{{\"unchanged_fault\":{{\"allocations\":{fault_allocations},\"requested_bytes\":{fault_bytes}}},\"klap_encrypt\":{{\"allocations\":{encrypt_allocations},\"requested_bytes\":{encrypt_bytes}}},\"klap_decrypt_in_place\":{{\"allocations\":{decrypt_allocations},\"requested_bytes\":{decrypt_bytes}}}}}"
+        "{{\"unchanged_fault\":{{\"allocations\":{fault_allocations},\"requested_bytes\":{fault_bytes}}},\"klap_encrypt\":{{\"allocations\":{encrypt_allocations},\"requested_bytes\":{encrypt_bytes}}},\"klap_decrypt_in_place\":{{\"allocations\":{decrypt_allocations},\"requested_bytes\":{decrypt_bytes}}},\"mcp_tools_list\":{{\"allocations\":{list_allocations},\"requested_bytes\":{list_bytes}}},\"config_validation\":{{\"allocations\":{validation_allocations},\"requested_bytes\":{validation_bytes}}}}}"
     );
     Ok(())
 }

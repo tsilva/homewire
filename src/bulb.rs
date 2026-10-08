@@ -1,13 +1,12 @@
 //! Named Tapo L430C/L900 lights, verified controls and retained overheating faults.
 use crate::{
     Result,
-    config::{private_permissions, read_bounded},
+    config::{private_permissions, read_bounded, valid_unique_labels},
     error, fault, klap, light_schedule,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeSet,
     net::{IpAddr, SocketAddr},
     path::Path,
     thread,
@@ -95,23 +94,15 @@ impl Config {
                 "Configure 1–8 bulbs; timeout 1–30 seconds and greater than settle (0–10); poll 5–300 seconds",
             ));
         }
-        let mut names = BTreeSet::new();
-        let mut ids = BTreeSet::new();
+        if !valid_unique_labels(self.bulbs.iter().map(|d| d.name.as_str()), 32, b"-_")
+            || !valid_unique_labels(self.bulbs.iter().map(|d| d.device_id.as_str()), 64, b"")
+        {
+            return Err(error(
+                "Invalid or duplicate bulb name/device identity, or invalid port",
+            ));
+        }
         for bulb in &self.bulbs {
-            if bulb.name.is_empty()
-                || bulb.name.len() > 32
-                || !bulb
-                    .name
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
-                || !names.insert(&bulb.name)
-                || bulb.device_id.is_empty()
-                || bulb.device_id.len() > 64
-                || !bulb.device_id.bytes().all(|b| b.is_ascii_alphanumeric())
-                || !ids.insert(&bulb.device_id)
-                || bulb.port == 0
-                || bulb.connect.is_some_and(|a| a.port() == 0)
-            {
+            if bulb.port == 0 || bulb.connect.is_some_and(|a| a.port() == 0) {
                 return Err(error(
                     "Invalid or duplicate bulb name/device identity, or invalid port",
                 ));

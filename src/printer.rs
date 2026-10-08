@@ -1,7 +1,7 @@
 //! Named printers, read-only status, and durable fault transition monitoring.
 use crate::{
     Result,
-    config::{private_permissions, read_bounded},
+    config::{private_permissions, read_bounded, valid_unique_labels},
     error, fault,
     ipp::{self, Attributes},
 };
@@ -65,20 +65,12 @@ impl Config {
                 "Configure 1–8 printers; timeout 1–30 seconds; poll interval 5–300 seconds",
             ));
         }
-        let mut names = BTreeSet::new();
+        if !valid_unique_labels(self.printers.iter().map(|p| p.name.as_str()), 32, b"-_") {
+            return Err(error(
+                "Printer names must be unique, with 1–32 letters, digits, hyphens or underscores",
+            ));
+        }
         for printer in &self.printers {
-            if printer.name.is_empty()
-                || printer.name.len() > 32
-                || !printer
-                    .name
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
-                || !names.insert(&printer.name)
-            {
-                return Err(error(
-                    "Printer names must be unique, with 1–32 letters, digits, hyphens or underscores",
-                ));
-            }
             if printer.port == 0
                 || printer.connect.is_some_and(|a| a.port() == 0)
                 || !printer.path.starts_with('/')
