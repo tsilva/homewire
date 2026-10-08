@@ -376,6 +376,33 @@ impl fault::Target for Endpoint {
 }
 
 impl Adapter for Manager {
+    const SUPPORT: crate::entity::Support = crate::entity::Support::READ;
+    fn entities<'a>(&'a self, visit: &mut impl FnMut(crate::entity::Entity<'a>)) {
+        use crate::{
+            device::Family,
+            entity::{Capabilities, Domain, Entity},
+        };
+        for (index, endpoint) in self.config.printers.iter().enumerate() {
+            visit(Entity::new(
+                Family::Printers,
+                index,
+                Domain::Printer,
+                &endpoint.name,
+                "unknown",
+                Capabilities::Read,
+            ));
+        }
+    }
+    fn read_device(&mut self, index: usize) -> Result<Value> {
+        let name = &self
+            .config
+            .printers
+            .get(index)
+            .ok_or_else(|| error("Unknown printer"))?
+            .name;
+        Ok(serde_json::to_value(self.status(name)?)?)
+    }
+
     const TOOLS: &'static [Tool] = &[
         Tool {
             name: "printer_list",

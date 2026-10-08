@@ -403,6 +403,67 @@ impl fault::Target for Endpoint {
 }
 
 impl Adapter for Manager {
+    const SUPPORT: crate::entity::Support = crate::entity::Support::SWITCH;
+    fn entities<'a>(&'a self, visit: &mut impl FnMut(crate::entity::Entity<'a>)) {
+        use crate::{
+            device::Family,
+            entity::{Capabilities, Domain, Entity},
+        };
+        for (index, endpoint) in self.config.plugs.iter().enumerate() {
+            let base = Entity::new(
+                Family::Plugs,
+                index,
+                Domain::Switch,
+                &endpoint.name,
+                endpoint.model.as_str(),
+                Capabilities::Power,
+            );
+            visit(base);
+            if endpoint.model == Model::P110 {
+                for (suffix, field, unit) in [
+                    ("_power", "/energy/power_w", "W"),
+                    ("_voltage", "/energy/voltage_v", "V"),
+                    ("_current", "/energy/current_a", "A"),
+                    ("_today_energy", "/energy/today_kwh", "kWh"),
+                    ("_month_energy", "/energy/month_kwh", "kWh"),
+                    ("_total_energy", "/energy/total_kwh", "kWh"),
+                ] {
+                    visit(base.sensor(suffix, field, unit));
+                }
+            }
+        }
+    }
+    fn read_device(&mut self, index: usize) -> Result<Value> {
+        let name = &self
+            .config
+            .plugs
+            .get(index)
+            .ok_or_else(|| error("Unknown plug"))?
+            .name;
+        Ok(serde_json::to_value(self.status(name)?)?)
+    }
+
+    fn control_device(
+        &mut self,
+        index: usize,
+        command: crate::entity::Command,
+        args: &Value,
+    ) -> Result<Value> {
+        if !matches!(command, crate::entity::Command::Power) {
+            return Err(error("Unsupported plug command"));
+        }
+        let name = &self
+            .config
+            .plugs
+            .get(index)
+            .ok_or_else(|| error("Unknown plug"))?
+            .name;
+        let power = args["power"]
+            .as_bool()
+            .ok_or_else(|| error("Expected absolute power"))?;
+        Ok(serde_json::to_value(self.apply(name, power)?)?)
+    }
+
     const TOOLS: &'static [Tool] = &[
         Tool {
             name: "plug_list",

@@ -16,9 +16,16 @@ and absolute wake/sleep. The TV workflow composes those adapters and a shared pl
 - Keep messages, queues, caches, and retained state bounded. Measure resident memory
   on the target device before claiming a memory footprint.
 - Keep device protocol code separate from Meaco behavior, scheduling, and MCP.
-- New device families implement `device::Adapter`, own their command definitions
-  and validation, and register concrete types in `src/device.rs`. Keep discovery
-  and dispatch generated from that catalog; do not add family routing to MCP.
+- New device families implement `device::Adapter`, declare borrowed capability
+  entities/static `Support`, own protocol validation, and register concrete types
+  in `src/device.rs`. Reuse standard category tools; add no family routing to MCP.
+- Compose household behavior in `routine`; keep device protocols inside adapters.
+  Batch entity reads once per physical device and release snapshots afterwards.
+  Retain no entity-state/schema cache or allocated runtime registry.
+- TV owns child power controls in standard and legacy interfaces. Require explicit
+  --maintenance for direct media/TV-outlet power; preserve device guards.
+- Wait for the next enabled job deadline instead of periodic per-second wakeups.
+  Idle MCP and pre-initialization wait directly for input.
 - Use `device::Monitored` for supported fault monitoring and shared `fault` logic.
   Keep optional capabilities separate; use static dispatch and bounded storage.
 - Read status and verify outcomes. Never blindly retry sleep: it is a toggle.

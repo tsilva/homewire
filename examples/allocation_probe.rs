@@ -93,6 +93,28 @@ fn main() -> Result<()> {
         15
     );
     assert!(list_allocations <= 400, "MCP tool-list allocation budget");
+    let selection = homewire::device::Selection::from_filter(|name| {
+        matches!(name, "meaco" | "bulbs" | "plugs" | "printers" | "awair")
+    });
+    let request = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/list"});
+    let (response, standard_allocations, standard_bytes) = measure(|| {
+        mcp::handle_capabilities(request, selection, true, |_, _| panic!("No device I/O"))
+    });
+    assert_eq!(
+        response.expect("response")["result"]["tools"]
+            .as_array()
+            .expect("tools")
+            .len(),
+        7
+    );
+    assert!(
+        standard_allocations < list_allocations,
+        "standard interface reduces schema allocations"
+    );
+    assert!(
+        standard_bytes < list_bytes,
+        "standard interface reduces transient schema storage"
+    );
     let mut lights: serde_json::Value = serde_json::from_str(include_str!("lights.json"))?;
     let mut plugs: serde_json::Value = serde_json::from_str(include_str!("plugs.json"))?;
     for (value, key) in [(&mut lights, "lights"), (&mut plugs, "plugs")] {
@@ -114,7 +136,7 @@ fn main() -> Result<()> {
         "valid configuration checks use stack storage"
     );
     println!(
-        "{{\"unchanged_fault\":{{\"allocations\":{fault_allocations},\"requested_bytes\":{fault_bytes}}},\"klap_encrypt\":{{\"allocations\":{encrypt_allocations},\"requested_bytes\":{encrypt_bytes}}},\"klap_decrypt_in_place\":{{\"allocations\":{decrypt_allocations},\"requested_bytes\":{decrypt_bytes}}},\"mcp_tools_list\":{{\"allocations\":{list_allocations},\"requested_bytes\":{list_bytes}}},\"config_validation\":{{\"allocations\":{validation_allocations},\"requested_bytes\":{validation_bytes}}}}}"
+        "{{\"unchanged_fault\":{{\"allocations\":{fault_allocations},\"requested_bytes\":{fault_bytes}}},\"klap_encrypt\":{{\"allocations\":{encrypt_allocations},\"requested_bytes\":{encrypt_bytes}}},\"klap_decrypt_in_place\":{{\"allocations\":{decrypt_allocations},\"requested_bytes\":{decrypt_bytes}}},\"mcp_tools_list\":{{\"allocations\":{list_allocations},\"requested_bytes\":{list_bytes}}},\"standard_mcp_tools_list\":{{\"allocations\":{standard_allocations},\"requested_bytes\":{standard_bytes}}},\"config_validation\":{{\"allocations\":{validation_allocations},\"requested_bytes\":{validation_bytes}}}}}"
     );
     Ok(())
 }

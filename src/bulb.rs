@@ -532,6 +532,54 @@ impl fault::Target for Endpoint {
 }
 
 impl Adapter for Manager {
+    const SUPPORT: crate::entity::Support = crate::entity::Support::LIGHT;
+    fn entities<'a>(&'a self, visit: &mut impl FnMut(crate::entity::Entity<'a>)) {
+        use crate::{
+            device::Family,
+            entity::{Capabilities, Domain, Entity},
+        };
+        for (index, endpoint) in self.config.bulbs.iter().enumerate() {
+            visit(Entity::new(
+                Family::Bulbs,
+                index,
+                Domain::Light,
+                &endpoint.name,
+                endpoint.model.as_str(),
+                Capabilities::Light {
+                    max_temperature_k: endpoint.model.max_temperature(),
+                    fixed_settings_require_effects_off: endpoint.model == Model::L900,
+                },
+            ));
+        }
+    }
+    fn read_device(&mut self, index: usize) -> Result<Value> {
+        let name = &self
+            .config
+            .bulbs
+            .get(index)
+            .ok_or_else(|| error("Unknown light"))?
+            .name;
+        Ok(serde_json::to_value(self.status(name)?)?)
+    }
+    fn control_device(
+        &mut self,
+        index: usize,
+        command: crate::entity::Command,
+        args: &Value,
+    ) -> Result<Value> {
+        if !matches!(command, crate::entity::Command::Light) {
+            return Err(error("Unsupported light command"));
+        }
+        let name = &self
+            .config
+            .bulbs
+            .get(index)
+            .ok_or_else(|| error("Unknown light"))?
+            .name;
+        let change: Change = serde::Deserialize::deserialize(&args["settings"])?;
+        Ok(serde_json::to_value(self.apply(name, &change)?)?)
+    }
+
     const TOOLS: &'static [Tool] = &[
         Tool {
             name: "bulb_list",
@@ -597,7 +645,7 @@ impl crate::device::Monitored for Manager {
     }
 }
 
-const SETTINGS_FIELD: Field = Field {
+pub(crate) const SETTINGS_FIELD: Field = Field {
     name: "settings",
     schema: || json!({"type":"object","properties":{"power":{"type":"boolean"},"brightness_percent":{"type":"integer","minimum":1,"maximum":100},"hue":{"type":"integer","minimum":0,"maximum":360},"saturation_percent":{"type":"integer","minimum":0,"maximum":100},"color_temperature_k":{"type":"integer","minimum":2500,"maximum":9000}},"minProperties":1,"additionalProperties":false,"dependentRequired":{"hue":["saturation_percent"],"saturation_percent":["hue"]}}),
     valid: |v| <Change as serde::Deserialize>::deserialize(v).is_ok_and(|c| c.validate().is_ok()),

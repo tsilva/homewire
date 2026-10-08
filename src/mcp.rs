@@ -91,9 +91,46 @@ pub struct Options {
 
 /// MCP knows framing, permission policy and presentation, not adapter families.
 pub fn handle_selected(
-    mut request: Value,
+    request: Value,
     selection: Selection,
     options: Options,
+    call: impl FnMut(&str, &Value) -> Result<Value>,
+) -> Option<Value> {
+    handle_tools(request, selection.tools(), options, true, call)
+}
+
+/// Standard capability/routine interface. Legacy adapter tools are opt-in.
+pub fn handle_entities(
+    request: Value,
+    devices: &mut crate::device::Devices,
+    allow_control: bool,
+) -> Option<Value> {
+    handle_capabilities(request, devices.selection(), allow_control, |name, args| {
+        crate::entity::call(devices, name, args)
+    })
+}
+pub fn handle_capabilities(
+    request: Value,
+    selection: Selection,
+    allow_control: bool,
+    call: impl FnMut(&str, &Value) -> Result<Value>,
+) -> Option<Value> {
+    handle_tools(
+        request,
+        crate::entity::tools(selection),
+        Options {
+            allow_control,
+            light_names: false,
+        },
+        false,
+        call,
+    )
+}
+fn handle_tools(
+    mut request: Value,
+    tools: impl Iterator<Item = &'static crate::device::Tool> + Clone,
+    options: Options,
+    legacy: bool,
     mut call: impl FnMut(&str, &Value) -> Result<Value>,
 ) -> Option<Value> {
     let id = request.get_mut("id").map(Value::take);
@@ -133,12 +170,12 @@ pub fn handle_selected(
             };
             json!({"protocolVersion":version,"capabilities":{"tools":{"listChanged":false}},
                 "serverInfo":{"name":"homewire","version":env!("CARGO_PKG_VERSION")},
-                "instructions":"Configured home device tools. Plug apply uses absolute relay power and verifies outcomes; P110 overload checks retain faults and energy reads preserve units. Bulb apply uses absolute settings and verifies outcomes; bulb checks retain overheating faults across missing readings. Printer tools read IPP status only. Awair returns fresh local sensor measurements with explicit units; invalid or stale readings fail. Meaco apply verifies each step and never retries an uncertain sleep toggle. Printer checks retain faults across missing readings and debounce transitions."})
+                "instructions":"Configured home capabilities and deterministic routines. Discover entities/routines before acting. Unknown or unavailable state never proves power-off or recovery. Controls require explicit permission, identity checks and verification; uncertain controls are never automatically replayed. TV routine-owned power requires maintenance access for direct controls. Monitoring events go to stderr."})
         }
         "ping" => json!({}),
         "tools/list" => {
             let mut result = json!({"tools":null});
-            result["tools"] = Value::Array(tool_list(selection, options));
+            result["tools"] = Value::Array(tool_list(tools.clone(), options));
             result
         }
         "tools/call" => {
@@ -150,11 +187,19 @@ pub fn handle_selected(
                 .pointer("/params/name")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            let name = naming::canonical_tool(raw_name);
-            let Some(tool) = selection.tools().find(|tool| tool.name == name) else {
+            let name = if legacy {
+                naming::canonical_tool(raw_name)
+            } else {
+                raw_name
+            };
+            let Some(tool) = tools.clone().find(|tool| tool.name == name) else {
                 return Some(rpc_error(id, -32602, "Unknown tool"));
             };
-            let args = match naming::light_arguments(raw_name, args) {
+            let args = match if legacy {
+                naming::light_arguments(raw_name, args)
+            } else {
+                Ok(args)
+            } {
                 Ok(args) => args,
                 Err(_) => return Some(rpc_error(id, -32602, "Use light for light tools")),
             };
@@ -166,7 +211,7 @@ pub fn handle_selected(
             } else {
                 match call(name, &args) {
                     Ok(value) => {
-                        let value = if raw_name.starts_with("light_") {
+                        let value = if legacy && raw_name.starts_with("light_") {
                             naming::light_output(value)
                         } else {
                             value
@@ -188,10 +233,13 @@ pub fn handle_selected(
     response["result"] = result;
     Some(response)
 }
-fn tool_list(selection: Selection, options: Options) -> Vec<Value> {
+fn tool_list(
+    catalog: impl Iterator<Item = &'static crate::device::Tool> + Clone,
+    options: Options,
+) -> Vec<Value> {
     let visible = |tool: &&crate::device::Tool| tool.hints.read_only || options.allow_control;
-    let mut tools = Vec::with_capacity(selection.tools().filter(visible).count());
-    for tool in selection.tools().filter(visible) {
+    let mut tools = Vec::with_capacity(catalog.clone().filter(visible).count());
+    for tool in catalog.filter(visible) {
         let advertised_name = if options.light_names {
             match tool.name {
                 "bulb_list" => "light_list",

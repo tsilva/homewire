@@ -138,6 +138,38 @@ impl Status {
 }
 
 impl Adapter for Config {
+    const SUPPORT: crate::entity::Support = crate::entity::Support::READ;
+    fn entities<'a>(&'a self, visit: &mut impl FnMut(crate::entity::Entity<'a>)) {
+        use crate::{
+            device::Family,
+            entity::{Capabilities, Domain, Entity},
+        };
+        let base = Entity::new(
+            Family::Awair,
+            0,
+            Domain::Sensor,
+            "awair",
+            "Element",
+            Capabilities::Read,
+        );
+        for (suffix, field, unit) in [
+            ("_temperature", "temperature_c", "°C"),
+            ("_humidity", "humidity_percent", "%"),
+            ("_co2", "co2_ppm", "ppm"),
+            ("_tvoc", "tvoc_ppb", "ppb"),
+            ("_pm25", "pm25_ug_m3", "µg/m³"),
+            ("_score", "awair_score", "points"),
+        ] {
+            visit(base.sensor(suffix, field, unit));
+        }
+    }
+    fn read_device(&mut self, index: usize) -> Result<Value> {
+        if index != 0 {
+            return Err(error("Unknown Awair device"));
+        }
+        Ok(serde_json::to_value(self.read()?)?)
+    }
+
     const TOOLS: &'static [Tool] = &[Tool {
         name: "awair_status",
         description: "Read fresh Awair Element measurements: temperature (Celsius), humidity (%), CO2 (ppm), TVOC (ppb), PM2.5 (ug/m3), score, and timestamps. Invalid/stale readings fail. No device controls.",

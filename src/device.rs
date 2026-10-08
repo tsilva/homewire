@@ -9,10 +9,25 @@ use std::path::Path;
 /// Both CLI and MCP use this interface; protocol details stay inside the family.
 pub trait Adapter: Sized {
     const TOOLS: &'static [Tool];
+    const SUPPORT: crate::entity::Support;
     fn open(path: &Path) -> Result<Self>;
     /// Implementation hook for validated canonical commands. Callers should
     /// use `Devices::call`; transport permission policy remains outside adapters.
     fn execute(&mut self, name: &str, arguments: &Value) -> Result<Value>;
+    /// Borrowed entity descriptors; no retained registry or device I/O.
+    fn entities<'a>(&'a self, visit: &mut impl FnMut(crate::entity::Entity<'a>));
+    /// One fresh physical-device snapshot, shared across requested entities.
+    fn read_device(&mut self, _index: usize) -> Result<Value> {
+        Err(error("This adapter has no readable physical device"))
+    }
+    fn control_device(
+        &mut self,
+        _index: usize,
+        _command: crate::entity::Command,
+        _arguments: &Value,
+    ) -> Result<Value> {
+        Err(error("This device has no requested control capability"))
+    }
 }
 
 /// Optional monitoring capability, implemented only by families with faults.
@@ -97,10 +112,9 @@ impl Input {
             }
             Self::Named { key, extra, error } => {
                 if object.len() != 1 + usize::from(extra.is_some())
-                    || !object
-                        .get(key)
-                        .and_then(Value::as_str)
-                        .is_some_and(|s| !s.is_empty() && s.len() <= 32)
+                    || !object.get(key).and_then(Value::as_str).is_some_and(|s| {
+                        !s.is_empty() && s.len() <= if key == "entity" { 96 } else { 32 }
+                    })
                 {
                     return Err(error);
                 }
@@ -126,7 +140,7 @@ impl Input {
         let mut required =
             Vec::with_capacity(usize::from(key.is_some()) + usize::from(field.is_some()));
         if let Some(key) = key {
-            schema["properties"][key] = json!({"type":"string","minLength":1,"maxLength":32});
+            schema["properties"][key] = json!({"type":"string","minLength":1,"maxLength":if key == "entity" { 96 } else { 32 }});
             required.push(Value::String(key.into()));
         }
         if let Some(field) = field {
@@ -148,12 +162,24 @@ pub struct Tool {
 // This single declaration generates storage, discovery and dispatch. Adding a
 // family requires registering its concrete type here, never editing MCP routing.
 macro_rules! static_adapters {
-    ($($field:ident: $adapter:ty $(=> $owner:ident.$child:ident)?),+ $(,)?) => {
+    ($($field:ident / $variant:ident: $adapter:ty $(=> $owner:ident.$child:ident)?),+ $(,)?) => {
         #[derive(Default)]
-        pub struct Devices { $(pub $field: Option<$adapter>,)+ }
+        pub struct Devices {
+            $(pub $field: Option<$adapter>,)+
+            /// Explicit override for direct controls owned by a routine.
+            pub maintenance: bool,
+        }
+        #[derive(Clone, Copy, PartialEq, Eq, serde::Serialize)]
+        #[serde(rename_all = "snake_case")]
+        pub enum Family { $($variant,)+ }
+        impl Family { pub const fn as_str(self) -> &'static str { match self { $(Self::$variant => stringify!($field),)+ } } }
         #[derive(Clone, Copy, Default)]
         pub struct Selection { $(pub $field: bool,)+ }
         impl Selection {
+            pub fn support(self) -> crate::entity::Support {
+                [$(if self.$field { <$adapter as Adapter>::SUPPORT } else { crate::entity::Support::NONE },)+]
+                    .into_iter().fold(crate::entity::Support::NONE, crate::entity::Support::union)
+            }
             pub const ALL: Self = Self { $($field:true,)+ };
             pub fn from_filter(mut enabled: impl FnMut(&str) -> bool) -> Self {
                 Self { $($field:enabled(stringify!($field)),)+ }
@@ -164,15 +190,58 @@ macro_rules! static_adapters {
             }
         }
         impl Devices {
+            pub(crate) fn validate_ownership(&self) -> Result<()> {
+                if self.tv.is_some() && (self.samsung.is_some() || self.digi.is_some() || self.plugs.is_some()) {
+                    return Err(error("TV owns its Samsung, DIGI and plug adapters; configure those through --tv only"));
+                }
+                Ok(())
+            }
+            pub fn validate(&self) -> Result<()> {
+                self.validate_ownership()?;
+                let mut ambiguous = false;
+                self.entities(&mut |entity| {
+                    let mut matches = 0;
+                    self.entities(&mut |other| { if entity.same_id(other) { matches += 1; } });
+                    ambiguous |= matches != 1;
+                });
+                if ambiguous { return Err(error("Duplicate entity identity; rename configured endpoints")); }
+                Ok(())
+            }
             $(pub fn $field(&mut self) -> Option<&mut $adapter> {
                 self.$field.as_mut() $(.or_else(||self.$owner.as_mut().map(|owner|owner.$child())))?
             })+
             pub fn selection(&self) -> Selection {
                 Selection { $($field: self.$field.is_some() $(|| self.$owner.is_some())?,)+ }
             }
+            pub fn entities<'a>(&'a self, visit: &mut impl FnMut(crate::entity::Entity<'a>)) {
+                $(if let Some(adapter) = self.$field.as_ref() {
+                    adapter.entities(visit);
+                })+
+                if let Some(tv) = &self.tv {
+                    tv.child_entities(visit);
+                }
+            }
+            pub(crate) fn read_device(&mut self, device: crate::entity::Device) -> Result<Value> {
+                match device.family {
+                    $(Family::$variant => self.$field().ok_or_else(||error("Unconfigured device"))?.read_device(device.index),)+
+                }
+            }
+            pub(crate) fn control_device(&mut self, device: crate::entity::Device, command: crate::entity::Command, args: &Value) -> Result<Value> {
+                if matches!(command, crate::entity::Command::Power)
+                    && !self.maintenance && self.tv.as_ref().is_some_and(|tv|tv.owns_power(device)) {
+                    return Err(error("Power is owned by the TV routine; use routine_run or explicit --maintenance"));
+                }
+                match device.family {
+                    $(Family::$variant => self.$field().ok_or_else(||error("Unconfigured device"))?.control_device(device.index,command,args),)+
+                }
+            }
             /// Canonical command dispatch validates before any device I/O.
             /// Permission policy belongs to the caller (e.g. MCP control gate).
             pub fn call(&mut self, name: &str, args: &Value) -> Result<Value> {
+                self.validate_ownership()?;
+                if !self.maintenance && self.tv.as_ref().is_some_and(|tv|tv.owns_command(name,args)) {
+                    return Err(error("Power is owned by the TV routine; use routine_run or explicit --maintenance"));
+                }
                 $(if let Some(adapter) = self.$field()
                     && let Some(tool) = <$adapter as Adapter>::TOOLS.iter().find(|t| t.name == name) {
                     tool.input.validate(args).map_err(error)?;
@@ -184,12 +253,12 @@ macro_rules! static_adapters {
     };
 }
 static_adapters! {
-    meaco: crate::meaco::Manager,
-    bulbs: crate::bulb::Manager,
-    plugs: crate::plug::Manager => tv.plugs,
-    awair: crate::awair::Config,
-    printers: crate::printer::Manager,
-    samsung: crate::samsung::Manager => tv.samsung,
-    digi: crate::androidtv::Manager => tv.digi,
-    tv: crate::tv::Manager,
+    meaco/Meaco: crate::meaco::Manager,
+    bulbs/Bulbs: crate::bulb::Manager,
+    plugs/Plugs: crate::plug::Manager => tv.plugs,
+    awair/Awair: crate::awair::Config,
+    printers/Printers: crate::printer::Manager,
+    samsung/Samsung: crate::samsung::Manager => tv.samsung,
+    digi/Digi: crate::androidtv::Manager => tv.digi,
+    tv/Tv: crate::tv::Manager,
 }

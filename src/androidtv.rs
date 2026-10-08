@@ -338,16 +338,81 @@ fn key_code(key: &str) -> Option<u64> {
         _ => return None,
     })
 }
+const KEYS: &[&str] = &[
+    "home",
+    "back",
+    "up",
+    "down",
+    "left",
+    "right",
+    "enter",
+    "volume_up",
+    "volume_down",
+    "mute",
+    "play_pause",
+    "play",
+    "pause",
+    "channel_up",
+    "channel_down",
+];
 const KEY: Input = Input::Field {
     field: Field {
         name: "key",
-        schema: || json!({"type":"string","enum":["home","back","up","down","left","right","enter","volume_up","volume_down","mute","play_pause","play","pause","channel_up","channel_down"]}),
+        schema: || json!({"type":"string","enum":KEYS}),
         valid: |v| v.as_str().and_then(key_code).is_some(),
         error: "Unsupported DIGI key",
     },
     shape_error: "Expected only key",
 };
 impl Adapter for Manager {
+    const SUPPORT: crate::entity::Support = crate::entity::Support::MEDIA;
+    fn entities<'a>(&'a self, visit: &mut impl FnMut(crate::entity::Entity<'a>)) {
+        use crate::{
+            device::Family,
+            entity::{Capabilities, Domain, Entity},
+        };
+        visit(Entity::new(
+            Family::Digi,
+            0,
+            Domain::MediaPlayer,
+            "digi",
+            "DIGI R2A",
+            Capabilities::Media {
+                keys: KEYS,
+                verified_off: true,
+            },
+        ));
+    }
+    fn read_device(&mut self, index: usize) -> Result<Value> {
+        if index != 0 {
+            return Err(error("Unknown DIGI device"));
+        }
+        Ok(serde_json::to_value(self.status()?)?)
+    }
+    fn control_device(
+        &mut self,
+        index: usize,
+        command: crate::entity::Command,
+        args: &Value,
+    ) -> Result<Value> {
+        if index != 0 {
+            return Err(error("Unknown DIGI device"));
+        }
+        match command {
+            crate::entity::Command::Power => self.apply(
+                args["power"]
+                    .as_bool()
+                    .ok_or_else(|| error("Expected absolute power"))?,
+            ),
+            crate::entity::Command::Key => self.key(
+                args["key"]
+                    .as_str()
+                    .ok_or_else(|| error("Expected remote key"))?,
+            ),
+            _ => Err(error("Unsupported DIGI command")),
+        }
+    }
+
     const TOOLS: &'static [Tool] = &[
         Tool {
             name: "digi_status",

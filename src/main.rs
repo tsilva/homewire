@@ -15,16 +15,39 @@ use std::{
     time::{Duration, Instant},
 };
 
-const HELP: &str = "Homewire — lightweight home automation\n\nUsage: homewire [--config MEACO_JSON] [--printers PRINTERS_JSON] [--awair AWAIR_JSON] [--lights LIGHTS_JSON] [--plugs PLUGS_JSON] [--samsung SAMSUNG_JSON] [--digi DIGI_JSON] [--tv TV_JSON] COMMAND\n\nCommands:\n  tv-status               Read shared outlet and both media devices\n  tv-set on|off           Run configured shared-outlet sequence\n  samsung-status          Read Samsung identity and remote state\n  samsung-set on|off      Wake or request Samsung shutdown\n  samsung-key KEY         Send one Samsung remote key\n  digi-status             Read DIGI identity and power state\n  digi-set on|off         Apply verified DIGI wake/sleep\n  digi-key KEY            Send one DIGI remote key\n  plugs                   List configured Tapo P100/P110 plugs\n  plug-status NAME        Read relay, overload and P110 energy\n  plug-set NAME on|off    Apply and verify absolute relay power\n  plug-check              Poll plugs and retained overload faults\n  watch-plugs             Monitor reported overload events\n  status                  Read Meaco status\n  plan day|night|off       Preview a Meaco sequence\n  apply day|night|off      Apply and verify a Meaco sequence\n  awair-status            Read fresh air-quality measurements\n  printers                List configured printers\n  printer-status NAME     Read printer status and supplies\n  printer-check           Poll printers and retained faults\n  watch-printers          Monitor debounced printer fault events\n  lights                  List configured Tapo bulbs and strips\n  light-status NAME       Read light state and overheating\n  light-set NAME JSON     Apply and verify absolute settings\n  light-check             Poll lights and retained faults\n  light-plan              Preview optional L900 curve and sunset\n  light-schedule          Run optional L900 curve and sunset rules\n  watch-lights            Monitor overheating events\n  bulbs                   Legacy bulb commands (also --bulbs)\n  bulb-status NAME        Read bulb state and overheating status\n  bulb-set NAME JSON      Apply and verify absolute bulb settings\n  bulb-check              Poll bulbs and retained overheating faults\n  watch-bulbs             Monitor debounced overheating events\n  serve [--allow-control] [--schedule] [--light-schedule] [--watch-printers] [--watch-lights] [--watch-plugs]\n                          MCP stdio; read-only by default\n  schedule                Run the daily 09:00/22:00 London Meaco rules\n\n--connect IP:PORT overrides only the Meaco TCP destination.\nPrinter, Awair, light, plug and media configs may have connect overrides for testing.\nSchedule mode sends controls. Enable it only after disabling the two\ncorresponding Home Assistant rules. Fault monitoring sends no controls.\n";
+const HELP: &str = "Homewire — lightweight home automation\n\nUsage: homewire [--config MEACO_JSON] [--printers PRINTERS_JSON] [--awair AWAIR_JSON] [--lights LIGHTS_JSON] [--plugs PLUGS_JSON] [--samsung SAMSUNG_JSON] [--digi DIGI_JSON] [--tv TV_JSON] COMMAND\n\nCommands:\n  tv-status               Read shared outlet and both media devices\n  tv-set on|off           Run configured shared-outlet sequence\n  samsung-status          Read Samsung identity and remote state\n  samsung-set on|off      Wake or request Samsung shutdown\n  samsung-key KEY         Send one Samsung remote key\n  digi-status             Read DIGI identity and power state\n  digi-set on|off         Apply verified DIGI wake/sleep\n  digi-key KEY            Send one DIGI remote key\n  plugs                   List configured Tapo P100/P110 plugs\n  plug-status NAME        Read relay, overload and P110 energy\n  plug-set NAME on|off    Apply and verify absolute relay power\n  plug-check              Poll plugs and retained overload faults\n  watch-plugs             Monitor reported overload events\n  status                  Read Meaco status\n  plan day|night|off       Preview a Meaco sequence\n  apply day|night|off      Apply and verify a Meaco sequence\n  awair-status            Read fresh air-quality measurements\n  printers                List configured printers\n  printer-status NAME     Read printer status and supplies\n  printer-check           Poll printers and retained faults\n  watch-printers          Monitor debounced printer fault events\n  lights                  List configured Tapo bulbs and strips\n  light-status NAME       Read light state and overheating\n  light-set NAME JSON     Apply and verify absolute settings\n  light-check             Poll lights and retained faults\n  light-plan              Preview optional L900 curve and sunset\n  light-schedule          Run optional L900 curve and sunset rules\n  watch-lights            Monitor overheating events\n  bulbs                   Legacy bulb commands (also --bulbs)\n  bulb-status NAME        Read bulb state and overheating status\n  bulb-set NAME JSON      Apply and verify absolute bulb settings\n  bulb-check              Poll bulbs and retained overheating faults\n  watch-bulbs             Monitor debounced overheating events\n  serve [--allow-control] [--legacy-tools] [--maintenance] [--schedule] [--light-schedule] [--watch-printers] [--watch-lights] [--watch-plugs]\n                          MCP entities/routines; read-only by default\n--legacy-tools exposes original adapter tools.\n--maintenance permits direct power controls owned by the TV routine.\n  schedule                Run the daily 09:00/22:00 London Meaco rules\n\n--connect IP:PORT overrides only the Meaco TCP destination.\nPrinter, Awair, light, plug and media configs may have connect overrides for testing.\nSchedule mode sends controls. Enable it only after disabling the two\ncorresponding Home Assistant rules. Fault monitoring sends no controls.\n";
 
 struct App {
     devices: Devices,
+    next_meaco_schedule: Instant,
     next_plug_poll: Instant,
     next_bulb_poll: Instant,
     next_light_schedule: Instant,
     next_printer_poll: Instant,
 }
 impl App {
+    fn wait_duration(
+        &self,
+        scheduling: bool,
+        watching: bool,
+        watching_bulbs: bool,
+        light_scheduling: bool,
+        watching_plugs: bool,
+    ) -> Duration {
+        let now = Instant::now();
+        [
+            scheduling.then_some(self.next_meaco_schedule),
+            watching.then_some(self.next_printer_poll),
+            watching_bulbs.then_some(self.next_bulb_poll),
+            light_scheduling.then_some(self.next_light_schedule),
+            watching_plugs.then_some(self.next_plug_poll),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|due| due.saturating_duration_since(now))
+        .min()
+        .unwrap_or(Duration::from_secs(60))
+    }
     fn tick(
         &mut self,
         scheduling: bool,
@@ -33,7 +56,7 @@ impl App {
         light_scheduling: bool,
         watching_plugs: bool,
     ) -> Result<()> {
-        if scheduling {
+        if scheduling && Instant::now() >= self.next_meaco_schedule {
             let meaco = self
                 .devices
                 .meaco
@@ -45,6 +68,8 @@ impl App {
                     Err(e) => eprintln!("Schedule failed (no automatic retry): {e}"),
                 }
             }
+            self.next_meaco_schedule =
+                Instant::now() + homewire::schedule::until_next_minute(chrono::Utc::now());
         }
         if light_scheduling && Instant::now() >= self.next_light_schedule {
             let bulbs = self
@@ -165,10 +190,14 @@ fn run() -> Result<()> {
     let mut watching = false;
     let mut watching_bulbs = false;
     let mut watching_plugs = false;
+    let mut legacy_tools = false;
+    let mut maintenance = false;
     let mut positional = vec![];
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
+            "--legacy-tools" => legacy_tools = true,
+            "--maintenance" => maintenance = true,
             "--config" => {
                 config_path = Some(PathBuf::from(
                     iter.next()
@@ -306,7 +335,13 @@ fn run() -> Result<()> {
     if positional.len() != expected {
         return Err(error("Unexpected or missing command arguments"));
     }
-    if (control || scheduling || light_scheduling || watching || watching_bulbs || watching_plugs)
+    if (control
+        || scheduling
+        || light_scheduling
+        || watching
+        || watching_bulbs
+        || watching_plugs
+        || legacy_tools)
         && command != "serve"
     {
         return Err(error("Server flags belong to serve"));
@@ -424,7 +459,9 @@ fn run() -> Result<()> {
             samsung,
             digi,
             tv,
+            maintenance,
         },
+        next_meaco_schedule: Instant::now(),
         next_plug_poll: first_plug_poll,
         next_bulb_poll: first_bulb_poll,
         next_light_schedule: Instant::now(),
@@ -433,6 +470,7 @@ fn run() -> Result<()> {
     if let Some(plugs) = app.devices.plugs() {
         app.next_plug_poll = Instant::now() + Duration::from_secs(plugs.config.poll_seconds);
     }
+    app.devices.validate()?;
     let selection = app.devices.selection();
     let options = mcp::Options {
         light_names,
@@ -526,7 +564,7 @@ fn run() -> Result<()> {
         ),
         "light-schedule" => loop {
             app.tick(false, false, false, true, false)?;
-            thread::sleep(Duration::from_secs(1));
+            thread::sleep(app.wait_duration(false, false, false, true, false));
         },
         "status" => println!("{}", app.devices.call("meaco_status", &json!({}))?),
         "plan" | "apply" => {
@@ -596,7 +634,7 @@ fn run() -> Result<()> {
 
         "schedule" => loop {
             app.tick(true, false, false, false, false)?;
-            thread::sleep(Duration::from_secs(1));
+            thread::sleep(app.wait_duration(true, false, false, false, false));
         },
         "serve" => {
             let background =
@@ -637,10 +675,23 @@ fn run() -> Result<()> {
                 let line = match &mut input {
                     Input::Direct(reader) => mcp::read_message(reader)?,
                     Input::Background(receiver) => {
-                        match receiver.recv_timeout(Duration::from_secs(1)) {
-                            Ok(item) => item?,
-                            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                        if !initialized {
+                            match receiver.recv() {
+                                Ok(item) => item?,
+                                Err(_) => break,
+                            }
+                        } else {
+                            match receiver.recv_timeout(app.wait_duration(
+                                scheduling,
+                                watching,
+                                watching_bulbs,
+                                light_scheduling,
+                                watching_plugs,
+                            )) {
+                                Ok(item) => item?,
+                                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                            }
                         }
                     }
                 };
@@ -657,9 +708,13 @@ fn run() -> Result<()> {
                         {
                             initialized = true;
                         }
-                        mcp::handle_selected(request, selection, options, |name, args| {
-                            app.devices.call(name, args)
-                        })
+                        if legacy_tools {
+                            mcp::handle_selected(request, selection, options, |name, args| {
+                                app.devices.call(name, args)
+                            })
+                        } else {
+                            mcp::handle_entities(request, &mut app.devices, control)
+                        }
                     }
                     Err(_) => Some(mcp::rpc_error(Value::Null, -32700, "Invalid JSON")),
                 };
@@ -676,5 +731,31 @@ fn main() {
     if let Err(e) = run() {
         eprintln!("homewire: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn receiver_waits_for_earliest_enabled_job_and_overdue_jobs_do_not_sleep() {
+        let now = Instant::now();
+        let mut app = App {
+            devices: Devices::default(),
+            next_meaco_schedule: now + Duration::from_secs(50),
+            next_printer_poll: now + Duration::from_secs(30),
+            next_bulb_poll: now + Duration::from_secs(20),
+            next_plug_poll: now + Duration::from_secs(10),
+            next_light_schedule: now + Duration::from_secs(5),
+        };
+        let delay = app.wait_duration(true, true, false, false, false);
+        assert!(delay > Duration::from_secs(29) && delay <= Duration::from_secs(30));
+        let delay = app.wait_duration(true, true, true, true, true);
+        assert!(delay > Duration::from_secs(4) && delay <= Duration::from_secs(5));
+        app.next_plug_poll = now - Duration::from_secs(1);
+        assert_eq!(
+            app.wait_duration(false, false, false, false, true),
+            Duration::ZERO
+        );
     }
 }

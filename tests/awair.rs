@@ -266,6 +266,11 @@ fn awair_only_cli_and_mcp_work_without_other_device_configuration() -> Result<()
                 file.0.to_str().expect("path"),
                 if serve { "serve" } else { "awair-status" },
             ])
+            .args(if serve {
+                vec!["--legacy-tools"]
+            } else {
+                vec![]
+            })
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

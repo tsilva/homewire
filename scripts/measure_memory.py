@@ -60,6 +60,7 @@ def main():
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--iterations", type=int, default=1000)
     parser.add_argument("--media", action="store_true", help="Include Samsung/DIGI with synthetic credentials; no network I/O")
+    parser.add_argument("--legacy-tools", action="store_true", help="Measure the compatibility MCP tool catalog")
     args = parser.parse_args()
     if not 1 <= args.runs <= 10 or not 1 <= args.iterations <= 10000:
         parser.error("runs must be 1–10; iterations must be 1–10000")
@@ -94,6 +95,8 @@ def main():
                 path.write_text(json.dumps(value))
                 path.chmod(0o600)
                 flags.extend(["--" + name, str(path)])
+        if args.legacy_tools:
+            flags.append("--legacy-tools")
         trials = [run(binary, flags, args.iterations) for _ in range(args.runs)]
     print(json.dumps({"binary_bytes": binary.stat().st_size, "trials": trials}))
 

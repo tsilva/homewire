@@ -415,7 +415,7 @@ fn bulb_only_cli_and_mcp_need_no_other_device_configuration() -> Result<()> {
         let mut child = Command::new(env!("CARGO_BIN_EXE_homewire"))
             .args(["--bulbs", file.path.to_str().expect("path")])
             .args(if serve {
-                vec!["serve"]
+                vec!["serve", "--legacy-tools"]
             } else {
                 vec!["bulb-status", "bulb_1"]
             })
@@ -695,7 +695,7 @@ fn l900_cli_and_light_mcp_use_shared_adapter_without_duplicate_tools() -> Result
         let mut child = Command::new(env!("CARGO_BIN_EXE_homewire"))
             .args(["--lights", file.path.to_str().expect("path")])
             .args(if serve {
-                vec!["serve"]
+                vec!["serve", "--legacy-tools"]
             } else {
                 vec!["light-status", "bulb_1"]
             })

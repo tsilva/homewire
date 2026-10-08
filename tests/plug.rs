@@ -352,6 +352,64 @@ fn wire_p100_controls_use_one_absolute_write_and_verify() -> Result<()> {
     assert_eq!(requests[1]["params"], json!({"device_on":true}));
     Ok(())
 }
+
+#[test]
+fn standard_switch_control_preserves_one_write_and_fresh_verification() -> Result<()> {
+    let (address, worker) = tapo::mock_sessions(
+        vec![(
+            vec!["get_device_info", "set_device_info", "get_device_info"],
+            None,
+        )],
+        info(Model::P100),
+        None,
+    )?;
+    let file = Private::new(Model::P100, Some(address))?;
+    let mut devices = homewire::device::Devices {
+        plugs: Some(Manager::open(&file.path)?),
+        ..Default::default()
+    };
+    let result = homewire::entity::call(
+        &mut devices,
+        "switch_set",
+        &json!({"entity":"switch.plug1","power":true}),
+    )?;
+    assert_eq!(result["result"]["applied"], true);
+    assert_eq!(result["result"]["status"]["power"], true);
+    let requests = worker.join().expect("worker")?;
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[1]["params"], json!({"device_on":true}));
+    Ok(())
+}
+
+#[test]
+fn p110_switch_and_sensor_entities_share_one_authenticated_snapshot() -> Result<()> {
+    let (address, worker) = tapo::mock_sessions(
+        vec![(
+            vec!["get_device_info", "get_energy_usage", "get_emeter_data"],
+            None,
+        )],
+        info(Model::P110),
+        Some(energy()),
+    )?;
+    let file = Private::new(Model::P110, Some(address))?;
+    let mut devices = homewire::device::Devices {
+        plugs: Some(Manager::open(&file.path)?),
+        ..Default::default()
+    };
+    let result = homewire::entity::call(
+        &mut devices,
+        "entity_status",
+        &json!({"entities":["sensor.plug1_power","switch.plug1","sensor.plug1_voltage","sensor.plug1_total_energy"]}),
+    )?;
+    let states = result["states"].as_array().expect("states");
+    assert!(states.iter().all(|s| s["available"] == true));
+    assert_eq!(states[0]["state"], 45.259);
+    assert_eq!(states[1]["state"]["power"], false);
+    assert_eq!(states[2]["state"], 235.44);
+    assert_eq!(states[3]["state"], 2.317816);
+    assert_eq!(worker.join().expect("worker")?.len(), 3);
+    Ok(())
+}
 #[test]
 fn wire_p110_queries_only_supported_read_methods_and_preserves_measurements() -> Result<()> {
     let (address, worker) = tapo::mock_sessions(
@@ -450,6 +508,7 @@ fn plug_only_cli_and_mcp_do_not_require_other_device_config() -> Result<()> {
             "--plugs",
             file.path.to_str().expect("path"),
             "serve",
+            "--legacy-tools",
             "--allow-control",
         ])
         .stdin(Stdio::piped())
@@ -489,6 +548,7 @@ fn watcher_does_not_block_mcp_handshake_before_initialized() -> Result<()> {
             "--plugs",
             file.path.to_str().expect("path"),
             "serve",
+            "--legacy-tools",
             "--watch-plugs",
         ])
         .stdin(Stdio::piped())
@@ -514,7 +574,12 @@ fn stdio_modes_preserve_errors_notifications_and_final_unterminated_message() ->
     for background in [false, true] {
         let file = Private::new(Model::P100, Some("127.0.0.1:1".parse()?))?;
         let mut command = Command::new(env!("CARGO_BIN_EXE_homewire"));
-        command.args(["--plugs", file.path.to_str().expect("path"), "serve"]);
+        command.args([
+            "--plugs",
+            file.path.to_str().expect("path"),
+            "serve",
+            "--legacy-tools",
+        ]);
         if background {
             command.arg("--watch-plugs");
         }
@@ -550,7 +615,12 @@ fn stdio_modes_reject_oversized_and_non_utf8_input() -> Result<()> {
         ] {
             let file = Private::new(Model::P100, Some("127.0.0.1:1".parse()?))?;
             let mut command = Command::new(env!("CARGO_BIN_EXE_homewire"));
-            command.args(["--plugs", file.path.to_str().expect("path"), "serve"]);
+            command.args([
+                "--plugs",
+                file.path.to_str().expect("path"),
+                "serve",
+                "--legacy-tools",
+            ]);
             if background {
                 command.arg("--watch-plugs");
             }

@@ -106,6 +106,35 @@ fn sequence(equipment: &mut impl Control, power: bool) -> Result<()> {
     Ok(())
 }
 impl Manager {
+    pub(crate) fn owns_power(&self, device: crate::entity::Device) -> bool {
+        use crate::device::Family;
+        match device.family {
+            Family::Samsung | Family::Digi => true,
+            Family::Plugs => self
+                .equipment
+                .plugs
+                .config
+                .plugs
+                .get(device.index)
+                .is_some_and(|p| p.name == self.equipment.plug),
+            _ => false,
+        }
+    }
+    pub(crate) fn owns_command(&self, name: &str, args: &Value) -> bool {
+        matches!(name, "samsung_apply" | "digi_apply")
+            || name == "plug_apply" && args["plug"].as_str() == Some(&self.equipment.plug)
+    }
+    pub(crate) fn child_entities<'a>(&'a self, visit: &mut impl FnMut(crate::entity::Entity<'a>)) {
+        let mut owned = |mut entity: crate::entity::Entity<'a>| {
+            if self.owns_power(entity.device) && entity.domain != crate::entity::Domain::Sensor {
+                entity.owner = Some("tv_on/tv_off");
+            }
+            visit(entity);
+        };
+        self.equipment.samsung.entities(&mut owned);
+        self.equipment.digi.entities(&mut owned);
+        self.equipment.plugs.entities(&mut owned);
+    }
     pub(crate) fn samsung(&mut self) -> &mut samsung::Manager {
         &mut self.equipment.samsung
     }
@@ -188,6 +217,9 @@ impl Manager {
     }
 }
 impl Adapter for Manager {
+    const SUPPORT: crate::entity::Support = crate::entity::Support::ROUTINES;
+    fn entities<'a>(&'a self, _visit: &mut impl FnMut(crate::entity::Entity<'a>)) {}
+
     const TOOLS: &'static [Tool] = &[
         Tool {
             name: "tv_status",
