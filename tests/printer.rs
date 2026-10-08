@@ -12,6 +12,7 @@ use std::{
 
 fn endpoint() -> Endpoint {
     Endpoint {
+        supply_warning_percent: Some(15),
         name: "brother".into(),
         host: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
         port: 631,

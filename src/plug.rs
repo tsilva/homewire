@@ -403,7 +403,22 @@ impl fault::Target for Endpoint {
 }
 
 impl Adapter for Manager {
-    const SUPPORT: crate::entity::Support = crate::entity::Support::SWITCH;
+    fn authorize_control(
+        &self,
+        command: crate::entity::Command,
+        args: &Value,
+        maintenance: bool,
+    ) -> Result<()> {
+        if matches!(command, crate::entity::Command::Configure)
+            && args["settings"]["protection_w"] == 0
+            && !maintenance
+        {
+            return Err(error("Disabling outlet protection requires --maintenance"));
+        }
+        Ok(())
+    }
+    const SUPPORT: crate::entity::Support =
+        crate::entity::Support::SWITCH.union(crate::entity::Support::CONFIGURE);
     fn entities<'a>(&'a self, visit: &mut impl FnMut(crate::entity::Entity<'a>)) {
         use crate::{
             device::Family,
@@ -418,7 +433,11 @@ impl Adapter for Manager {
                 endpoint.model.as_str(),
                 Capabilities::Power,
             );
-            visit(base);
+            visit(base.configurable(if endpoint.model == Model::P110 {
+                P110_SETTINGS
+            } else {
+                P100_SETTINGS
+            }));
             if endpoint.model == Model::P110 {
                 for (suffix, field, unit) in [
                     ("_power", "/energy/power_w", "W"),
@@ -449,6 +468,24 @@ impl Adapter for Manager {
         command: crate::entity::Command,
         args: &Value,
     ) -> Result<Value> {
+        if matches!(command, crate::entity::Command::Configure) {
+            let endpoint = self
+                .config
+                .plugs
+                .get(index)
+                .ok_or_else(|| error("Unknown plug"))?;
+            let mut device = endpoint.connect(
+                Duration::from_secs(self.config.timeout_seconds),
+                Duration::ZERO,
+            )?;
+            device.read()?;
+            let rules = if endpoint.model == Model::P110 {
+                P110_RULES
+            } else {
+                P100_RULES
+            };
+            return crate::tapo_settings::configure(&mut device.client, rules, &args["settings"]);
+        }
         if !matches!(command, crate::entity::Command::Power) {
             return Err(error("Unsupported plug command"));
         }
@@ -529,8 +566,36 @@ impl Adapter for Manager {
         }
     }
 }
+use crate::tapo_settings as ts;
+const P100_RULES: &[ts::Rule] = &[ts::AUTO_OFF, ts::AUTO_OFF_MINUTES, ts::LED, ts::AUTO_UPDATE];
+const P110_RULES: &[ts::Rule] = &[
+    ts::AUTO_OFF,
+    ts::AUTO_OFF_MINUTES,
+    ts::LED,
+    ts::AUTO_UPDATE,
+    ts::PROTECTION,
+];
+const P100_SETTINGS: &[crate::settings::Setting] = &[
+    ts::AUTO_OFF.setting,
+    ts::AUTO_OFF_MINUTES.setting,
+    ts::LED.setting,
+    ts::AUTO_UPDATE.setting,
+];
+const P110_SETTINGS: &[crate::settings::Setting] = &[
+    ts::AUTO_OFF.setting,
+    ts::AUTO_OFF_MINUTES.setting,
+    ts::LED.setting,
+    ts::AUTO_UPDATE.setting,
+    ts::PROTECTION.setting,
+];
 
 impl crate::device::Monitored for Manager {
+    fn active_faults(&self, visit: &mut impl FnMut(&str, &[String])) {
+        for (name, saved) in &self.monitor.memory.devices {
+            visit(name, &saved.faults);
+        }
+    }
+
     type Unavailable = Unavailable;
     type Event = fault::Event;
     fn poll_seconds(&self) -> u64 {

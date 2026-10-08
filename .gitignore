@@ -5,3 +5,7 @@
 *.json.lock
 *.json.tmp-*
 .DS_Store
+
+/companion/android/build/
+__pycache__/
+*.py[cod]

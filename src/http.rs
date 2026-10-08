@@ -50,6 +50,7 @@ pub(crate) struct Request<'a> {
 pub(crate) struct Response {
     pub body: Vec<u8>,
     pub session_cookie: Option<String>,
+    pub cookies: String,
 }
 pub(crate) fn send(
     address: SocketAddr,
@@ -114,13 +115,14 @@ fn line(reader: &mut impl BufRead, budget: &mut usize) -> Result<String> {
 pub(crate) fn read_body(reader: &mut impl BufRead, expected_type: &str) -> Result<Vec<u8>> {
     Ok(read_response(reader, Some(expected_type), MAX_BODY)?.body)
 }
-fn read_response(
+pub(crate) fn read_response(
     reader: &mut impl BufRead,
     expected_type: Option<&str>,
     limit: usize,
 ) -> Result<Response> {
     let limit = limit.min(MAX_BODY);
     let mut session_cookie = None;
+    let mut cookies = String::new();
     let mut budget = MAX_HEADERS;
     let mut length = None;
     let mut chunked = false;
@@ -140,6 +142,7 @@ fn read_response(
         chunked = false;
         content_type = None;
         session_cookie = None;
+        cookies.clear();
         loop {
             let header = line(reader, &mut budget)?;
             if header.is_empty() {
@@ -149,6 +152,23 @@ fn read_response(
                 .split_once(':')
                 .ok_or_else(|| error("Invalid device HTTP header"))?;
             let value = value.trim();
+            if name.eq_ignore_ascii_case("set-cookie") {
+                let pair = value.split(';').next().unwrap_or_default();
+                if let Some((key, val)) = pair.split_once('=') {
+                    if !key
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+                        || val.bytes().any(|b| b < 33 || b == 127)
+                        || cookies.len() + pair.len() > 2048
+                    {
+                        return Err(error("Invalid HTTP cookie"));
+                    }
+                    if !cookies.is_empty() {
+                        cookies.push_str("; ");
+                    }
+                    cookies.push_str(pair);
+                }
+            }
             if name.eq_ignore_ascii_case("content-length") {
                 if length.is_some() {
                     return Err(error("Duplicate device HTTP content length"));
@@ -156,7 +176,7 @@ fn read_response(
                 let n = value.parse::<usize>()?;
                 // Error bodies are never read. Preserve the typed HTTP rejection
                 // even when its declared body exceeds a handshake's small limit.
-                if code == 200 && n > limit {
+                if (200..300).contains(&code) && n > limit {
                     return Err(error("Device response exceeds its body limit"));
                 }
                 length = Some(n);
@@ -190,7 +210,7 @@ fn read_response(
         if code == 100 {
             continue;
         }
-        if code != 200 {
+        if !(200..300).contains(&code) {
             return Err(Box::new(StatusError(code)));
         }
         final_response = true;
@@ -218,6 +238,7 @@ fn read_response(
                 return Ok(Response {
                     body,
                     session_cookie,
+                    cookies,
                 });
             }
             if size > limit - body.len() {
@@ -245,6 +266,7 @@ fn read_response(
     Ok(Response {
         body,
         session_cookie,
+        cookies,
     })
 }
 

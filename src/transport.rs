@@ -10,6 +10,9 @@ pub(crate) struct Timed {
     deadline: Instant,
 }
 impl Timed {
+    pub(crate) fn accepted(socket: TcpStream, deadline: Instant) -> Self {
+        Self { socket, deadline }
+    }
     pub(crate) fn connect(address: SocketAddr, deadline: Instant) -> Result<Self> {
         let remaining = deadline
             .checked_duration_since(Instant::now())

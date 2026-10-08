@@ -532,24 +532,28 @@ impl fault::Target for Endpoint {
 }
 
 impl Adapter for Manager {
-    const SUPPORT: crate::entity::Support = crate::entity::Support::LIGHT;
+    const SUPPORT: crate::entity::Support =
+        crate::entity::Support::LIGHT.union(crate::entity::Support::CONFIGURE);
     fn entities<'a>(&'a self, visit: &mut impl FnMut(crate::entity::Entity<'a>)) {
         use crate::{
             device::Family,
             entity::{Capabilities, Domain, Entity},
         };
         for (index, endpoint) in self.config.bulbs.iter().enumerate() {
-            visit(Entity::new(
-                Family::Bulbs,
-                index,
-                Domain::Light,
-                &endpoint.name,
-                endpoint.model.as_str(),
-                Capabilities::Light {
-                    max_temperature_k: endpoint.model.max_temperature(),
-                    fixed_settings_require_effects_off: endpoint.model == Model::L900,
-                },
-            ));
+            visit(
+                Entity::new(
+                    Family::Bulbs,
+                    index,
+                    Domain::Light,
+                    &endpoint.name,
+                    endpoint.model.as_str(),
+                    Capabilities::Light {
+                        max_temperature_k: endpoint.model.max_temperature(),
+                        fixed_settings_require_effects_off: endpoint.model == Model::L900,
+                    },
+                )
+                .configurable(LIGHT_SETTINGS),
+            );
         }
     }
     fn read_device(&mut self, index: usize) -> Result<Value> {
@@ -561,12 +565,36 @@ impl Adapter for Manager {
             .name;
         Ok(serde_json::to_value(self.status(name)?)?)
     }
+    fn options(&mut self, index: usize) -> Result<Value> {
+        let endpoint = self
+            .config
+            .bulbs
+            .get(index)
+            .ok_or_else(|| error("Unknown light"))?;
+        let mut device = endpoint.connect(Duration::from_secs(self.config.timeout_seconds))?;
+        device.read()?;
+        let presets = light_presets(&mut device.client)?;
+        let fade = device.client.read("get_on_off_gradually_info")?;
+        Ok(
+            json!({"presets":presets,"transitions":fade,"effect_control":"disable or restore the device's currently stored effect"}),
+        )
+    }
     fn control_device(
         &mut self,
         index: usize,
         command: crate::entity::Command,
         args: &Value,
     ) -> Result<Value> {
+        if matches!(command, crate::entity::Command::Configure) {
+            let endpoint = self
+                .config
+                .bulbs
+                .get(index)
+                .ok_or_else(|| error("Unknown light"))?;
+            let mut device = endpoint.connect(Duration::from_secs(self.config.timeout_seconds))?;
+            device.read()?;
+            return configure_light(&mut device, &args["settings"]);
+        }
         if !matches!(command, crate::entity::Command::Light) {
             return Err(error("Unsupported light command"));
         }
@@ -633,8 +661,24 @@ impl Adapter for Manager {
         }
     }
 }
+use crate::tapo_settings as ts;
+const LIGHT_RULES: &[ts::Rule] = &[ts::AUTO_UPDATE, ts::SMOOTH, ts::FADE_ON, ts::FADE_OFF];
+const LIGHT_SETTINGS: &[crate::settings::Setting] = &[
+    ts::AUTO_UPDATE.setting,
+    ts::SMOOTH.setting,
+    ts::FADE_ON.setting,
+    ts::FADE_OFF.setting,
+    crate::settings::Setting::integer("preset", 1, 16, 1),
+    crate::settings::Setting::boolean("effect_enabled"),
+];
 
 impl crate::device::Monitored for Manager {
+    fn active_faults(&self, visit: &mut impl FnMut(&str, &[String])) {
+        for (name, saved) in &self.monitor.memory.devices {
+            visit(name, &saved.faults);
+        }
+    }
+
     type Unavailable = Unavailable;
     type Event = fault::Event;
     fn poll_seconds(&self) -> u64 {
@@ -651,3 +695,130 @@ pub(crate) const SETTINGS_FIELD: Field = Field {
     valid: |v| <Change as serde::Deserialize>::deserialize(v).is_ok_and(|c| c.validate().is_ok()),
     error: "Invalid bulb settings",
 };
+
+fn light_presets(client: &mut klap::Client) -> Result<Value> {
+    let mut states = Vec::new();
+    for _ in 0..16 {
+        let result = client.query(
+            "get_preset_rules",
+            Some(json!({"start_index":states.len()})),
+        )?;
+        let page = result["states"]
+            .as_array()
+            .ok_or_else(|| error("Missing light presets"))?;
+        let total = result["sum"].as_u64().unwrap_or(page.len() as u64) as usize;
+        if total > 16
+            || page.is_empty()
+            || states.len() + page.len() > 16
+            || result["start_index"]
+                .as_u64()
+                .is_some_and(|n| n != states.len() as u64)
+        {
+            return Err(error("Invalid bounded light preset page"));
+        }
+        states.extend(page.iter().cloned());
+        if states.len() >= total {
+            return Ok(json!({"states":states,"sum":total}));
+        }
+    }
+    Err(error("Incomplete light presets"))
+}
+fn configure_light(device: &mut NetworkDevice<'_>, settings: &Value) -> Result<Value> {
+    crate::settings::validate(LIGHT_SETTINGS, settings)?;
+    if settings.get("preset").is_some() && settings.as_object().is_some_and(|o| o.len() != 1) {
+        return Err(error("Apply a light preset in a separate request"));
+    }
+    if let Some(index) = settings["preset"].as_u64() {
+        let rules = light_presets(&mut device.client)?;
+        let states = rules["states"]
+            .as_array()
+            .filter(|s| s.len() <= 16)
+            .ok_or_else(|| error("Missing light preset states"))?;
+        let p = states
+            .get(index as usize - 1)
+            .filter(|p| p.get("brightness").is_some())
+            .ok_or_else(|| error("Preset is absent or is an unsupported effect preset"))?;
+        let brightness = p["brightness"]
+            .as_u64()
+            .filter(|v| (1..=100).contains(v))
+            .ok_or_else(|| error("Invalid preset brightness"))? as u8;
+        let temp = p["color_temp"]
+            .as_u64()
+            .ok_or_else(|| error("Missing preset colour temperature"))?;
+        let change = if temp > 0 {
+            Change {
+                brightness_percent: Some(brightness),
+                color_temperature_k: Some(u16::try_from(temp)?),
+                ..Change::default()
+            }
+        } else {
+            Change {
+                brightness_percent: Some(brightness),
+                hue: Some(u16::try_from(
+                    p["hue"]
+                        .as_u64()
+                        .ok_or_else(|| error("Missing preset hue"))?,
+                )?),
+                saturation_percent: Some(u8::try_from(
+                    p["saturation"]
+                        .as_u64()
+                        .ok_or_else(|| error("Missing preset saturation"))?,
+                )?),
+                ..Change::default()
+            }
+        };
+        return Ok(serde_json::to_value(apply(device, &change)?)?);
+    }
+    if let Some(enabled) = settings["effect_enabled"].as_bool() {
+        if settings.as_object().is_some_and(|o| o.len() != 1) {
+            return Err(error("Change light effects in a separate request"));
+        }
+        let status = device.read()?;
+        if status.overheated != Some(false) && enabled {
+            return Err(error(
+                "Unknown or active overheating blocks effect activation",
+            ));
+        }
+        if device.endpoint.model == Model::L900 {
+            let mut effect = device.client.read("get_lighting_effect")?;
+            if !effect.is_object()
+                || effect.get("enable").is_none()
+                || enabled && effect["id"].as_str().is_none_or(str::is_empty)
+            {
+                return Err(error("No stored effect is available to restore"));
+            }
+            effect["enable"] = json!(u8::from(enabled));
+            device.client.query("set_lighting_effect", Some(effect))?;
+        } else {
+            let mut params = json!({"enable":enabled});
+            if enabled {
+                let rules = device.client.query(
+                    "get_dynamic_light_effect_rules",
+                    Some(json!({"start_index":0})),
+                )?;
+                let id = rules["current_rule_id"]
+                    .as_str()
+                    .filter(|s| !s.is_empty() && s.len() <= 64)
+                    .ok_or_else(|| error("No stored bulb effect is available"))?;
+                params["id"] = json!(id);
+            }
+            device
+                .client
+                .query("set_dynamic_light_effect_rule_enable", Some(params))?;
+        }
+        let info = device.client.read("get_device_info")?;
+        let actual = if device.endpoint.model == Model::L900 {
+            info["lighting_effect"]["enable"]
+                .as_u64()
+                .filter(|n| *n <= 1)
+                .map(|n| n == 1)
+        } else {
+            info["dynamic_light_effect_enable"].as_bool()
+        };
+        if actual != Some(enabled) {
+            return Err(error("Effect change could not be verified; no retry"));
+        }
+        return Ok(json!({"verified":true,"effect_enabled":enabled}));
+    }
+    crate::tapo_settings::configure(&mut device.client, LIGHT_RULES, settings)
+}

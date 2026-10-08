@@ -4,18 +4,23 @@ use homewire::{
     meaco, plug, printer,
 };
 use serde_json::{Value, json};
-use std::{collections::BTreeSet, fs, path::PathBuf, time::SystemTime};
+use std::{
+    collections::BTreeSet,
+    fs,
+    path::PathBuf,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 struct Configs(PathBuf);
 impl Configs {
     fn new() -> Result<Self> {
-        let nonce = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)?
-            .as_nanos();
-        let root = Self(
-            std::env::temp_dir().join(format!("homewire-catalog-{}-{nonce}", std::process::id())),
-        );
-        fs::create_dir(&root.0)?;
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let nonce = NEXT.fetch_add(1, Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("homewire-catalog-{}-{nonce}", std::process::id()));
+        fs::create_dir(&path)?;
+        // Construct the cleanup guard only after this fixture owns the directory.
+        let root = Self(path);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

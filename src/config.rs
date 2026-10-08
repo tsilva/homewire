@@ -32,9 +32,16 @@ pub(crate) fn valid_unique_labels<'a>(
 }
 
 pub(crate) fn save_private(path: &Path, value: &impl Serialize) -> Result<()> {
+    save_private_bounded(path, value, 8192)
+}
+pub(crate) fn save_private_bounded(
+    path: &Path,
+    value: &impl Serialize,
+    limit: usize,
+) -> Result<()> {
     let bytes = serde_json::to_vec(value)?;
-    if bytes.len() > 8192 {
-        return Err(error("Device state exceeds 8 KiB"));
+    if bytes.len() > limit {
+        return Err(error("Saved state exceeds its size limit"));
     }
     let tmp = path.with_extension(format!("json.tmp-{}", std::process::id()));
     let mut file = private_options().write(true).create_new(true).open(&tmp)?;
@@ -60,9 +67,40 @@ pub(crate) fn lock_configuration(path: &Path) -> Result<File> {
         .create(true)
         .truncate(false)
         .open(path.with_extension("json.lock"))?;
-    lock.try_lock()
-        .map_err(|_| error("Another Homewire instance owns this device configuration"))?;
+    lock_file(
+        &lock,
+        "Another Homewire instance owns this device configuration",
+    )?;
     Ok(lock)
+}
+
+/// Rust 1.95's standard File lock is unsupported on Android. Use the same
+/// kernel flock operation directly there; retaining the File retains ownership.
+pub(crate) fn lock_file(file: &File, conflict: &str) -> Result<()> {
+    #[cfg(target_os = "android")]
+    let result = {
+        use std::os::fd::AsRawFd;
+        unsafe extern "C" {
+            fn flock(fd: std::ffi::c_int, operation: std::ffi::c_int) -> std::ffi::c_int;
+        }
+        // SAFETY: fd is a live File descriptor; Linux/Bionic LOCK_EX|LOCK_NB
+        // constants are 2|4. flock retains no Rust pointers or borrowed storage.
+        if unsafe { flock(file.as_raw_fd(), 2 | 4) } == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    };
+    #[cfg(not(target_os = "android"))]
+    let result = file.try_lock().map_err(|e| match e {
+        std::fs::TryLockError::WouldBlock => std::io::Error::from(std::io::ErrorKind::WouldBlock),
+        std::fs::TryLockError::Error(e) => e,
+    });
+    match result {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Err(error(conflict)),
+        Err(e) => Err(e.into()),
+    }
 }
 
 #[derive(Deserialize)]
@@ -131,13 +169,15 @@ impl Config {
     }
 }
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Memory {
     pub device_id: String,
     pub base_mode: Option<String>,
     #[serde(default)]
     pub schedule_attempts: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub faults: crate::fault::Memory,
 }
 
 pub struct Store {
@@ -205,12 +245,21 @@ pub(crate) fn private_permissions(path: &Path) -> Result<()> {
 }
 
 pub(crate) fn read_bounded(path: &Path, label: &str) -> std::io::Result<Vec<u8>> {
+    read_bounded_limit(path, label, 8192)
+}
+pub(crate) fn read_bounded_limit(
+    path: &Path,
+    label: &str,
+    limit: usize,
+) -> std::io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
-    File::open(path)?.take(8193).read_to_end(&mut bytes)?;
-    if bytes.len() > 8192 {
+    File::open(path)?
+        .take((limit + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > limit {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("{label} exceeds 8 KiB"),
+            format!("{label} exceeds its size limit"),
         ));
     }
     Ok(bytes)

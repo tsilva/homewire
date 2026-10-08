@@ -15,7 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const HELP: &str = "Homewire — lightweight home automation\n\nUsage: homewire [--config MEACO_JSON] [--printers PRINTERS_JSON] [--awair AWAIR_JSON] [--lights LIGHTS_JSON] [--plugs PLUGS_JSON] [--samsung SAMSUNG_JSON] [--digi DIGI_JSON] [--tv TV_JSON] COMMAND\n\nCommands:\n  tv-status               Read shared outlet and both media devices\n  tv-set on|off           Run configured shared-outlet sequence\n  samsung-status          Read Samsung identity and remote state\n  samsung-set on|off      Wake or request Samsung shutdown\n  samsung-key KEY         Send one Samsung remote key\n  digi-status             Read DIGI identity and power state\n  digi-set on|off         Apply verified DIGI wake/sleep\n  digi-key KEY            Send one DIGI remote key\n  plugs                   List configured Tapo P100/P110 plugs\n  plug-status NAME        Read relay, overload and P110 energy\n  plug-set NAME on|off    Apply and verify absolute relay power\n  plug-check              Poll plugs and retained overload faults\n  watch-plugs             Monitor reported overload events\n  status                  Read Meaco status\n  plan day|night|off       Preview a Meaco sequence\n  apply day|night|off      Apply and verify a Meaco sequence\n  awair-status            Read fresh air-quality measurements\n  printers                List configured printers\n  printer-status NAME     Read printer status and supplies\n  printer-check           Poll printers and retained faults\n  watch-printers          Monitor debounced printer fault events\n  lights                  List configured Tapo bulbs and strips\n  light-status NAME       Read light state and overheating\n  light-set NAME JSON     Apply and verify absolute settings\n  light-check             Poll lights and retained faults\n  light-plan              Preview optional L900 curve and sunset\n  light-schedule          Run optional L900 curve and sunset rules\n  watch-lights            Monitor overheating events\n  bulbs                   Legacy bulb commands (also --bulbs)\n  bulb-status NAME        Read bulb state and overheating status\n  bulb-set NAME JSON      Apply and verify absolute bulb settings\n  bulb-check              Poll bulbs and retained overheating faults\n  watch-bulbs             Monitor debounced overheating events\n  serve [--allow-control] [--legacy-tools] [--maintenance] [--schedule] [--light-schedule] [--watch-printers] [--watch-lights] [--watch-plugs]\n                          MCP entities/routines; read-only by default\n--legacy-tools exposes original adapter tools.\n--maintenance permits direct power controls owned by the TV routine.\n  schedule                Run the daily 09:00/22:00 London Meaco rules\n\n--connect IP:PORT overrides only the Meaco TCP destination.\nPrinter, Awair, light, plug and media configs may have connect overrides for testing.\nSchedule mode sends controls. Enable it only after disabling the two\ncorresponding Home Assistant rules. Fault monitoring sends no controls.\n";
+const HELP: &str = "Homewire — lightweight home automation\n\nUsage: homewire [--config MEACO_JSON] [--printers PRINTERS_JSON] [--awair AWAIR_JSON] [--lights LIGHTS_JSON] [--plugs PLUGS_JSON] [--samsung SAMSUNG_JSON] [--digi DIGI_JSON] [--tv TV_JSON] COMMAND\n\nCommands:\n  call TOOL JSON        Use a standard capability tool from CLI\n  certificate-sha256 IP:PORT  Inspect a new TLS pin; confirm device identity\n  daemon SOCKET          Persistent device owner; accepts local MCP clients\n  bridge SOCKET          MCP stdio client for a running daemon\n  tv-status               Read shared outlet and both media devices\n  tv-set on|off           Run configured shared-outlet sequence\n  samsung-status          Read Samsung identity and remote state\n  samsung-set on|off      Wake or request Samsung shutdown\n  samsung-key KEY         Send one Samsung remote key\n  digi-status             Read DIGI identity and power state\n  digi-set on|off         Apply verified DIGI wake/sleep\n  digi-key KEY            Send one DIGI remote key\n  plugs                   List configured Tapo P100/P110 plugs\n  plug-status NAME        Read relay, overload and P110 energy\n  plug-set NAME on|off    Apply and verify absolute relay power\n  plug-check              Poll plugs and retained overload faults\n  watch-plugs             Monitor reported overload events\n  status                  Read Meaco status\n  plan day|night|off       Preview a Meaco sequence\n  apply day|night|off      Apply and verify a Meaco sequence\n  awair-status            Read fresh air-quality measurements\n  printers                List configured printers\n  printer-status NAME     Read printer status and supplies\n  printer-check           Poll printers and retained faults\n  watch-printers          Monitor debounced printer fault events\n  lights                  List configured Tapo bulbs and strips\n  light-status NAME       Read light state and overheating\n  light-set NAME JSON     Apply and verify absolute settings\n  light-check             Poll lights and retained faults\n  light-plan              Preview optional L900 curve and sunset\n  light-schedule          Run optional L900 curve and sunset rules\n  watch-lights            Monitor overheating events\n  bulbs                   Legacy bulb commands (also --bulbs)\n  bulb-status NAME        Read bulb state and overheating status\n  bulb-set NAME JSON      Apply and verify absolute bulb settings\n  bulb-check              Poll bulbs and retained overheating faults\n  watch-bulbs             Monitor debounced overheating events\n  serve [--allow-control] [--legacy-tools] [--maintenance] [--schedule] [--light-schedule] [--watch-printers] [--watch-lights] [--watch-plugs]\n                          MCP entities/routines; read-only by default\n--legacy-tools exposes original adapter tools.\n--maintenance permits direct power controls owned by the TV routine.\n  schedule                Run the daily 09:00/22:00 London Meaco rules\n\n--adapter FAMILY=PATH loads a statically compiled adapter; may be repeated.\n--api API_JSON adds a bounded HTTPS dashboard/companion frontend to daemon.\n--watch-meaco enables independent Meaco fault monitoring.\n--connect IP:PORT overrides only the Meaco TCP destination.\nPrinter, Awair, light, plug and media configs may have connect overrides for testing.\nSchedule mode sends controls. Enable it only after disabling the two\ncorresponding Home Assistant rules. Fault monitoring sends no controls.\n";
 
 struct App {
     devices: Devices,
@@ -24,6 +24,9 @@ struct App {
     next_bulb_poll: Instant,
     next_light_schedule: Instant,
     next_printer_poll: Instant,
+    watch_meaco: bool,
+    next_meaco_poll: Instant,
+    next_history: Instant,
 }
 impl App {
     fn wait_duration(
@@ -36,11 +39,19 @@ impl App {
     ) -> Duration {
         let now = Instant::now();
         [
+            self.devices.next_background(),
             scheduling.then_some(self.next_meaco_schedule),
             watching.then_some(self.next_printer_poll),
             watching_bulbs.then_some(self.next_bulb_poll),
             light_scheduling.then_some(self.next_light_schedule),
             watching_plugs.then_some(self.next_plug_poll),
+            self.watch_meaco.then_some(self.next_meaco_poll),
+            self.devices
+                .alerts
+                .as_ref()
+                .and_then(|a| a.next_delay(chrono::Utc::now().timestamp()))
+                .map(|seconds| now + Duration::from_secs(seconds)),
+            self.devices.history.is_some().then_some(self.next_history),
         ]
         .into_iter()
         .flatten()
@@ -56,6 +67,64 @@ impl App {
         light_scheduling: bool,
         watching_plugs: bool,
     ) -> Result<()> {
+        self.devices.background_tick();
+        let mut alerts = self.devices.alerts.take();
+        let result = self.tick_with_alerts(
+            scheduling,
+            watching,
+            watching_bulbs,
+            light_scheduling,
+            watching_plugs,
+            &mut alerts,
+        );
+        self.devices.alerts = alerts;
+        if result.is_ok()
+            && Instant::now() >= self.next_history
+            && let Some(mut history) = self.devices.history.take()
+        {
+            let samples = homewire::entity::call(
+                &mut self.devices,
+                "entity_status",
+                &json!({"entities":history.config.entities}),
+            );
+            let mut error = None;
+            if let Ok(samples) = samples {
+                for state in samples["states"].as_array().into_iter().flatten() {
+                    if state["available"] == true
+                        && let (Some(entity), Some(value)) =
+                            (state["entity"].as_str(), state["state"].as_f64())
+                        && let Err(e) =
+                            history.record(entity, chrono::Utc::now().timestamp(), value)
+                    {
+                        error = Some(e);
+                        break;
+                    }
+                }
+            }
+            self.next_history =
+                Instant::now() + Duration::from_secs(history.config.interval_seconds);
+            self.devices.history = Some(history);
+            if let Some(e) = error {
+                eprintln!("History write failed: {e}");
+            }
+        }
+        result
+    }
+    fn tick_with_alerts(
+        &mut self,
+        scheduling: bool,
+        watching: bool,
+        watching_bulbs: bool,
+        light_scheduling: bool,
+        watching_plugs: bool,
+        alerts: &mut Option<homewire::alerts::Manager>,
+    ) -> Result<()> {
+        if self.watch_meaco
+            && Instant::now() >= self.next_meaco_poll
+            && let Some(meaco) = self.devices.meaco.as_mut()
+        {
+            poll_watch(meaco, &mut self.next_meaco_poll, "meaco", alerts.as_mut())?;
+        }
         if scheduling && Instant::now() >= self.next_meaco_schedule {
             let meaco = self
                 .devices
@@ -64,8 +133,34 @@ impl App {
                 .ok_or_else(|| error("No Meaco configured"))?;
             if let Some(operation) = meaco.scheduled_operation(chrono::Utc::now())? {
                 match meaco.execute("meaco_apply", &json!({"operation":operation})) {
-                    Ok(result) => eprintln!("Schedule completed: {result}"),
-                    Err(e) => eprintln!("Schedule failed (no automatic retry): {e}"),
+                    Ok(result) => {
+                        eprintln!("Schedule completed: {result}");
+                        if let Some(alerts) = alerts.as_mut()
+                            && let Err(e) = alerts.record(
+                                "schedule.meaco",
+                                false,
+                                "Meaco schedule",
+                                "",
+                                chrono::Utc::now().timestamp(),
+                            )
+                        {
+                            eprintln!("Alert ledger write failed: {e}");
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Schedule failed (no automatic retry): {e}");
+                        if let Some(alerts) = alerts.as_mut()
+                            && let Err(e) = alerts.record(
+                                "schedule.meaco",
+                                true,
+                                "Meaco schedule failed",
+                                &e.to_string(),
+                                chrono::Utc::now().timestamp(),
+                            )
+                        {
+                            eprintln!("Alert ledger write failed: {e}");
+                        }
+                    }
                 }
             }
             self.next_meaco_schedule =
@@ -78,12 +173,38 @@ impl App {
                 .as_mut()
                 .ok_or_else(|| error("No lights configured"))?;
             match bulbs.schedule_tick() {
-                Ok(Some(result)) => eprintln!(
-                    "Light schedule completed: {}",
-                    naming::light_output(serde_json::to_value(result)?)
-                ),
+                Ok(Some(result)) => {
+                    eprintln!(
+                        "Light schedule completed: {}",
+                        naming::light_output(serde_json::to_value(result)?)
+                    );
+                    if let Some(alerts) = alerts.as_mut()
+                        && let Err(e) = alerts.record(
+                            "schedule.lights",
+                            false,
+                            "Light schedule",
+                            "",
+                            chrono::Utc::now().timestamp(),
+                        )
+                    {
+                        eprintln!("Alert ledger write failed: {e}");
+                    }
+                }
                 Ok(None) => {}
-                Err(e) => eprintln!("Light schedule failed (no immediate retry): {e}"),
+                Err(e) => {
+                    eprintln!("Light schedule failed (no immediate retry): {e}");
+                    if let Some(alerts) = alerts.as_mut()
+                        && let Err(e) = alerts.record(
+                            "schedule.lights",
+                            true,
+                            "Light schedule failed",
+                            &e.to_string(),
+                            chrono::Utc::now().timestamp(),
+                        )
+                    {
+                        eprintln!("Alert ledger write failed: {e}");
+                    }
+                }
             }
             self.next_light_schedule =
                 Instant::now() + Duration::from_secs(bulbs.config.poll_seconds);
@@ -93,7 +214,7 @@ impl App {
                 .devices
                 .plugs()
                 .ok_or_else(|| error("No plugs configured"))?;
-            poll_watch(plugs, &mut self.next_plug_poll, "Plug")?;
+            poll_watch(plugs, &mut self.next_plug_poll, "plugs", alerts.as_mut())?;
         }
         if watching && Instant::now() >= self.next_printer_poll {
             let printers = self
@@ -101,7 +222,12 @@ impl App {
                 .printers
                 .as_mut()
                 .ok_or_else(|| error("No printers configured"))?;
-            poll_watch(printers, &mut self.next_printer_poll, "Printer")?;
+            poll_watch(
+                printers,
+                &mut self.next_printer_poll,
+                "printers",
+                alerts.as_mut(),
+            )?;
         }
         if watching_bulbs && Instant::now() >= self.next_bulb_poll {
             let bulbs = self
@@ -109,7 +235,19 @@ impl App {
                 .bulbs
                 .as_mut()
                 .ok_or_else(|| error("No bulbs configured"))?;
-            poll_watch(bulbs, &mut self.next_bulb_poll, "Bulb")?;
+            poll_watch(bulbs, &mut self.next_bulb_poll, "lights", alerts.as_mut())?;
+        }
+        if alerts
+            .as_ref()
+            .and_then(|a| a.next_delay(chrono::Utc::now().timestamp()))
+            == Some(0)
+        {
+            let sent = alerts
+                .as_mut()
+                .map(|a| a.deliver(chrono::Utc::now().timestamp()));
+            if let Some(Err(e)) = sent {
+                eprintln!("{e}");
+            }
         }
         Ok(())
     }
@@ -142,10 +280,41 @@ fn report_watch<U: serde::Serialize, E: serde::Serialize>(
     }
     Ok(())
 }
-fn poll_watch(device: &mut impl Monitored, next: &mut Instant, label: &str) -> Result<()> {
-    let check = device.watch()?;
+fn poll_watch(
+    device: &mut impl Monitored,
+    next: &mut Instant,
+    label: &str,
+    mut alerts: Option<&mut homewire::alerts::Manager>,
+) -> Result<()> {
     *next = Instant::now() + Duration::from_secs(device.poll_seconds());
-    report_watch(check, label, WatchOutput::Diagnostics)
+    let display = match label {
+        "printers" => "Printer",
+        "lights" => "Light",
+        "plugs" => "Plug",
+        "meaco" => "Meaco",
+        s => s,
+    };
+    let check = match device.watch() {
+        Ok(check) => check,
+        Err(e) => {
+            eprintln!("{display} monitor failed: {e}");
+            return Ok(());
+        }
+    };
+    let mut failed = None;
+    device.active_faults(&mut |name, faults| {
+        if failed.is_none()
+            && let Some(alerts) = alerts.as_mut()
+        {
+            failed = alerts
+                .reconcile(label, name, faults, chrono::Utc::now().timestamp())
+                .err();
+        }
+    });
+    if let Some(e) = failed {
+        eprintln!("Alert ledger write failed: {e}");
+    }
+    report_watch(check, display, WatchOutput::Diagnostics)
 }
 fn watch_loop(device: &mut impl Monitored, label: &str, light_names: bool) -> Result<()> {
     loop {
@@ -170,6 +339,23 @@ fn run() -> Result<()> {
         print!("{HELP}");
         return Ok(());
     }
+    if args.first().is_some_and(|a| a == "bridge") {
+        if args.len() != 2 {
+            return Err(error("Usage: homewire bridge SOCKET"));
+        }
+        return homewire::ipc::bridge(std::path::Path::new(&args[1]));
+    }
+    if args.first().is_some_and(|a| a == "certificate-sha256") {
+        if args.len() != 2 {
+            return Err(error("Expected certificate-sha256 IP:PORT"));
+        }
+        let fingerprint = homewire::setup::certificate_sha256(args[1].parse()?)?;
+        println!(
+            "{}",
+            json!({"sha256":fingerprint,"identity_verified":false,"note":"Explicit first-use inspection. Confirm the endpoint identity before saving this pin."})
+        );
+        return Ok(());
+    }
     if args == ["--version"] {
         println!("homewire {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
@@ -182,6 +368,8 @@ fn run() -> Result<()> {
     let mut samsung_path = None;
     let mut digi_path = None;
     let mut tv_path = None;
+    let mut api_path = None;
+    let mut adapters = Vec::new();
     let mut light_names = false;
     let mut connect = None;
     let mut control = false;
@@ -190,12 +378,33 @@ fn run() -> Result<()> {
     let mut watching = false;
     let mut watching_bulbs = false;
     let mut watching_plugs = false;
+    let mut watch_meaco = false;
     let mut legacy_tools = false;
     let mut maintenance = false;
     let mut positional = vec![];
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
+            "--watch-meaco" => watch_meaco = true,
+            "--api" => {
+                api_path =
+                    Some(PathBuf::from(iter.next().ok_or_else(|| {
+                        error("--api needs a private JSON configuration")
+                    })?))
+            }
+            "--adapter" => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| error("--adapter requires FAMILY=PATH"))?;
+                let (family, path) = value
+                    .split_once('=')
+                    .filter(|(f, p)| !f.is_empty() && !p.is_empty())
+                    .ok_or_else(|| error("--adapter requires FAMILY=PATH"))?;
+                adapters.push((family, PathBuf::from(path)));
+                if adapters.len() > 16 {
+                    return Err(error("At most 16 adapter declarations"));
+                }
+            }
             "--legacy-tools" => legacy_tools = true,
             "--maintenance" => maintenance = true,
             "--config" => {
@@ -292,6 +501,7 @@ fn run() -> Result<()> {
             | "plan"
             | "apply"
             | "serve"
+            | "daemon"
             | "schedule"
             | "light-plan"
             | "light-schedule"
@@ -303,6 +513,7 @@ fn run() -> Result<()> {
             | "watch-plugs"
             | "printers"
             | "printer-status"
+            | "call"
             | "printer-check"
             | "watch-printers"
             | "bulbs"
@@ -313,11 +524,15 @@ fn run() -> Result<()> {
     ) {
         return Err(error("Unknown command"));
     }
-    let expected = if matches!(command, "bulb-set" | "plug-set") {
+    if api_path.is_some() && command != "daemon" {
+        return Err(error("--api requires daemon"));
+    }
+    let expected = if matches!(command, "bulb-set" | "plug-set" | "call") {
         3
     } else if matches!(
         command,
-        "tv-set"
+        "daemon"
+            | "tv-set"
             | "samsung-set"
             | "samsung-key"
             | "digi-set"
@@ -341,15 +556,17 @@ fn run() -> Result<()> {
         || watching
         || watching_bulbs
         || watching_plugs
+        || watch_meaco
         || legacy_tools)
-        && command != "serve"
+        && !matches!(command, "serve" | "daemon")
     {
-        return Err(error("Server flags belong to serve"));
+        return Err(error("Server flags belong to serve or daemon"));
     }
     if (scheduling || light_scheduling) && !control {
-        return Err(error("serve schedules require --allow-control"));
+        return Err(error("Server schedules require --allow-control"));
     }
-    let needs_meaco = matches!(command, "status" | "plan" | "apply" | "schedule") || scheduling;
+    let needs_meaco =
+        matches!(command, "status" | "plan" | "apply" | "schedule") || scheduling || watch_meaco;
     let needs_printers = matches!(
         command,
         "printers" | "printer-status" | "printer-check" | "watch-printers"
@@ -381,6 +598,7 @@ fn run() -> Result<()> {
     ) || watching_plugs)
         && plugs_path.is_none()
         && tv_path.is_none()
+        && adapters.is_empty()
     {
         return Err(error("Specify --plugs or --tv PATH"));
     }
@@ -396,7 +614,7 @@ fn run() -> Result<()> {
     if command == "awair-status" && awair_path.is_none() {
         return Err(error("Specify --awair PATH"));
     }
-    if command == "serve"
+    if matches!(command, "serve" | "daemon")
         && config_path.is_none()
         && printers_path.is_none()
         && awair_path.is_none()
@@ -405,6 +623,7 @@ fn run() -> Result<()> {
         && samsung_path.is_none()
         && digi_path.is_none()
         && tv_path.is_none()
+        && adapters.is_empty()
     {
         return Err(error("Configure at least one device adapter for serve"));
     }
@@ -460,13 +679,20 @@ fn run() -> Result<()> {
             digi,
             tv,
             maintenance,
+            ..Devices::default()
         },
         next_meaco_schedule: Instant::now(),
         next_plug_poll: first_plug_poll,
         next_bulb_poll: first_bulb_poll,
         next_light_schedule: Instant::now(),
         next_printer_poll: first_printer_poll,
+        watch_meaco,
+        next_meaco_poll: Instant::now() + Duration::from_secs(30),
+        next_history: Instant::now(),
     };
+    for (family, path) in adapters {
+        app.devices.open_adapter(family, &path)?;
+    }
     if let Some(plugs) = app.devices.plugs() {
         app.next_plug_poll = Instant::now() + Duration::from_secs(plugs.config.poll_seconds);
     }
@@ -524,6 +750,14 @@ fn run() -> Result<()> {
                     "digi_key"
                 },
                 &json!({"key":positional[1]})
+            )?
+        ),
+        "call" => println!(
+            "{}",
+            homewire::entity::call(
+                &mut app.devices,
+                positional[1],
+                &serde_json::from_str::<Value>(positional[2])?
             )?
         ),
         "plugs" => println!("{}", app.devices.call("plug_list", &json!({}))?),
@@ -636,9 +870,79 @@ fn run() -> Result<()> {
             app.tick(true, false, false, false, false)?;
             thread::sleep(app.wait_duration(true, false, false, false, false));
         },
+        "daemon" => {
+            let server = homewire::ipc::Server::bind(std::path::Path::new(positional[1]))?;
+            let background = scheduling
+                || watching
+                || watching_bulbs
+                || light_scheduling
+                || watching_plugs
+                || watch_meaco
+                || app.devices.alerts.is_some()
+                || app.devices.history.is_some()
+                || app.devices.next_background().is_some();
+            let _api = api_path
+                .as_ref()
+                .map(|path| homewire::api::Server::start(path, std::path::Path::new(positional[1])))
+                .transpose()?;
+            eprintln!("Homewire daemon ready");
+            loop {
+                if background {
+                    app.tick(
+                        scheduling,
+                        watching,
+                        watching_bulbs,
+                        light_scheduling,
+                        watching_plugs,
+                    )?;
+                }
+                let stream = if background {
+                    match server.incoming.recv_timeout(app.wait_duration(
+                        scheduling,
+                        watching,
+                        watching_bulbs,
+                        light_scheduling,
+                        watching_plugs,
+                    )) {
+                        Ok(stream) => stream,
+                        Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => {
+                            return Err(error("IPC listener stopped"));
+                        }
+                    }
+                } else {
+                    server
+                        .incoming
+                        .recv()
+                        .map_err(|_| error("IPC listener stopped"))?
+                };
+                let mut stream = stream;
+                if let Err(e) = homewire::ipc::exchange(&mut stream, |request| {
+                    if request["method"] == "homewire/api" {
+                        return homewire::api::dispatch(&mut app.devices, request, control);
+                    }
+                    if legacy_tools {
+                        mcp::handle_selected(request, selection, options, |name, args| {
+                            app.devices.call(name, args)
+                        })
+                    } else {
+                        mcp::handle_entities(request, &mut app.devices, control)
+                    }
+                }) {
+                    eprintln!("IPC request failed (no retry): {e}");
+                }
+            }
+        }
         "serve" => {
-            let background =
-                scheduling || watching || watching_bulbs || light_scheduling || watching_plugs;
+            let background = scheduling
+                || watching
+                || watching_bulbs
+                || light_scheduling
+                || watching_plugs
+                || watch_meaco
+                || app.devices.alerts.is_some()
+                || app.devices.history.is_some()
+                || app.devices.next_background().is_some();
             // Idle MCP needs no worker, queue or periodic wakeup.
             let mut input = if background {
                 let (sender, receiver) = mpsc::sync_channel(1);
@@ -663,7 +967,7 @@ fn run() -> Result<()> {
             let mut initialized = false;
             loop {
                 // Handshake must not wait behind printer network timeouts or controls.
-                if background {
+                if background && initialized {
                     app.tick(
                         scheduling && initialized,
                         watching && initialized,
@@ -747,6 +1051,9 @@ mod tests {
             next_bulb_poll: now + Duration::from_secs(20),
             next_plug_poll: now + Duration::from_secs(10),
             next_light_schedule: now + Duration::from_secs(5),
+            watch_meaco: false,
+            next_meaco_poll: now,
+            next_history: now,
         };
         let delay = app.wait_duration(true, true, false, false, false);
         assert!(delay > Duration::from_secs(29) && delay <= Duration::from_secs(30));

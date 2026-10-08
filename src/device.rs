@@ -9,6 +9,7 @@ use std::path::Path;
 /// Both CLI and MCP use this interface; protocol details stay inside the family.
 pub trait Adapter: Sized {
     const TOOLS: &'static [Tool];
+    const PUBLIC_TOOLS: &'static [Tool] = &[];
     const SUPPORT: crate::entity::Support;
     fn open(path: &Path) -> Result<Self>;
     /// Implementation hook for validated canonical commands. Callers should
@@ -19,6 +20,25 @@ pub trait Adapter: Sized {
     /// One fresh physical-device snapshot, shared across requested entities.
     fn read_device(&mut self, _index: usize) -> Result<Value> {
         Err(error("This adapter has no readable physical device"))
+    }
+    fn options(&mut self, _index: usize) -> Result<Value> {
+        Err(error("This adapter has no additional live options"))
+    }
+    /// Optional autonomous read job. Deadlines stay with the adapter; no
+    /// scheduler registry, cached JSON or polling thread is required.
+    fn next_background(&self) -> Option<std::time::Instant> {
+        None
+    }
+    fn background_tick(&mut self) -> Result<()> {
+        Ok(())
+    }
+    fn authorize_control(
+        &self,
+        _command: crate::entity::Command,
+        _arguments: &Value,
+        _maintenance: bool,
+    ) -> Result<()> {
+        Ok(())
     }
     fn control_device(
         &mut self,
@@ -37,6 +57,7 @@ pub trait Monitored: Adapter {
     type Event: Serialize;
     fn poll_seconds(&self) -> u64;
     fn watch(&mut self) -> Result<fault::Watch<Self::Unavailable, Self::Event>>;
+    fn active_faults(&self, visit: &mut impl FnMut(&str, &[String]));
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -83,6 +104,11 @@ pub struct Field {
 #[derive(Clone, Copy)]
 pub enum Input {
     Empty,
+    Object {
+        schema: fn() -> Value,
+        valid: fn(&Value) -> bool,
+        error: &'static str,
+    },
     Field {
         field: Field,
         shape_error: &'static str,
@@ -97,6 +123,7 @@ impl Input {
     pub fn validate(self, args: &Value) -> std::result::Result<(), &'static str> {
         let object = args.as_object().ok_or("Arguments must be an object")?;
         let field = match self {
+            Self::Object { valid, error, .. } => return valid(args).then_some(()).ok_or(error),
             Self::Empty => {
                 return if object.is_empty() {
                     Ok(())
@@ -133,6 +160,7 @@ impl Input {
     pub fn schema(self, named_key: Option<&str>) -> Value {
         let mut schema = json!({"type":"object","properties":{},"additionalProperties":false});
         let (key, field) = match self {
+            Self::Object { schema, .. } => return schema(),
             Self::Empty => return schema,
             Self::Field { field, .. } => (None, Some(field)),
             Self::Named { key, extra, .. } => (Some(named_key.unwrap_or(key)), extra),
@@ -176,6 +204,7 @@ macro_rules! static_adapters {
         #[derive(Clone, Copy, Default)]
         pub struct Selection { $(pub $field: bool,)+ }
         impl Selection {
+            pub fn any(self)->bool { false $(||self.$field)+ }
             pub fn support(self) -> crate::entity::Support {
                 [$(if self.$field { <$adapter as Adapter>::SUPPORT } else { crate::entity::Support::NONE },)+]
                     .into_iter().fold(crate::entity::Support::NONE, crate::entity::Support::union)
@@ -188,8 +217,29 @@ macro_rules! static_adapters {
                 [$(if self.$field { <$adapter as Adapter>::TOOLS } else { &[] },)+]
                     .into_iter().flatten()
             }
+            pub fn public_tools(self) -> impl Iterator<Item = &'static Tool> + Clone {
+                [$(if self.$field { <$adapter as Adapter>::PUBLIC_TOOLS } else { &[] },)+].into_iter().flatten()
+            }
         }
         impl Devices {
+            pub fn next_background(&self) -> Option<std::time::Instant> {
+                [$(self.$field.as_ref().and_then(Adapter::next_background),)+].into_iter().flatten().min()
+            }
+            pub fn background_tick(&mut self) {
+                let now=std::time::Instant::now();
+                $(if let Some(adapter)=self.$field.as_mut() && adapter.next_background().is_some_and(|due| due<=now)
+                    && let Err(e)=adapter.background_tick() { eprintln!("{} background read failed: {e}", stringify!($field)); })+
+            }
+            pub fn open_adapter(&mut self, family: &str, path: &Path) -> Result<()> {
+                match family {
+                    $(stringify!($field) => {
+                        if self.$field.is_some() { return Err(error("Adapter configured more than once")); }
+                        self.$field = Some(<$adapter as Adapter>::open(path)?);
+                    },)+
+                    _ => return Err(error("Unknown static adapter family")),
+                }
+                Ok(())
+            }
             pub(crate) fn validate_ownership(&self) -> Result<()> {
                 if self.tv.is_some() && (self.samsung.is_some() || self.digi.is_some() || self.plugs.is_some()) {
                     return Err(error("TV owns its Samsung, DIGI and plug adapters; configure those through --tv only"));
@@ -226,13 +276,26 @@ macro_rules! static_adapters {
                     $(Family::$variant => self.$field().ok_or_else(||error("Unconfigured device"))?.read_device(device.index),)+
                 }
             }
+            pub(crate) fn options(&mut self,device:crate::entity::Device)->Result<Value> {
+                match device.family {$(Family::$variant=>self.$field().ok_or_else(||error("Unconfigured device"))?.options(device.index),)+}
+            }
             pub(crate) fn control_device(&mut self, device: crate::entity::Device, command: crate::entity::Command, args: &Value) -> Result<Value> {
                 if matches!(command, crate::entity::Command::Power)
                     && !self.maintenance && self.tv.as_ref().is_some_and(|tv|tv.owns_power(device)) {
                     return Err(error("Power is owned by the TV routine; use routine_run or explicit --maintenance"));
                 }
+                if matches!(command,crate::entity::Command::Configure) && !self.maintenance
+                    && self.tv.as_ref().is_some_and(|tv|tv.owns_power(device))
+                    && args["settings"].as_object().is_some_and(|o|o.contains_key("auto_off")||o.contains_key("auto_off_minutes")) {
+                    return Err(error("TV routine owns outlet shutdown; auto-off changes require --maintenance"));
+                }
                 match device.family {
-                    $(Family::$variant => self.$field().ok_or_else(||error("Unconfigured device"))?.control_device(device.index,command,args),)+
+                    $(Family::$variant => {
+                        let maintenance=self.maintenance;
+                        let adapter=self.$field().ok_or_else(||error("Unconfigured device"))?;
+                        adapter.authorize_control(command,args,maintenance)?;
+                        adapter.control_device(device.index,command,args)
+                    },)+
                 }
             }
             /// Canonical command dispatch validates before any device I/O.
@@ -243,7 +306,7 @@ macro_rules! static_adapters {
                     return Err(error("Power is owned by the TV routine; use routine_run or explicit --maintenance"));
                 }
                 $(if let Some(adapter) = self.$field()
-                    && let Some(tool) = <$adapter as Adapter>::TOOLS.iter().find(|t| t.name == name) {
+                    && let Some(tool) = <$adapter as Adapter>::TOOLS.iter().chain(<$adapter as Adapter>::PUBLIC_TOOLS).find(|t| t.name == name) {
                     tool.input.validate(args).map_err(error)?;
                     return adapter.execute(name, args);
                 })+
@@ -253,6 +316,17 @@ macro_rules! static_adapters {
     };
 }
 static_adapters! {
+    radio/Radio: crate::convenience::Radio,
+    speech/Speech: crate::convenience::Speech,
+    brother/Brother: crate::brother::Manager,
+    cast/Cast: crate::cast::Manager,
+    dlna/Dlna: crate::dlna::Manager,
+    mobile/Mobile: crate::mobile::Manager,
+    shopping/Shopping: crate::shopping::Manager,
+    weather/Weather: crate::weather::Config,
+    history/History: crate::history::Manager,
+    alerts/Alerts: crate::alerts::Manager,
+    router/Router: crate::router::Manager,
     meaco/Meaco: crate::meaco::Manager,
     bulbs/Bulbs: crate::bulb::Manager,
     plugs/Plugs: crate::plug::Manager => tv.plugs,

@@ -26,6 +26,8 @@ pub struct Endpoint {
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connect: Option<SocketAddr>,
+    #[serde(default = "supply_threshold", skip_serializing_if = "Option::is_none")]
+    pub supply_warning_percent: Option<u8>,
 }
 fn port() -> u16 {
     631
@@ -38,6 +40,9 @@ fn timeout() -> u64 {
 }
 fn interval() -> u64 {
     30
+}
+fn supply_threshold() -> Option<u8> {
+    Some(15)
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -73,6 +78,7 @@ impl Config {
         }
         for printer in &self.printers {
             if printer.port == 0
+                || printer.supply_warning_percent.is_some_and(|v| v > 100)
                 || printer.connect.is_some_and(|a| a.port() == 0)
                 || !printer.path.starts_with('/')
                 || printer.path.len() > 256
@@ -305,6 +311,9 @@ pub struct Manager {
     pub config: Config,
     pub monitor: Monitor,
     store: fault::Store,
+    warnings: Monitor,
+    warning_path: std::path::PathBuf,
+    started: std::time::Instant,
 }
 pub type Check = fault::Check<Status, Unavailable, Event>;
 #[derive(Serialize)]
@@ -316,10 +325,21 @@ impl Manager {
     pub fn open(path: &Path) -> Result<Self> {
         let config = Config::load(path)?;
         let (store, monitor) = fault::Store::open(path, &config.printers)?;
+        let warning_path = path.with_extension("supply-state.json");
+        let mut identities = std::collections::BTreeMap::new();
+        for p in &config.printers {
+            for i in 0..16 {
+                identities.insert(format!("{}_supply_{i}", p.name), p.identity());
+            }
+        }
+        let warnings = Monitor::load(&warning_path, &identities)?;
         Ok(Self {
             config,
             monitor,
             store,
+            warnings,
+            warning_path,
+            started: std::time::Instant::now(),
         })
     }
     pub fn status(&self, name: &str) -> Result<Status> {
@@ -339,11 +359,42 @@ impl Manager {
         )
     }
     pub fn watch(&mut self) -> Result<fault::Watch<Unavailable, Event>> {
-        self.store.watch(
-            &mut self.monitor,
-            &self.config.printers,
-            Duration::from_secs(self.config.timeout_seconds),
-        )
+        let check = self.check()?;
+        let mut warnings = self.warnings.clone();
+        let mut changed = false;
+        for p in &self.config.printers {
+            let status = check.statuses.iter().find(|s| s.printer == p.name);
+            for i in 0..16 {
+                let key = format!("{}_supply_{i}", p.name);
+                let observation = status
+                    .and_then(|s| s.supplies.get(i))
+                    .and_then(|s| s.percent)
+                    .zip(p.supply_warning_percent)
+                    .map(|(percent, threshold)| {
+                        if percent <= threshold {
+                            vec![format!("low_supply_at_or_below_{threshold}_percent")]
+                        } else {
+                            vec![]
+                        }
+                    });
+                changed |= warnings
+                    .observe_faults(
+                        &key,
+                        &p.identity(),
+                        observation.as_deref(),
+                        self.started.elapsed().as_secs(),
+                    )
+                    .is_some();
+            }
+        }
+        if changed {
+            warnings.save(&self.warning_path)?;
+        }
+        self.warnings = warnings;
+        Ok(fault::Watch {
+            events: check.events,
+            unavailable: check.unavailable,
+        })
     }
 }
 
@@ -447,6 +498,16 @@ impl Adapter for Manager {
 }
 
 impl crate::device::Monitored for Manager {
+    fn active_faults(&self, visit: &mut impl FnMut(&str, &[String])) {
+        for (name, saved) in &self.monitor.memory.devices {
+            visit(name, &saved.faults);
+        }
+        // Supply percentages are warnings, separate from IPP hardware faults.
+        for (name, saved) in &self.warnings.memory.devices {
+            visit(name, &saved.faults);
+        }
+    }
+
     type Unavailable = Unavailable;
     type Event = Event;
     fn poll_seconds(&self) -> u64 {

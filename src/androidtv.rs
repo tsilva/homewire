@@ -52,9 +52,9 @@ pub struct Config {
     pub connect: Option<SocketAddr>,
 }
 #[derive(Debug)]
-struct Pinned {
-    fingerprint: [u8; 32],
-    provider: Arc<CryptoProvider>,
+pub(crate) struct Pinned {
+    pub(crate) fingerprint: [u8; 32],
+    pub(crate) provider: Arc<CryptoProvider>,
 }
 impl ServerCertVerifier for Pinned {
     fn verify_server_cert(
@@ -67,7 +67,7 @@ impl ServerCertVerifier for Pinned {
     ) -> std::result::Result<ServerCertVerified, rustls::Error> {
         if Sha256::digest(end.as_ref()).as_slice() != self.fingerprint {
             return Err(rustls::Error::General(
-                "DIGI server certificate differs from paired identity".into(),
+                "Server certificate differs from paired identity".into(),
             ));
         }
         Ok(ServerCertVerified::assertion())
@@ -116,6 +116,8 @@ struct Remote {
     features: u64,
     configured: bool,
     active: bool,
+    ime: Option<(u64, u64)>,
+    current_app: Option<String>,
 }
 impl Config {
     fn validate(&self) -> Result<()> {
@@ -167,6 +169,8 @@ impl Config {
             features: 0,
             configured: false,
             active: false,
+            ime: None,
+            current_app: None,
         };
         remote.until(|r| r.active && r.status.is_some())?;
         Ok(remote)
@@ -200,7 +204,7 @@ impl Remote {
             if features & 35 != 35 {
                 return Err(error("DIGI lacks required key/power features"));
             }
-            self.features = features & 35;
+            self.features = features & (35 | 4 | 512);
             let device = configure
                 .nested(2)?
                 .ok_or_else(|| error("Missing DIGI device identity"))?;
@@ -254,6 +258,14 @@ impl Remote {
             let mut body = Vec::new();
             pb::integer(1, ping.int(1)?.unwrap_or(0), &mut body);
             pb::write(&mut self.stream, 9, &body)?;
+        }
+        if let Some(ime) = message.nested(21)? {
+            self.ime = Some((ime.int(1)?.unwrap_or(0), ime.int(2)?.unwrap_or(0)));
+        }
+        if let Some(ime) = message.nested(20)?
+            && let Some(info) = ime.nested(1)?
+        {
+            self.current_app = info.text(12)?.filter(|s| s.len() <= 256).map(str::to_owned);
         }
         Ok(())
     }
@@ -317,6 +329,50 @@ impl Manager {
         remote.key(code)?;
         Ok(json!({"sent":true,"verified":false,"key":key}))
     }
+    fn configure(&mut self, settings: &Value) -> Result<Value> {
+        crate::settings::validate(SETTINGS, settings)?;
+        if settings.as_object().is_none_or(|s| s.len() != 1) {
+            return Err(error("Send app launch or text separately"));
+        }
+        if let Some(link) = settings["app_link"].as_str() {
+            crate::web::Url::parse(link)?;
+        }
+        let mut remote = self
+            .config
+            .remote(Instant::now() + Duration::from_secs(self.config.timeout_seconds))?;
+        if let Some(link) = settings["app_link"].as_str() {
+            if remote.features & 512 == 0 {
+                return Err(error("DIGI does not support app links"));
+            }
+            let mut body = Vec::new();
+            pb::bytes(1, link.as_bytes(), &mut body);
+            pb::write(&mut remote.stream, 90, &body)?;
+        } else if let Some(text) = settings["text"].as_str() {
+            if remote.features & 4 == 0 {
+                return Err(error("DIGI does not support text input"));
+            }
+            remote.until(|r| r.ime.is_some())?;
+            let (ime, field) = remote
+                .ime
+                .ok_or_else(|| error("No focused DIGI text field"))?;
+            let mut object = Vec::new();
+            let cursor = text.chars().count().saturating_sub(1) as u64;
+            pb::integer(1, cursor, &mut object);
+            pb::integer(2, cursor, &mut object);
+            pb::bytes(3, text.as_bytes(), &mut object);
+            let mut edit = Vec::new();
+            pb::integer(1, 1, &mut edit);
+            pb::bytes(2, &object, &mut edit);
+            let mut batch = Vec::new();
+            pb::integer(1, ime, &mut batch);
+            pb::integer(2, field, &mut batch);
+            pb::bytes(3, &edit, &mut batch);
+            pb::write(&mut remote.stream, 21, &batch)?;
+        }
+        Ok(
+            json!({"sent":true,"verified":false,"note":"Android remote does not acknowledge app/text controls; never replay automatically"}),
+        )
+    }
 }
 fn key_code(key: &str) -> Option<u64> {
     Some(match key {
@@ -355,6 +411,16 @@ const KEYS: &[&str] = &[
     "channel_up",
     "channel_down",
 ];
+const SETTINGS: &[crate::settings::Setting] = &[
+    crate::settings::Setting {
+        name: "app_link",
+        kind: crate::settings::Kind::Text { max: 2048 },
+    },
+    crate::settings::Setting {
+        name: "text",
+        kind: crate::settings::Kind::Text { max: 512 },
+    },
+];
 const KEY: Input = Input::Field {
     field: Field {
         name: "key",
@@ -365,23 +431,27 @@ const KEY: Input = Input::Field {
     shape_error: "Expected only key",
 };
 impl Adapter for Manager {
-    const SUPPORT: crate::entity::Support = crate::entity::Support::MEDIA;
+    const SUPPORT: crate::entity::Support =
+        crate::entity::Support::MEDIA.union(crate::entity::Support::CONFIGURE);
     fn entities<'a>(&'a self, visit: &mut impl FnMut(crate::entity::Entity<'a>)) {
         use crate::{
             device::Family,
             entity::{Capabilities, Domain, Entity},
         };
-        visit(Entity::new(
-            Family::Digi,
-            0,
-            Domain::MediaPlayer,
-            "digi",
-            "DIGI R2A",
-            Capabilities::Media {
-                keys: KEYS,
-                verified_off: true,
-            },
-        ));
+        visit(
+            Entity::new(
+                Family::Digi,
+                0,
+                Domain::MediaPlayer,
+                "digi",
+                "DIGI R2A",
+                Capabilities::Media {
+                    keys: KEYS,
+                    verified_off: true,
+                },
+            )
+            .configurable(SETTINGS),
+        );
     }
     fn read_device(&mut self, index: usize) -> Result<Value> {
         if index != 0 {
@@ -399,6 +469,7 @@ impl Adapter for Manager {
             return Err(error("Unknown DIGI device"));
         }
         match command {
+            crate::entity::Command::Configure => self.configure(&args["settings"]),
             crate::entity::Command::Power => self.apply(
                 args["power"]
                     .as_bool()
@@ -411,6 +482,17 @@ impl Adapter for Manager {
             ),
             _ => Err(error("Unsupported DIGI command")),
         }
+    }
+    fn options(&mut self, index: usize) -> Result<Value> {
+        if index != 0 {
+            return Err(error("Unknown DIGI device"));
+        }
+        let remote = self
+            .config
+            .remote(Instant::now() + Duration::from_secs(self.config.timeout_seconds))?;
+        Ok(
+            json!({"app_link":remote.features&512!=0,"text":remote.features&4!=0,"current_app":remote.current_app}),
+        )
     }
 
     const TOOLS: &'static [Tool] = &[

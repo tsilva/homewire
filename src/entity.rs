@@ -20,6 +20,8 @@ impl Support {
     pub const SWITCH: Self = Self(1 | 4);
     pub const MEDIA: Self = Self(1 | 8);
     pub const ROUTINES: Self = Self(16);
+    pub const CONFIGURE: Self = Self(32);
+    pub const PLAYBACK: Self = Self(1 | 64);
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
     }
@@ -36,6 +38,10 @@ pub struct Device {
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Domain {
+    Person,
+    Weather,
+    Router,
+    DeviceTracker,
     Light,
     Switch,
     Sensor,
@@ -46,6 +52,10 @@ pub enum Domain {
 impl Domain {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Person => "person",
+            Self::Weather => "weather",
+            Self::Router => "router",
+            Self::DeviceTracker => "device_tracker",
             Self::Light => "light",
             Self::Switch => "switch",
             Self::Sensor => "sensor",
@@ -60,9 +70,13 @@ pub enum Command {
     Light,
     Power,
     Key,
+    Configure,
+    Play,
+    Playback,
 }
 #[derive(Clone, Copy)]
 pub enum Capabilities {
+    Playback,
     Read,
     Light {
         max_temperature_k: u16,
@@ -81,11 +95,13 @@ pub struct Entity<'a> {
     pub name: &'a str,
     pub suffix: &'static str,
     pub model: &'a str,
+    pub device_name: Option<&'a str>,
     /// A scalar field from the physical snapshot, or the whole typed snapshot.
     pub field: Option<&'static str>,
     pub unit: Option<&'static str>,
     pub capabilities: Capabilities,
     pub owner: Option<&'static str>,
+    pub settings: &'static [crate::settings::Setting],
 }
 impl<'a> Entity<'a> {
     pub(crate) fn same_id(self, other: Self) -> bool {
@@ -111,11 +127,17 @@ impl<'a> Entity<'a> {
             name,
             suffix: "",
             model,
+            device_name: None,
             field: None,
             unit: None,
             capabilities,
             owner: None,
+            settings: &[],
         }
+    }
+    pub fn configurable(mut self, settings: &'static [crate::settings::Setting]) -> Self {
+        self.settings = settings;
+        self
     }
     pub fn sensor(mut self, suffix: &'static str, field: &'static str, unit: &'static str) -> Self {
         self.domain = Domain::Sensor;
@@ -123,6 +145,7 @@ impl<'a> Entity<'a> {
         self.field = Some(field);
         self.unit = Some(unit);
         self.capabilities = Capabilities::Read;
+        self.settings = &[];
         self
     }
     fn matches(self, id: &str) -> bool {
@@ -135,6 +158,9 @@ impl<'a> Entity<'a> {
     }
     fn describe(self, maintenance: bool) -> Value {
         let mut features = match self.capabilities {
+            Capabilities::Playback => {
+                json!({"read":true,"play_url":true,"playback":["play","pause","stop","seek","volume","mute"]})
+            }
             Capabilities::Read => json!({"read":true}),
             Capabilities::Power => json!({"read":true,"power":true}),
             Capabilities::Light {
@@ -150,7 +176,10 @@ impl<'a> Entity<'a> {
         if self.owner.is_some() && !maintenance {
             features["power"] = json!(false);
         }
-        json!({"entity":self.id(),"domain":self.domain,"device":format!("{}.{}",self.device.family.as_str(),self.name),"model":self.model,"unit":self.unit,"capabilities":features,"power_owner":self.owner})
+        if !self.settings.is_empty() {
+            features["settings"] = crate::settings::schema(self.settings);
+        }
+        json!({"entity":self.id(),"domain":self.domain,"device":format!("{}.{}",self.device.family.as_str(),self.device_name.unwrap_or(self.name)),"model":self.model,"unit":self.unit,"capabilities":features,"power_owner":self.owner})
     }
 }
 fn resolve<'a>(devices: &'a Devices, id: &str) -> Result<Entity<'a>> {
@@ -229,6 +258,12 @@ fn control(devices: &mut Devices, tool: &str, args: &Value) -> Result<Value> {
         .ok_or_else(|| error("Expected entity"))?;
     let entity = resolve(devices, id)?;
     let command = match (tool, entity.domain, entity.capabilities) {
+        ("entity_configure", _, _) if !entity.settings.is_empty() => {
+            crate::settings::validate(entity.settings, &args["settings"])?;
+            Command::Configure
+        }
+        ("media_play", Domain::MediaPlayer, Capabilities::Playback) => Command::Play,
+        ("media_command", Domain::MediaPlayer, Capabilities::Playback) => Command::Playback,
         ("light_set", Domain::Light, Capabilities::Light { .. }) => Command::Light,
         ("switch_set", Domain::Switch, Capabilities::Power) => Command::Power,
         ("media_power", Domain::MediaPlayer, Capabilities::Media { .. }) => Command::Power,
@@ -274,8 +309,82 @@ const TARGETS: Field = Field {
 const LIST: Tool = Tool {
     name: "entity_list",
     description: "Discover configured entities, physical-device grouping, units, supported capabilities and routine-owned power. No device queries or credentials.",
-    input: Input::Empty,
+    input: Input::Object {
+        schema: discovery_schema,
+        valid: valid_discovery,
+        error: "Expected optional domain/device filters, offset, limit (1–16), and details",
+    },
     hints: Hints::LIST,
+};
+fn discovery_schema() -> Value {
+    json!({"type":"object","properties":{"domain":{"type":"string","maxLength":32},"device":{"type":"string","maxLength":64},"offset":{"type":"integer","minimum":0,"maximum":4096},"limit":{"type":"integer","minimum":1,"maximum":16},"details":{"type":"boolean"}},"additionalProperties":false})
+}
+fn valid_discovery(args: &Value) -> bool {
+    args.as_object().is_some_and(|o| {
+        o.iter().all(|(k, v)| match k.as_str() {
+            "domain" => v.as_str().is_some_and(|s| !s.is_empty() && s.len() <= 32),
+            "device" => v.as_str().is_some_and(|s| !s.is_empty() && s.len() <= 64),
+            "offset" => v.as_u64().is_some_and(|n| n <= 4096),
+            "limit" => v.as_u64().is_some_and(|n| (1..=16).contains(&n)),
+            "details" => v.is_boolean(),
+            _ => false,
+        })
+    })
+}
+fn discover(devices: &Devices, args: &Value) -> Value {
+    let offset = args["offset"].as_u64().unwrap_or(0) as usize;
+    let limit = args["limit"]
+        .as_u64()
+        .unwrap_or(if args["details"] == true { 1 } else { 8 }) as usize;
+    let mut count = 0;
+    let mut entities = Vec::with_capacity(limit);
+    let mut bytes = 0;
+    let mut full = false;
+    devices.entities(&mut |entity| {
+        if args["domain"].as_str().is_some_and(|s|s!=entity.domain.as_str())
+            || args["device"].as_str().is_some_and(|s|s!=format!("{}.{}",entity.device.family.as_str(),entity.device_name.unwrap_or(entity.name))) { return; }
+        if count >= offset && entities.len()<limit && !full {
+            let description=if args["details"].as_bool().unwrap_or(false) { entity.describe(devices.maintenance) } else {
+                json!({"entity":entity.id(),"domain":entity.domain,"device":format!("{}.{}",entity.device.family.as_str(),entity.device_name.unwrap_or(entity.name)),"model":entity.model,"configurable":!entity.settings.is_empty(),"power_owner":entity.owner})
+            };
+            let length=description.to_string().len();
+            if bytes+length<=6000 || entities.is_empty() { bytes+=length; entities.push(description); } else {full=true;}
+        }
+        count += 1;
+    });
+    json!({"entities":entities,"total":count,"next_offset":if offset+entities.len()<count { Some(offset+entities.len()) } else { None }})
+}
+const OPTIONS: Tool = Tool {
+    name: "entity_options",
+    description: "Read additional live choices, presets and settings for an adapter that supplies them. No device controls.",
+    input: Input::Named {
+        key: "entity",
+        extra: None,
+        error: "Expected entity",
+    },
+    hints: Hints::READ,
+};
+const CONFIGURE: Tool = Tool {
+    name: "entity_configure",
+    description: "Apply advertised typed device settings. Discover details=true for its exact schema. Adapters verify identity and outcomes; actions and uncertain controls are never retried.",
+    input: Input::Named {
+        key: "entity",
+        extra: Some(Field {
+            name: "settings",
+            schema: || json!({"type":"object","minProperties":1,"maxProperties":16}),
+            valid: |v| {
+                v.as_object()
+                    .is_some_and(|o| !o.is_empty() && o.len() <= 16)
+            },
+            error: "Expected 1–16 advertised settings",
+        }),
+        error: "Expected entity and settings",
+    },
+    hints: Hints {
+        idempotent: false,
+        destructive: Some(true),
+        ..Hints::CONTROL
+    },
 };
 const STATUS: Tool = Tool {
     name: "entity_status",
@@ -335,20 +444,55 @@ const REMOTE: Tool = Tool {
         ..Hints::CONTROL
     },
 };
+const PLAY: Tool = Tool {
+    name: "media_play",
+    description: "Play an HTTP(S) media URL through a configured Cast or DLNA entity; verify without replaying a failed control.",
+    input: Input::Named {
+        key: "entity",
+        extra: Some(Field {
+            name: "media",
+            schema: crate::playback::play_schema,
+            valid: crate::playback::valid_play,
+            error: "Expected media URL and content_type",
+        }),
+        error: "Expected entity and media",
+    },
+    hints: Hints::CONTROL,
+};
+const PLAYBACK: Tool = Tool {
+    name: "media_command",
+    description: "Apply play/pause/stop/seek, absolute volume or mute to a playback entity. Discover its capabilities first.",
+    input: Input::Named {
+        key: "entity",
+        extra: Some(Field {
+            name: "command",
+            schema: crate::playback::command_schema,
+            valid: crate::playback::valid_command,
+            error: "Expected a supported playback action and its value",
+        }),
+        error: "Expected entity and command",
+    },
+    hints: Hints::CONTROL,
+};
 pub fn tools(selection: Selection) -> impl Iterator<Item = &'static Tool> + Clone {
     let support = selection.support();
-    let any = support.contains(Support::READ);
+    let any = selection.any();
     [
+        support.contains(Support::PLAYBACK).then_some(&PLAY),
+        support.contains(Support::PLAYBACK).then_some(&PLAYBACK),
         any.then_some(&LIST),
         any.then_some(&STATUS),
         support.contains(Support::LIGHT).then_some(&LIGHT),
         support.contains(Support::SWITCH).then_some(&SWITCH),
         support.contains(Support::MEDIA).then_some(&MEDIA),
         support.contains(Support::MEDIA).then_some(&REMOTE),
+        support.contains(Support::CONFIGURE).then_some(&CONFIGURE),
+        support.contains(Support::CONFIGURE).then_some(&OPTIONS),
     ]
     .into_iter()
     .flatten()
     .chain(crate::routine::tools(selection))
+    .chain(selection.public_tools())
 }
 pub fn call(devices: &mut Devices, name: &str, args: &Value) -> Result<Value> {
     devices.validate_ownership()?;
@@ -357,10 +501,64 @@ pub fn call(devices: &mut Devices, name: &str, args: &Value) -> Result<Value> {
         .ok_or_else(|| error("Unknown or unconfigured capability tool"))?;
     tool.input.validate(args).map_err(error)?;
 
-    match name {
-        "entity_list" => Ok(list(devices)),
+    let result = match name {
+        "entity_list" => Ok(discover(devices, args)),
         "entity_status" => status(devices, args),
-        "light_set" | "switch_set" | "media_power" | "remote_key" => control(devices, name, args),
-        _ => crate::routine::call(devices, name, args),
+        "entity_options" => {
+            let device = resolve(
+                devices,
+                args["entity"]
+                    .as_str()
+                    .ok_or_else(|| error("Expected entity"))?,
+            )?
+            .device;
+            devices.options(device)
+        }
+        "light_set" | "switch_set" | "media_power" | "remote_key" | "entity_configure"
+        | "media_play" | "media_command" => control(devices, name, args),
+        name if name.starts_with("routine_") => crate::routine::call(devices, name, args),
+        _ => devices.call(name, args),
+    };
+    if !tool.hints.read_only
+        && matches!(
+            name,
+            "light_set"
+                | "switch_set"
+                | "media_power"
+                | "remote_key"
+                | "entity_configure"
+                | "media_play"
+                | "media_command"
+                | "routine_run"
+        )
+        && let Some(alerts) = devices.alerts.as_mut()
+    {
+        let target = args["entity"]
+            .as_str()
+            .or(args["routine"].as_str())
+            .unwrap_or(name);
+        let key = format!(
+            "control.{}",
+            target
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+                .take(80)
+                .collect::<String>()
+        );
+        let message = result
+            .as_ref()
+            .err()
+            .map(|e| e.to_string().chars().take(512).collect::<String>())
+            .unwrap_or_default();
+        if let Err(e) = alerts.record(
+            &key,
+            result.is_err(),
+            "Homewire control",
+            &message,
+            chrono::Utc::now().timestamp(),
+        ) {
+            eprintln!("Control alert ledger update failed: {e}");
+        }
     }
+    result
 }

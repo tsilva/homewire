@@ -19,11 +19,19 @@ and absolute wake/sleep. The TV workflow composes those adapters and a shared pl
 - New device families implement `device::Adapter`, declare borrowed capability
   entities/static `Support`, own protocol validation, and register concrete types
   in `src/device.rs`. Reuse standard category tools; add no family routing to MCP.
+- Optional adapter background work declares its own next deadline through
+  `Adapter::next_background`/`background_tick`; avoid central family polling
+  branches, additional threads or retained JSON snapshots.
 - Compose household behavior in `routine`; keep device protocols inside adapters.
   Batch entity reads once per physical device and release snapshots afterwards.
   Retain no entity-state/schema cache or allocated runtime registry.
 - TV owns child power controls in standard and legacy interfaces. Require explicit
   --maintenance for direct media/TV-outlet power; preserve device guards.
+- Use `daemon` for persistent device ownership and `bridge` for stateless MCP
+  clients. Keep IPC frames/queues bounded, socket access private, and never replay
+  controls after transport errors. Share Android-aware OS locking with configs.
+- Keep Android installs versioned, hash verified and reversible; preserve state.
+  Replacement schedules remain opt-in and require a deliberate HA cutover.
 - Wait for the next enabled job deadline instead of periodic per-second wakeups.
   Idle MCP and pre-initialization wait directly for input.
 - Use `device::Monitored` for supported fault monitoring and shared `fault` logic.
@@ -58,3 +66,7 @@ and absolute wake/sleep. The TV workflow composes those adapters and a shared pl
 - Commit Cargo.lock. Avoid unnecessary dependencies and interpreter subprocesses.
 - Required checks: `cargo fmt --check`, `cargo test --locked`, and
   `cargo clippy --locked --all-targets -- -D warnings`.
+
+- Android deployment changes also run
+  `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/android -p 'test_*.py'`
+  and `shellcheck scripts/android/build.sh`. Never copy test tunnel configs to phones.

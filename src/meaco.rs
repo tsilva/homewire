@@ -8,7 +8,11 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use std::{path::Path, thread, time::Duration};
+use std::{
+    path::Path,
+    thread,
+    time::{Duration, Instant},
+};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct State {
@@ -105,27 +109,49 @@ impl Device for NetworkDevice {
 }
 
 impl Adapter for Manager {
-    const SUPPORT: crate::entity::Support =
-        crate::entity::Support::READ.union(crate::entity::Support::ROUTINES);
+    const SUPPORT: crate::entity::Support = crate::entity::Support::READ
+        .union(crate::entity::Support::ROUTINES)
+        .union(crate::entity::Support::CONFIGURE);
     fn entities<'a>(&'a self, visit: &mut impl FnMut(crate::entity::Entity<'a>)) {
         use crate::{
             device::Family,
             entity::{Capabilities, Domain, Entity},
         };
-        visit(Entity::new(
+        let base = Entity::new(
             Family::Meaco,
             0,
             Domain::Humidifier,
             "meaco",
             "Arete Two",
             Capabilities::Read,
-        ));
+        );
+        visit(base.configurable(SETTINGS));
+        for (s, f, u) in [
+            ("_humidity", "humidity", "%"),
+            ("_target", "target_humidity", "%"),
+            ("_remaining_hours", "remaining_hours", "h"),
+            ("_tank_full", "tank_full", ""),
+            ("_moisture", "moisture", ""),
+        ] {
+            visit(base.sensor(s, f, u));
+        }
     }
     fn read_device(&mut self, index: usize) -> Result<Value> {
         if index != 0 {
             return Err(error("Unknown Meaco device"));
         }
         self.execute("meaco_status", &json!({}))
+    }
+    fn control_device(
+        &mut self,
+        index: usize,
+        command: crate::entity::Command,
+        args: &Value,
+    ) -> Result<Value> {
+        if index != 0 || !matches!(command, crate::entity::Command::Configure) {
+            return Err(error("Unsupported Meaco command"));
+        }
+        self.configure(&args["settings"])
     }
 
     const TOOLS: &'static [Tool] = &[
@@ -183,11 +209,13 @@ pub struct Manager {
     device: NetworkDevice,
     memory: Memory,
     store: Store,
+    monitor: crate::fault::Monitor,
+    started: Instant,
 }
 impl Manager {
     fn operation_call(&mut self, name: &str, operation: Option<Operation>) -> Result<Value> {
         match name {
-            "meaco_status" => Ok(serde_json::to_value(self.device.read()?)?),
+            "meaco_status" => self.snapshot(),
             "meaco_plan" => {
                 let op = operation.ok_or_else(|| error("Missing operation"))?;
                 let state = self.device.read()?;
@@ -218,6 +246,7 @@ impl Manager {
         let config = crate::config::Config::load(path)?;
         let store = Store::open(path, &config.device_id)?;
         let memory = store.read()?;
+        let monitor = crate::fault::Monitor::from_memory(memory.faults.clone());
         Ok(Self {
             device: NetworkDevice {
                 client: Client::new(&config, connect)?,
@@ -225,6 +254,8 @@ impl Manager {
             },
             memory,
             store,
+            monitor,
+            started: Instant::now(),
         })
     }
     /// Persist a due attempt before returning it; callers must never replay it.
@@ -241,7 +272,160 @@ impl Manager {
         self.store.save(&self.memory)?;
         Ok(Some(operation))
     }
+    fn snapshot(&mut self) -> Result<Value> {
+        let dps = self.device.client.status()?;
+        let state = State::from_dps(&dps)?;
+        let mut result = serde_json::to_value(&state)?;
+        for (name, dp) in [
+            ("child_lock", "14"),
+            ("off_timer", "17"),
+            ("remaining_hours", "18"),
+            ("on_timer", "101"),
+        ] {
+            result[name] = dps.get(dp).cloned().unwrap_or(Value::Null);
+        }
+        result["moisture"] = json!(state.fault_code == 128);
+        Ok(result)
+    }
+    fn configure(&mut self, settings: &Value) -> Result<Value> {
+        crate::settings::validate(SETTINGS, settings)?;
+        if settings["power"] == false && settings.get("mode").is_some() {
+            return Err(error("Do not combine power-off with a mode change"));
+        }
+        let before = self.snapshot()?;
+        for (name, _) in settings
+            .as_object()
+            .ok_or_else(|| error("Expected settings"))?
+        {
+            if before[name].is_null() {
+                return Err(error(
+                    "Meaco does not report the requested setting; no changes sent",
+                ));
+            }
+        }
+        if settings["power"] == true && before["problem"] != false {
+            return Err(error("Meaco problem state blocks power-on"));
+        }
+        self.memory.base_mode = None;
+        self.store.save(&self.memory)?;
+        // Sleep is a toggle. Clear it once, verify, then establish an absolute
+        // base mode. Never replay a command when its outcome is uncertain.
+        if let Some(mode) = settings["mode"].as_str()
+            && before["mode"] == "sleep"
+            && mode != "sleep"
+        {
+            self.device.command(&Action::Mode("sleep".into()))?;
+            self.device.settle();
+            if self.device.read()?.mode == "sleep" {
+                return Err(error("Sleep did not clear; no retry"));
+            }
+        }
+        for (name, dp) in [
+            ("power", "1"),
+            ("target_humidity", "2"),
+            ("mode", "4"),
+            ("child_lock", "14"),
+            ("off_timer", "17"),
+            ("on_timer", "101"),
+        ] {
+            let Some(value) = settings.get(name) else {
+                continue;
+            };
+            let current = self.snapshot()?;
+            let wire = if name == "on_timer" && value == "cancel" {
+                json!("Cancel")
+            } else {
+                value.clone()
+            };
+            let current_value = &current[name];
+            if current_value == &wire {
+                continue;
+            }
+            if name == "power" && value == true && current["problem"] == true {
+                return Err(error("Meaco reports a problem; power-on is blocked"));
+            }
+            self.device.client.set(
+                json!({dp:wire})
+                    .as_object()
+                    .cloned()
+                    .ok_or_else(|| error("Invalid Meaco settings"))?,
+            )?;
+            self.device.settle();
+            if self.snapshot()?[name] != wire {
+                return Err(error("Meaco setting did not persist; no retry"));
+            }
+        }
+        let after = self.snapshot()?;
+        if after["mode"] != "sleep" {
+            self.memory.base_mode = after["mode"]
+                .as_str()
+                .filter(|s| matches!(*s, "manual" | "purify"))
+                .map(str::to_owned);
+        }
+        self.store.save(&self.memory)?;
+        Ok(json!({"verified":true,"state":after}))
+    }
 }
+
+impl crate::device::Monitored for Manager {
+    fn active_faults(&self, visit: &mut impl FnMut(&str, &[String])) {
+        for (name, saved) in &self.monitor.memory.devices {
+            visit(name, &saved.faults);
+        }
+    }
+    type Unavailable = Value;
+    type Event = crate::fault::Event;
+    fn poll_seconds(&self) -> u64 {
+        30
+    }
+    fn watch(&mut self) -> Result<crate::fault::Watch<Value>> {
+        let result = self.device.read();
+        let faults = result.as_ref().ok().map(|s| {
+            if s.tank_full {
+                vec!["tank_full".into()]
+            } else if s.problem {
+                vec![format!("problem:{}", s.fault_code)]
+            } else {
+                vec![]
+            }
+        });
+        let mut next = self.monitor.clone();
+        let event = next.observe_faults(
+            "meaco",
+            &self.memory.device_id,
+            faults.as_deref(),
+            self.started.elapsed().as_secs(),
+        );
+        if event.is_some() {
+            let mut memory = self.memory.clone();
+            memory.faults = next.memory.clone();
+            self.store.save(&memory)?;
+            self.memory = memory;
+        }
+        self.monitor = next;
+        Ok(crate::fault::Watch {
+            events: event.into_iter().collect(),
+            unavailable: result
+                .err()
+                .map(|e| json!({"device":"meaco","error":e.to_string()}))
+                .into_iter()
+                .collect(),
+        })
+    }
+}
+use crate::settings::Setting;
+const TIMERS: &[&str] = &[
+    "cancel", "1h", "2h", "3h", "4h", "5h", "6h", "7h", "8h", "9h", "10h", "11h", "12h", "13h",
+    "14h", "15h", "16h", "17h", "18h", "19h", "20h", "21h", "22h", "23h", "24h",
+];
+const SETTINGS: &[Setting] = &[
+    Setting::boolean("power"),
+    Setting::integer("target_humidity", 35, 70, 5),
+    Setting::choice("mode", &["manual", "laundry", "purify", "sleep"]),
+    Setting::boolean("child_lock"),
+    Setting::choice("off_timer", TIMERS),
+    Setting::choice("on_timer", TIMERS),
+];
 
 const OPERATION_FIELD: Field = Field {
     name: "operation",

@@ -280,7 +280,16 @@ fn standard_mcp_grants_only_configured_categories_and_gates_all_writes() {
             mcp::handle_capabilities(request.clone(), selection, control, |_, _| panic!("no I/O"))
                 .expect("reply");
         let tools = list["result"]["tools"].as_array().expect("tools");
-        assert_eq!(tools.len(), if control { 9 } else { 4 });
+        let expected: Vec<_> = entity::tools(selection)
+            .filter(|t| control || t.hints.read_only)
+            .map(|t| t.name)
+            .collect();
+        assert_eq!(tools.len(), expected.len());
+        assert!(
+            expected
+                .iter()
+                .all(|name| tools.iter().any(|t| t["name"] == *name))
+        );
         assert!(!tools.iter().any(|t| t["name"] == "samsung_apply"));
     }
     for (name, args) in [
