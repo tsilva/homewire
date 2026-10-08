@@ -21,3 +21,12 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + S
 pub fn error(message: impl Into<String>) -> Box<dyn std::error::Error + Send + Sync> {
     std::io::Error::other(message.into()).into()
 }
+
+pub mod androidtv;
+mod media;
+mod protobuf;
+pub mod samsung;
+mod transport;
+mod websocket;
+
+pub mod tv;

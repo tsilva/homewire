@@ -1,9 +1,9 @@
 use homewire::{
-    Result, awair, bulb,
+    Result, androidtv, awair, bulb,
     device::{Adapter, Devices, Monitored},
     error, fault, mcp,
     meaco::{self, Operation},
-    naming, plug, printer,
+    naming, plug, printer, samsung, tv,
 };
 use serde_json::{Value, json};
 use std::{
@@ -15,7 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const HELP: &str = "Homewire — lightweight home automation\n\nUsage: homewire [--config MEACO_JSON] [--printers PRINTERS_JSON] [--awair AWAIR_JSON] [--lights LIGHTS_JSON] [--plugs PLUGS_JSON] COMMAND\n\nCommands:\n  plugs                   List configured Tapo P100/P110 plugs\n  plug-status NAME        Read relay, overload and P110 energy\n  plug-set NAME on|off    Apply and verify absolute relay power\n  plug-check              Poll plugs and retained overload faults\n  watch-plugs             Monitor reported overload events\n  status                  Read Meaco status\n  plan day|night|off       Preview a Meaco sequence\n  apply day|night|off      Apply and verify a Meaco sequence\n  awair-status            Read fresh air-quality measurements\n  printers                List configured printers\n  printer-status NAME     Read printer status and supplies\n  printer-check           Poll printers and retained faults\n  watch-printers          Monitor debounced printer fault events\n  lights                  List configured Tapo bulbs and strips\n  light-status NAME       Read light state and overheating\n  light-set NAME JSON     Apply and verify absolute settings\n  light-check             Poll lights and retained faults\n  light-plan              Preview optional L900 curve and sunset\n  light-schedule          Run optional L900 curve and sunset rules\n  watch-lights            Monitor overheating events\n  bulbs                   Legacy bulb commands (also --bulbs)\n  bulb-status NAME        Read bulb state and overheating status\n  bulb-set NAME JSON      Apply and verify absolute bulb settings\n  bulb-check              Poll bulbs and retained overheating faults\n  watch-bulbs             Monitor debounced overheating events\n  serve [--allow-control] [--schedule] [--light-schedule] [--watch-printers] [--watch-lights] [--watch-plugs]\n                          MCP stdio; read-only by default\n  schedule                Run the daily 09:00/22:00 London Meaco rules\n\n--connect IP:PORT overrides only the Meaco TCP destination.\nPrinter, Awair, light and plug configs may have connect overrides for testing.\nSchedule mode sends controls. Enable it only after disabling the two\ncorresponding Home Assistant rules. Fault monitoring sends no controls.\n";
+const HELP: &str = "Homewire — lightweight home automation\n\nUsage: homewire [--config MEACO_JSON] [--printers PRINTERS_JSON] [--awair AWAIR_JSON] [--lights LIGHTS_JSON] [--plugs PLUGS_JSON] [--samsung SAMSUNG_JSON] [--digi DIGI_JSON] [--tv TV_JSON] COMMAND\n\nCommands:\n  tv-status               Read shared outlet and both media devices\n  tv-set on|off           Run configured shared-outlet sequence\n  samsung-status          Read Samsung identity and remote state\n  samsung-set on|off      Wake or request Samsung shutdown\n  samsung-key KEY         Send one Samsung remote key\n  digi-status             Read DIGI identity and power state\n  digi-set on|off         Apply verified DIGI wake/sleep\n  digi-key KEY            Send one DIGI remote key\n  plugs                   List configured Tapo P100/P110 plugs\n  plug-status NAME        Read relay, overload and P110 energy\n  plug-set NAME on|off    Apply and verify absolute relay power\n  plug-check              Poll plugs and retained overload faults\n  watch-plugs             Monitor reported overload events\n  status                  Read Meaco status\n  plan day|night|off       Preview a Meaco sequence\n  apply day|night|off      Apply and verify a Meaco sequence\n  awair-status            Read fresh air-quality measurements\n  printers                List configured printers\n  printer-status NAME     Read printer status and supplies\n  printer-check           Poll printers and retained faults\n  watch-printers          Monitor debounced printer fault events\n  lights                  List configured Tapo bulbs and strips\n  light-status NAME       Read light state and overheating\n  light-set NAME JSON     Apply and verify absolute settings\n  light-check             Poll lights and retained faults\n  light-plan              Preview optional L900 curve and sunset\n  light-schedule          Run optional L900 curve and sunset rules\n  watch-lights            Monitor overheating events\n  bulbs                   Legacy bulb commands (also --bulbs)\n  bulb-status NAME        Read bulb state and overheating status\n  bulb-set NAME JSON      Apply and verify absolute bulb settings\n  bulb-check              Poll bulbs and retained overheating faults\n  watch-bulbs             Monitor debounced overheating events\n  serve [--allow-control] [--schedule] [--light-schedule] [--watch-printers] [--watch-lights] [--watch-plugs]\n                          MCP stdio; read-only by default\n  schedule                Run the daily 09:00/22:00 London Meaco rules\n\n--connect IP:PORT overrides only the Meaco TCP destination.\nPrinter, Awair, light, plug and media configs may have connect overrides for testing.\nSchedule mode sends controls. Enable it only after disabling the two\ncorresponding Home Assistant rules. Fault monitoring sends no controls.\n";
 
 struct App {
     devices: Devices,
@@ -66,8 +66,7 @@ impl App {
         if watching_plugs && Instant::now() >= self.next_plug_poll {
             let plugs = self
                 .devices
-                .plugs
-                .as_mut()
+                .plugs()
                 .ok_or_else(|| error("No plugs configured"))?;
             poll_watch(plugs, &mut self.next_plug_poll, "Plug")?;
         }
@@ -155,6 +154,9 @@ fn run() -> Result<()> {
     let mut awair_path = None;
     let mut bulbs_path = None;
     let mut plugs_path = None;
+    let mut samsung_path = None;
+    let mut digi_path = None;
+    let mut tv_path = None;
     let mut light_names = false;
     let mut connect = None;
     let mut control = false;
@@ -177,6 +179,22 @@ fn run() -> Result<()> {
                 plugs_path = Some(PathBuf::from(
                     iter.next()
                         .ok_or_else(|| error("--plugs requires a path"))?,
+                ))
+            }
+            "--tv" => {
+                tv_path = Some(PathBuf::from(
+                    iter.next().ok_or_else(|| error("--tv requires a path"))?,
+                ))
+            }
+            "--samsung" => {
+                samsung_path = Some(PathBuf::from(
+                    iter.next()
+                        .ok_or_else(|| error("--samsung requires a path"))?,
+                ))
+            }
+            "--digi" => {
+                digi_path = Some(PathBuf::from(
+                    iter.next().ok_or_else(|| error("--digi requires a path"))?,
                 ))
             }
             "--watch-plugs" => watching_plugs = true,
@@ -233,7 +251,15 @@ fn run() -> Result<()> {
     let light_command = raw_command.starts_with("light") || raw_command == "watch-lights";
     if !matches!(
         command,
-        "status"
+        "tv-status"
+            | "tv-set"
+            | "samsung-status"
+            | "samsung-set"
+            | "samsung-key"
+            | "digi-status"
+            | "digi-set"
+            | "digi-key"
+            | "status"
             | "plan"
             | "apply"
             | "serve"
@@ -262,7 +288,16 @@ fn run() -> Result<()> {
         3
     } else if matches!(
         command,
-        "plan" | "apply" | "printer-status" | "bulb-status" | "plug-status"
+        "tv-set"
+            | "samsung-set"
+            | "samsung-key"
+            | "digi-set"
+            | "digi-key"
+            | "plan"
+            | "apply"
+            | "printer-status"
+            | "bulb-status"
+            | "plug-status"
     ) {
         2
     } else {
@@ -310,8 +345,18 @@ fn run() -> Result<()> {
         "plugs" | "plug-status" | "plug-set" | "plug-check" | "watch-plugs"
     ) || watching_plugs)
         && plugs_path.is_none()
+        && tv_path.is_none()
     {
-        return Err(error("Specify --plugs PATH"));
+        return Err(error("Specify --plugs or --tv PATH"));
+    }
+    if command.starts_with("tv-") && tv_path.is_none() {
+        return Err(error("Specify --tv PATH"));
+    }
+    if command.starts_with("samsung-") && samsung_path.is_none() && tv_path.is_none() {
+        return Err(error("Specify --samsung PATH"));
+    }
+    if command.starts_with("digi-") && digi_path.is_none() && tv_path.is_none() {
+        return Err(error("Specify --digi PATH"));
     }
     if command == "awair-status" && awair_path.is_none() {
         return Err(error("Specify --awair PATH"));
@@ -322,10 +367,11 @@ fn run() -> Result<()> {
         && awair_path.is_none()
         && bulbs_path.is_none()
         && plugs_path.is_none()
+        && samsung_path.is_none()
+        && digi_path.is_none()
+        && tv_path.is_none()
     {
-        return Err(error(
-            "Configure a Meaco, printers, Awair, lights, or plugs for serve",
-        ));
+        return Err(error("Configure at least one device adapter for serve"));
     }
     let meaco = config_path
         .map(|path| meaco::Manager::open_with_connect(&path, connect))
@@ -361,6 +407,13 @@ fn run() -> Result<()> {
         .transpose()?;
     let first_plug_poll = Instant::now()
         + Duration::from_secs(plugs.as_ref().map(|p| p.config.poll_seconds).unwrap_or(30));
+    let samsung = samsung_path
+        .map(|p| samsung::Manager::open(&p))
+        .transpose()?;
+    let digi = digi_path
+        .map(|p| androidtv::Manager::open(&p))
+        .transpose()?;
+    let tv = tv_path.map(|p| tv::Manager::open(&p)).transpose()?;
     let mut app = App {
         devices: Devices {
             meaco,
@@ -368,18 +421,73 @@ fn run() -> Result<()> {
             awair,
             bulbs,
             plugs,
+            samsung,
+            digi,
+            tv,
         },
         next_plug_poll: first_plug_poll,
         next_bulb_poll: first_bulb_poll,
         next_light_schedule: Instant::now(),
         next_printer_poll: first_printer_poll,
     };
+    if let Some(plugs) = app.devices.plugs() {
+        app.next_plug_poll = Instant::now() + Duration::from_secs(plugs.config.poll_seconds);
+    }
     let selection = app.devices.selection();
     let options = mcp::Options {
         light_names,
         allow_control: control,
     };
     match command {
+        "tv-status" => println!("{}", app.devices.call("tv_status", &json!({}))?),
+        "tv-set" => {
+            let power = match positional[1] {
+                "on" => true,
+                "off" => false,
+                _ => return Err(error("TV power must be on or off")),
+            };
+            println!("{}", app.devices.call("tv_apply", &json!({"power":power}))?);
+        }
+        "samsung-status" | "digi-status" => println!(
+            "{}",
+            app.devices.call(
+                if command == "samsung-status" {
+                    "samsung_status"
+                } else {
+                    "digi_status"
+                },
+                &json!({})
+            )?
+        ),
+        "samsung-set" | "digi-set" => {
+            let power = match positional[1] {
+                "on" => true,
+                "off" => false,
+                _ => return Err(error("Media power must be on or off")),
+            };
+            println!(
+                "{}",
+                app.devices.call(
+                    if command == "samsung-set" {
+                        "samsung_apply"
+                    } else {
+                        "digi_apply"
+                    },
+                    &json!({"power":power})
+                )?
+            );
+        }
+        "samsung-key" | "digi-key" => println!(
+            "{}",
+            app.devices.call(
+                if command == "samsung-key" {
+                    "samsung_key"
+                } else {
+                    "digi_key"
+                },
+                &json!({"key":positional[1]})
+            )?
+        ),
         "plugs" => println!("{}", app.devices.call("plug_list", &json!({}))?),
         "plug-status" => println!(
             "{}",
@@ -402,8 +510,7 @@ fn run() -> Result<()> {
         "watch-plugs" => {
             let device = app
                 .devices
-                .plugs
-                .as_mut()
+                .plugs()
                 .ok_or_else(|| error("No plugs configured"))?;
             watch_loop(device, "Plug", false)?;
         }

@@ -7,7 +7,9 @@ read-only IPP for Brother HL-L2350DW and HP DeskJet 3630 status. The Awair Eleme
 adapter reads fresh measurements from its local HTTP API.
 The shared Tapo L430C/L900 adapter uses KLAP v2 for verified absolute light
 controls and reported overheating faults. The plug adapter reuses KLAP v2 for
-Tapo P100/P110 relays, P110 metering and reported overload monitoring.
+Tapo P100/P110 relays, P110 metering and reported overload monitoring. Samsung
+UE40H6200 uses an existing encrypted pairing; DIGI R2A uses pinned mutual TLS
+and absolute wake/sleep. The TV workflow composes those adapters and a shared plug.
 
 - Work on the current branch and preserve local changes.
 - Keep credentials in ignored private files; never log keys or device configuration.
@@ -40,6 +42,11 @@ Tapo P100/P110 relays, P110 metering and reported overload monitoring.
 - Keep light schedules opt-in, timezone aware, and persist attempts before controls.
 - Do not enable a replacement schedule while the corresponding Home Assistant
   automation still owns the device. Device-changing tests must be deliberate.
+- Media controls must verify live identity. Pin the DIGI server certificate and
+  verify TLS signatures; never silently accept replacement device credentials.
+- Send Samsung shutdown once and persist attempts before sending. Unknown or
+  unreachable state is not confirmed off. Keep fixed-delay outlet cutoff explicit
+  in TV workflow configuration; abort cutoff on earlier device/control errors.
 - Update README.md when commands, configuration, or behavior change.
 - Commit Cargo.lock. Avoid unnecessary dependencies and interpreter subprocesses.
 - Required checks: `cargo fmt --check`, `cargo test --locked`, and

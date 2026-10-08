@@ -2,7 +2,7 @@
 use crate::{Result, error};
 use std::{
     io::{BufRead, BufReader, Read, Write},
-    net::{SocketAddr, TcpStream},
+    net::SocketAddr,
     time::{Duration, Instant},
 };
 
@@ -57,12 +57,7 @@ pub(crate) fn send(
     deadline: Instant,
     request: Request<'_>,
 ) -> Result<Response> {
-    let remaining = deadline
-        .checked_duration_since(Instant::now())
-        .filter(|d| !d.is_zero())
-        .ok_or_else(|| error("Device request timed out"))?;
-    let socket = TcpStream::connect_timeout(&address, remaining)?;
-    let mut stream = Timed { socket, deadline };
+    let mut stream = crate::transport::Timed::connect(address, deadline)?;
     let path = request.path;
     let content_type = request.content_type.unwrap_or("application/octet-stream");
     let mut header = match request.body {
@@ -104,35 +99,6 @@ fn validate_cookie(value: &str) -> Result<()> {
     Ok(())
 }
 
-struct Timed {
-    socket: TcpStream,
-    deadline: Instant,
-}
-impl Timed {
-    fn remaining(&self) -> std::io::Result<Duration> {
-        self.deadline
-            .checked_duration_since(Instant::now())
-            .filter(|d| !d.is_zero())
-            .ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::TimedOut, "Device request timed out")
-            })
-    }
-}
-impl Read for Timed {
-    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
-        self.socket.set_read_timeout(Some(self.remaining()?))?;
-        self.socket.read(bytes)
-    }
-}
-impl Write for Timed {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.socket.set_write_timeout(Some(self.remaining()?))?;
-        self.socket.write(bytes)
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.socket.flush()
-    }
-}
 fn line(reader: &mut impl BufRead, budget: &mut usize) -> Result<String> {
     let mut bytes = Vec::new();
     (&mut *reader)

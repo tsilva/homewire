@@ -106,6 +106,7 @@ fn standard_factory_and_catalog_dispatch_keep_validation_before_device_io() -> R
         plugs: Some(configs.open::<plug::Manager>("plugs")?),
         printers: Some(configs.open::<printer::Manager>("printers")?),
         awair: Some(configs.open::<awair::Config>("awair")?),
+        ..Devices::default()
     };
     for (tool, key, count) in [
         ("printer_list", "printers", 2),

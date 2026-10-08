@@ -148,7 +148,7 @@ pub struct Tool {
 // This single declaration generates storage, discovery and dispatch. Adding a
 // family requires registering its concrete type here, never editing MCP routing.
 macro_rules! static_adapters {
-    ($($field:ident: $adapter:ty),+ $(,)?) => {
+    ($($field:ident: $adapter:ty $(=> $owner:ident.$child:ident)?),+ $(,)?) => {
         #[derive(Default)]
         pub struct Devices { $(pub $field: Option<$adapter>,)+ }
         #[derive(Clone, Copy, Default)]
@@ -164,13 +164,16 @@ macro_rules! static_adapters {
             }
         }
         impl Devices {
+            $(pub fn $field(&mut self) -> Option<&mut $adapter> {
+                self.$field.as_mut() $(.or_else(||self.$owner.as_mut().map(|owner|owner.$child())))?
+            })+
             pub fn selection(&self) -> Selection {
-                Selection { $($field: self.$field.is_some(),)+ }
+                Selection { $($field: self.$field.is_some() $(|| self.$owner.is_some())?,)+ }
             }
             /// Canonical command dispatch validates before any device I/O.
             /// Permission policy belongs to the caller (e.g. MCP control gate).
             pub fn call(&mut self, name: &str, args: &Value) -> Result<Value> {
-                $(if let Some(adapter) = &mut self.$field
+                $(if let Some(adapter) = self.$field()
                     && let Some(tool) = <$adapter as Adapter>::TOOLS.iter().find(|t| t.name == name) {
                     tool.input.validate(args).map_err(error)?;
                     return adapter.execute(name, args);
@@ -183,7 +186,10 @@ macro_rules! static_adapters {
 static_adapters! {
     meaco: crate::meaco::Manager,
     bulbs: crate::bulb::Manager,
-    plugs: crate::plug::Manager,
+    plugs: crate::plug::Manager => tv.plugs,
     awair: crate::awair::Config,
     printers: crate::printer::Manager,
+    samsung: crate::samsung::Manager => tv.samsung,
+    digi: crate::androidtv::Manager => tv.digi,
+    tv: crate::tv::Manager,
 }
