@@ -1,0 +1,12 @@
+{
+  "samsung": "samsung.json",
+  "digi": "digi.json",
+  "plugs": "plugs.json",
+  "plug": "tv",
+  "shutdown_policy": "fixed_delay",
+  "timings": {
+    "startup_seconds": 5,
+    "shutdown_seconds": 5,
+    "ready_seconds": 120
+  }
+}

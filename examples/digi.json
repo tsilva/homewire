@@ -1,0 +1,8 @@
+{
+  "host": "192.0.2.30",
+  "server_cert_sha256": "REPLACE-WITH-64-HEX-SERVER-CERT-SHA256",
+  "client_cert": "digi-cert.pem",
+  "client_key": "digi-key.pem",
+  "timeout_seconds": 8,
+  "verify_seconds": 20
+}

@@ -1,0 +1,6 @@
+{
+  "host": "192.0.2.12",
+  "port": 80,
+  "timeout_seconds": 8,
+  "max_age_seconds": 120
+}

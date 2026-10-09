@@ -1,0 +1,13 @@
+{
+  "listen": "0.0.0.0:8443",
+  "dashboard_token": "REPLACE_WITH_RANDOM_64_HEX_DIGITS",
+  "clients": [
+    {
+      "name": "phone",
+      "token": "REPLACE_WITH_DIFFERENT_RANDOM_64_HEX_DIGITS",
+      "assistant": false
+    }
+  ],
+  "certificate": "api-cert.pem",
+  "private_key": "api-key.pem"
+}

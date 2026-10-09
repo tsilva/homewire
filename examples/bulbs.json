@@ -1,0 +1,19 @@
+{
+  "bulbs": [
+    {
+      "name": "bulb_1",
+      "host": "192.0.2.20",
+      "device_id": "REPLACEWITHDEVICEID",
+      "auth_hash": "REPLACE_WITH_64_HEX_DIGITS"
+    },
+    {
+      "name": "bulb_2",
+      "host": "192.0.2.21",
+      "device_id": "REPLACEWITHDEVICEID2",
+      "auth_hash": "REPLACE_WITH_64_HEX_DIGITS"
+    }
+  ],
+  "timeout_seconds": 8,
+  "settle_seconds": 2,
+  "poll_seconds": 30
+}

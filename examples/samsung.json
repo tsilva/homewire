@@ -1,0 +1,11 @@
+{
+  "host": "192.0.2.194",
+  "device_id": "REPLACE-WITH-API-DEVICE-ID",
+  "mac": "00:11:22:33:44:55",
+  "token": "REPLACE-WITH-32-HEX-PAIRING-TOKEN",
+  "session_id": 1,
+  "wake_address": "192.0.2.255:9",
+  "off_key": "KEY_POWEROFF",
+  "timeout_seconds": 8,
+  "verify_seconds": 60
+}

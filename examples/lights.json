@@ -1,0 +1,28 @@
+{
+  "lights": [
+    {
+      "name": "bulb_1",
+      "model": "L430C",
+      "host": "192.0.2.20",
+      "device_id": "REPLACEWITHDEVICEID1",
+      "auth_hash": "REPLACE_WITH_64_HEX_DIGITS"
+    },
+    {
+      "name": "bulb_2",
+      "model": "L430C",
+      "host": "192.0.2.21",
+      "device_id": "REPLACEWITHDEVICEID2",
+      "auth_hash": "REPLACE_WITH_64_HEX_DIGITS"
+    },
+    {
+      "name": "led_strip",
+      "model": "L900",
+      "host": "192.0.2.22",
+      "device_id": "REPLACEWITHSTRIPDEVICEID",
+      "auth_hash": "REPLACE_WITH_64_HEX_DIGITS"
+    }
+  ],
+  "timeout_seconds": 8,
+  "settle_seconds": 2,
+  "poll_seconds": 30
+}

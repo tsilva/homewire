@@ -1,0 +1,25 @@
+{
+  "device_id": "REPLACE_WITH_DEVICE_ID",
+  "host": "192.0.2.1",
+  "local_key": "REPLACE_16_BYTES",
+  "protocol_version": "3.3",
+  "port": 6668,
+  "timeout_seconds": 8,
+  "settle_seconds": 20,
+  "presets": {
+    "day": {
+      "mode": "manual",
+      "target_humidity": 50,
+      "sleep": false
+    },
+    "night": {
+      "mode": "purify",
+      "sleep": true
+    }
+  },
+  "schedule": {
+    "timezone": "Etc/UTC",
+    "day": "09:00",
+    "night": "22:00"
+  }
+}

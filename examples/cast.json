@@ -1,0 +1,5 @@
+{
+  "name": "cast_player",
+  "host": "192.0.2.60",
+  "server_cert_sha256": "REPLACE_WITH_SERVER_CERT_SHA256"
+}

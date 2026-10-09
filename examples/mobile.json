@@ -1,0 +1,15 @@
+{
+  "devices": [
+    "phone"
+  ],
+  "persons": [
+    {
+      "name": "resident",
+      "device": "phone"
+    }
+  ],
+  "latitude": 0.0,
+  "longitude": 0.0,
+  "home_radius_m": 150,
+  "max_age_seconds": 600
+}

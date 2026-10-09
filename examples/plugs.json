@@ -1,0 +1,28 @@
+{
+  "plugs": [
+    {
+      "name": "relay",
+      "model": "P100",
+      "host": "192.0.2.30",
+      "device_id": "REPLACEWITHPLUGDEVICEID1",
+      "auth_hash": "REPLACE_WITH_64_HEX_DIGITS"
+    },
+    {
+      "name": "metered_outlet",
+      "model": "P110",
+      "host": "192.0.2.31",
+      "device_id": "REPLACEWITHPLUGDEVICEID2",
+      "auth_hash": "REPLACE_WITH_64_HEX_DIGITS"
+    },
+    {
+      "name": "tv",
+      "model": "P110",
+      "host": "192.0.2.32",
+      "device_id": "REPLACEWITHPLUGDEVICEID3",
+      "auth_hash": "REPLACE_WITH_64_HEX_DIGITS"
+    }
+  ],
+  "timeout_seconds": 8,
+  "settle_seconds": 2,
+  "poll_seconds": 30
+}

@@ -1,0 +1,8 @@
+{
+  "entities": [
+    "sensor.metered_outlet_today_energy",
+    "sensor.metered_outlet_power"
+  ],
+  "interval_seconds": 300,
+  "max_points": 4096
+}

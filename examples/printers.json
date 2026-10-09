@@ -1,0 +1,8 @@
+{
+  "printers": [
+    { "name": "brother", "host": "192.0.2.10", "port": 631, "path": "/ipp/print" },
+    { "name": "hp", "host": "192.0.2.11", "port": 631, "path": "/ipp/print" }
+  ],
+  "timeout_seconds": 8,
+  "poll_seconds": 30
+}
