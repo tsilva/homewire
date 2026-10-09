@@ -8,16 +8,18 @@ import subprocess
 import json
 import shlex
 import phone
-ROOT='/data/user_de/0/com.termux/files/homewire'
+import deployment
+ROOT=phone.DE_HOMEWIRE
 WRAPPER='/data/adb/service.d/homewire.sh'
 PID='/data/adb/homewire-supervisor.pid'
 def q(s):return shlex.quote(str(s))
 def root_sh(serial,command,data=None):
-    p=subprocess.run(['adb','-s',serial,'shell','-T','/debug_ramdisk/su -c '+q(command)],input=data or b'',capture_output=True,timeout=60)
+    p=subprocess.run(['adb','-s',serial,'shell','-T',q(deployment.root_executable(serial))+' -c '+q(command)],input=data or b'',capture_output=True,timeout=60)
     if p.returncode:raise RuntimeError(p.stderr.decode(errors='replace') or 'Root command failed')
     return p.stdout
 
-def wrapper(uid):
+def wrapper(uid, su_path=None):
+    su_path = su_path or deployment.android().get("root_command", "su")
     return f'''#!/system/bin/sh
 umask 077
 root={ROOT}
@@ -31,7 +33,7 @@ while true; do
   touch "$root/log/current"
   chown {uid}:{uid} "$root/log/current"
   chcon "$context" "$root/log/current"
-  /debug_ramdisk/su -d -g {uid} -G 3003 -Z "$runtime_context" {uid} -s /system/bin/sh -c "exec $root/launch" 2>&1 |
+  {q(su_path)} -d -g {uid} -G 3003 -Z "$runtime_context" {uid} -s /system/bin/sh -c "exec $root/launch" 2>&1 |
   while IFS= read -r line; do
     if [ "$(stat -c %s "$root/log/current" 2>/dev/null || echo 0)" -ge 65536 ]; then
       mv -f "$root/log/current" "$root/log/previous"
@@ -69,7 +71,7 @@ def install(serial):
     if uid<10000:raise ValueError('Expected the private Termux UID')
     source=phone.HOMEWIRE
     if source==ROOT:raise ValueError('Direct Boot is already configured; use the normal installer to update')
-    context=root_sh(serial,'ls -Zd /data/user_de/0/com.termux').decode().split()[0]
+    context=root_sh(serial,'ls -Zd '+q(str(Path(ROOT).parents[1]))).decode().split()[0]
     if not context.startswith('u:object_r:app_data_file:'):raise ValueError('Unexpected device-encrypted package context')
     parent=str(Path(ROOT).parent)
     root_sh(serial,f'[ ! -e {q(ROOT)} ]; [ ! -e {q(WRAPPER)} ]; if [ ! -d {q(parent)} ]; then mkdir {q(parent)}; chown {uid}:{uid} {q(parent)}; chmod 700 {q(parent)}; chcon {q(context)} {q(parent)}; fi; [ "$(stat -c %u {q(parent)})" = {uid} ]')
@@ -85,7 +87,7 @@ def install(serial):
             raise ValueError('Unexpected executable version link')
         target=ROOT+'/releases/'+target[len(prefix):]
         root_sh(serial,f'[ -f {q(target+"/homewire")} ]; rm {q(link)}; ln -s {q(target)} {q(link)}; chown -h {uid}:{uid} {q(link)}; chcon -h {q(context)} {q(link)}')
-    root_sh(serial,f'/debug_ramdisk/su -d -g {uid} -G 3003 {uid} -s /system/bin/sh -c '+q(ROOT+'/current/homewire --version'))
+    root_sh(serial,f'{q(deployment.root_executable(serial))} -d -g {uid} -G 3003 {uid} -s /system/bin/sh -c '+q(ROOT+'/current/homewire --version'))
     stopped=False
     try:
         p.sh('sv -w 10 down '+q(phone.SERVICE)+'; touch '+q(phone.SERVICE+'/down'))
@@ -105,7 +107,7 @@ def install(serial):
                 return v
             p.put(ROOT+'/config/'+file,(json.dumps(paths(value),indent=2)+'\n').encode())
         p.put(ROOT+'/launch',phone.service_script(ROOT).encode(),'700')
-        root_sh(serial,f'cat > {q(WRAPPER)}; chmod 700 {q(WRAPPER)}',wrapper(uid).encode())
+        root_sh(serial,f'cat > {q(WRAPPER)}; chmod 700 {q(WRAPPER)}',wrapper(uid,deployment.root_executable(serial)).encode())
         p.put(source+'/direct-boot',b'Device owner moved to DE; CE copy is recovery only.\n')
         root_sh(serial,f'touch {q(ROOT)}/direct-boot; chown {uid}:{uid} {q(ROOT)}/direct-boot')
         restart(serial)
@@ -117,4 +119,10 @@ def install(serial):
         raise
     print('Direct Boot owner configured. CE copy retained for recovery. Reboot validation is still required.')
 if __name__=='__main__':
-    ap=argparse.ArgumentParser(description=__doc__);ap.add_argument('--serial',required=True);ap.add_argument('action',choices=['install','restart','stop']);a=ap.parse_args();{'install':install,'restart':restart,'stop':stop}[a.action](a.serial)
+    ap=argparse.ArgumentParser(description=__doc__)
+    ap.add_argument('--serial',required=True)
+    deployment.add_argument(ap)
+    ap.add_argument('action',choices=['install','restart','stop'])
+    a=ap.parse_args()
+    if a.deployment: deployment.load(a.deployment)
+    {'install':install,'restart':restart,'stop':stop}[a.action](a.serial)

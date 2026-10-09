@@ -1,5 +1,6 @@
 /target/
 /.local/
+/.infisical.json
 *.state.json
 *.lock.json
 *.json.lock

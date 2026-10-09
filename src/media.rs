@@ -1,7 +1,7 @@
 //! Common small schemas and private configuration loading for media adapters.
 use crate::{
     Result,
-    config::{private_permissions, read_bounded},
+    config::load_secret_json,
     device::{Field, Input},
     error,
 };
@@ -9,9 +9,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use std::path::Path;
 pub(crate) fn load<T: DeserializeOwned>(path: &Path) -> Result<T> {
-    private_permissions(path)?;
-    serde_json::from_slice(&read_bounded(path, "Media configuration")?)
-        .map_err(|_| error("Invalid media configuration"))
+    load_secret_json(path, "Media configuration")
 }
 pub(crate) fn hex<const N: usize>(text: &str) -> Result<[u8; N]> {
     if text.len() != N * 2 || !text.is_ascii() {

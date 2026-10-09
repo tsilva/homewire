@@ -126,7 +126,7 @@ pub fn handle_capabilities(
         call,
     )
 }
-fn handle_tools(
+pub(crate) fn handle_tools(
     mut request: Value,
     tools: impl Iterator<Item = &'static crate::device::Tool> + Clone,
     options: Options,

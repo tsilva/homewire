@@ -2,7 +2,7 @@ use chrono::{DateTime, Duration, Utc};
 use homewire::{
     Result,
     bulb::{Change, Device, Model, Status},
-    light_schedule::{Config, Controller, curve},
+    light_schedule::{Config, Controller},
     solar,
 };
 use serde_json::json;
@@ -11,6 +11,15 @@ use std::{
     path::PathBuf,
     sync::atomic::{AtomicUsize, Ordering},
 };
+const POINTS: &[(u16, u8, u16)] = &[
+    (360, 10, 2700),
+    (480, 80, 5000),
+    (960, 80, 5000),
+    (1200, 10, 2700),
+];
+fn curve(minute: f64) -> (u8, u16) {
+    homewire::light_schedule::curve(POINTS, (10, 2700), minute)
+}
 fn at(value: &str) -> DateTime<Utc> {
     value
         .parse()
@@ -20,8 +29,10 @@ fn config() -> Config {
     Config {
         light: "strip".into(),
         timezone: "Europe/London".into(),
-        latitude: 0.0,
-        longitude: 0.0,
+        latitude: 51.5,
+        longitude: -0.12,
+        curve: POINTS.to_vec(),
+        outside_curve: (10, 2700),
     }
 }
 struct Temp(PathBuf);
@@ -135,7 +146,7 @@ fn sunset_matches_official_noaa_calculator_fixtures_and_utc_rollover() {
 }
 #[test]
 fn synthetic_curve_points_interpolation_and_ties_even() {
-    for &(minute, b, k) in homewire::light_schedule::POINTS {
+    for &(minute, b, k) in POINTS {
         assert_eq!(curve(f64::from(minute)), (b, k));
     }
     assert_eq!(curve(420.), (45, 3850));
@@ -230,8 +241,13 @@ fn sunset_turns_on_once_and_does_not_replay_after_restart() -> Result<()> {
 fn sunset_is_not_suppressed_by_prior_curve_change_in_same_minute() -> Result<()> {
     let t = Temp::new();
     let sunset = config()
-        .sunset(at("2026-10-07T12:00:00Z"))?
+        .sunset(at("2026-03-29T12:00:00Z"))?
         .expect("valid fixture or expected schedule action");
+    assert_eq!(
+        (sunset - Duration::seconds(4)).timestamp() / 60,
+        (sunset + Duration::seconds(4)).timestamp() / 60,
+        "fixture must exercise both writes in the same minute"
+    );
     let mut c = Controller::open(
         config(),
         &t.state(),
@@ -320,7 +336,7 @@ fn persistence_failure_blocks_controls_and_same_minute_failure_survives_restart(
 }
 #[test]
 fn optional_schedule_config_is_validated_and_server_flag_requires_control() -> Result<()> {
-    let base = json!({"lights":[{"name":"strip","model":"L900","host":"192.0.2.1","device_id":"synthetic","auth_hash":"00".repeat(32)}],"automation":{"light":"strip","timezone":"Europe/London","latitude":0.0,"longitude":0.0}});
+    let base = json!({"lights":[{"name":"strip","model":"L900","host":"192.0.2.1","device_id":"synthetic","auth_hash":"00".repeat(32)}],"automation":{"light":"strip","timezone":"Europe/London","latitude":51.5,"longitude":-0.12,"curve":POINTS,"outside_curve":[10,2700]}});
     let config: homewire::bulb::Config = serde_json::from_value(base.clone())?;
     config.validate()?;
     for (key, value) in [
@@ -338,5 +354,31 @@ fn optional_schedule_config_is_validated_and_server_flag_requires_control() -> R
         .output()?;
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("--allow-control"));
+    Ok(())
+}
+
+#[test]
+fn custom_curve_and_outside_target_are_not_legacy_defaults() -> Result<()> {
+    let mut c = config();
+    c.curve = vec![(600, 10, 3000), (660, 90, 5000)];
+    c.outside_curve = (20, 2700);
+    assert_eq!(
+        c.target(at("2026-01-01T10:30:00Z"))?.brightness_percent,
+        Some(50)
+    );
+    assert_eq!(
+        c.target(at("2026-01-01T09:00:00Z"))?.color_temperature_k,
+        Some(2700)
+    );
+    for points in [
+        vec![],
+        vec![(600, 10, 3000), (600, 90, 5000)],
+        vec![(1440, 10, 3000), (1441, 90, 5000)],
+        vec![(600, 0, 3000), (660, 90, 5000)],
+        vec![(600, 10, 2000), (660, 90, 5000)],
+    ] {
+        c.curve = points;
+        assert!(c.validate().is_err());
+    }
     Ok(())
 }

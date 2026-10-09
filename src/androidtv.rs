@@ -288,7 +288,9 @@ impl Manager {
         if config.client_cert.is_relative() {
             config.client_cert = parent.join(&config.client_cert);
         }
-        if config.client_key.is_relative() {
+        if config.client_key.is_relative()
+            && !crate::config::environment_secret_path(&config.client_key)
+        {
             config.client_key = parent.join(&config.client_key);
         }
         private_permissions(&config.client_cert)?;

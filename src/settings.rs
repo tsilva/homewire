@@ -40,7 +40,7 @@ impl Setting {
             kind: Kind::Action,
         }
     }
-    fn accepts(self, value: &Value) -> bool {
+    pub(crate) fn accepts(self, value: &Value) -> bool {
         match self.kind {
             Kind::Boolean => value.is_boolean(),
             Kind::Integer { min, max, step } => value

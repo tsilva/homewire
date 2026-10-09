@@ -1,5 +1,5 @@
 use crate::device::{Adapter, Field, Hints, Input, Tool};
-pub use crate::routine::meaco::{Applied, Operation, already_correct, apply, plan};
+pub use crate::routine::meaco::{Applied, Operation, apply, plan};
 use crate::{
     Result,
     config::{Memory, Store},
@@ -180,7 +180,7 @@ impl Adapter for Manager {
         },
         Tool {
             name: "meaco_apply",
-            description: "Apply a verified Meaco sequence: day=normal/50%; night=purify then sleep; off=power off.",
+            description: "Apply a verified Meaco sequence: configured day/night presets or verified power off.",
             input: Input::Field {
                 field: OPERATION_FIELD,
                 shape_error: "Expected only operation",
@@ -211,6 +211,8 @@ pub struct Manager {
     store: Store,
     monitor: crate::fault::Monitor,
     started: Instant,
+    presets: crate::routine::meaco::Presets,
+    schedule: Option<crate::schedule::Config>,
 }
 impl Manager {
     fn operation_call(&mut self, name: &str, operation: Option<Operation>) -> Result<Value> {
@@ -220,7 +222,7 @@ impl Manager {
                 let op = operation.ok_or_else(|| error("Missing operation"))?;
                 let state = self.device.read()?;
                 Ok(
-                    json!({"operation":op,"state":state,"steps":plan(&state,op,&self.memory),"settle_seconds":self.device.settle_seconds,
+                    json!({"operation":op,"state":state,"steps":plan(&state,op,&self.memory,&self.presets)?,"settle_seconds":self.device.settle_seconds,
                     "note":"Provisional plan; execution rechecks state after every command."}),
                 )
             }
@@ -230,6 +232,7 @@ impl Manager {
                     &mut self.device,
                     op,
                     &mut self.memory,
+                    &self.presets,
                     |memory| self.store.save(memory),
                 )?)?)
             }
@@ -256,15 +259,34 @@ impl Manager {
             store,
             monitor,
             started: Instant::now(),
+            presets: config.presets,
+            schedule: config.schedule,
         })
+    }
+    pub fn has_schedule(&self) -> bool {
+        self.schedule.is_some()
+    }
+    pub fn has_preset(&self, operation: Operation) -> bool {
+        self.presets.configured(operation)
+    }
+    pub fn preset(&self, operation: Operation) -> Option<&crate::routine::meaco::Preset> {
+        match operation {
+            Operation::Day => self.presets.day.as_ref(),
+            Operation::Night => self.presets.night.as_ref(),
+            Operation::Off => None,
+        }
     }
     /// Persist a due attempt before returning it; callers must never replay it.
     pub fn scheduled_operation(
         &mut self,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<Option<Operation>> {
+        let schedule = self
+            .schedule
+            .as_ref()
+            .ok_or_else(|| error("Configure the Meaco schedule first"))?;
         let Some((operation, name, date)) =
-            crate::schedule::due(now, &self.memory.schedule_attempts)
+            crate::schedule::due(schedule, now, &self.memory.schedule_attempts)
         else {
             return Ok(None);
         };
@@ -418,9 +440,10 @@ const TIMERS: &[&str] = &[
     "cancel", "1h", "2h", "3h", "4h", "5h", "6h", "7h", "8h", "9h", "10h", "11h", "12h", "13h",
     "14h", "15h", "16h", "17h", "18h", "19h", "20h", "21h", "22h", "23h", "24h",
 ];
+pub(crate) const HUMIDITY_SETTING: Setting = Setting::integer("target_humidity", 35, 70, 5);
 const SETTINGS: &[Setting] = &[
     Setting::boolean("power"),
-    Setting::integer("target_humidity", 35, 70, 5),
+    HUMIDITY_SETTING,
     Setting::choice("mode", &["manual", "laundry", "purify", "sleep"]),
     Setting::boolean("child_lock"),
     Setting::choice("off_timer", TIMERS),

@@ -20,6 +20,27 @@ struct Config {
     plugs: PathBuf,
     plug: String,
     shutdown_policy: String,
+    timings: Timings,
+}
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Timings {
+    startup_seconds: u64,
+    shutdown_seconds: u64,
+    ready_seconds: u64,
+}
+impl Timings {
+    fn validate(&self) -> Result<()> {
+        if !(1..=60).contains(&self.startup_seconds)
+            || !(1..=60).contains(&self.shutdown_seconds)
+            || !(1..=120).contains(&self.ready_seconds)
+        {
+            return Err(error(
+                "TV timings require startup/shutdown 1–60 seconds and readiness 1–120 seconds",
+            ));
+        }
+        Ok(())
+    }
 }
 #[derive(Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -36,6 +57,7 @@ pub struct Manager {
     equipment: Equipment,
     path: PathBuf,
     memory: Memory,
+    timings: Timings,
     _lock: File,
 }
 // Internal seam for real I/O and simulated sequences; no dynamic dispatch.
@@ -43,7 +65,7 @@ trait Control {
     fn outlet(&mut self) -> Result<bool>;
     fn set_outlet(&mut self, power: bool) -> Result<()>;
     fn samsung(&mut self, power: bool) -> Result<()>;
-    fn ready_digi(&mut self) -> Result<()>;
+    fn ready_digi(&mut self, seconds: u64) -> Result<()>;
     fn digi(&mut self, power: bool) -> Result<()>;
     fn wait(&mut self, seconds: u64);
 }
@@ -62,8 +84,8 @@ impl Control for Equipment {
         }
         Ok(())
     }
-    fn ready_digi(&mut self) -> Result<()> {
-        let until = Instant::now() + Duration::from_secs(120);
+    fn ready_digi(&mut self, seconds: u64) -> Result<()> {
+        let until = Instant::now() + Duration::from_secs(seconds);
         loop {
             if self.digi.status().is_ok() {
                 return Ok(());
@@ -84,23 +106,23 @@ impl Control for Equipment {
         std::thread::sleep(Duration::from_secs(seconds));
     }
 }
-fn sequence(equipment: &mut impl Control, power: bool) -> Result<()> {
+fn sequence(equipment: &mut impl Control, power: bool, timings: Timings) -> Result<()> {
     let outlet = equipment.outlet()?;
     if power {
         if !outlet {
             equipment.set_outlet(true)?;
-            equipment.wait(5);
+            equipment.wait(timings.startup_seconds);
         }
         equipment.samsung(true)?;
-        equipment.ready_digi()?;
+        equipment.ready_digi(timings.ready_seconds)?;
         equipment.digi(true)?;
     } else if outlet {
         // Confirm DIGI is reachable before requesting either device's shutdown.
         // No cold-boot wait on off: unknown state aborts and leaves outlet on.
         equipment.digi(false)?;
         equipment.samsung(false)?;
-        // Fixed-delay policy matches the user's HA cutoff; it is not proof of TV off.
-        equipment.wait(5);
+        // Explicit fixed-delay cutoff is not proof that the TV is off.
+        equipment.wait(timings.shutdown_seconds);
         equipment.set_outlet(false)?;
     }
     Ok(())
@@ -155,6 +177,7 @@ impl Manager {
                 "TV requires a configured plug and explicit shutdown_policy fixed_delay",
             ));
         }
+        config.timings.validate()?;
         let parent = path.parent().unwrap_or(Path::new("."));
         let resolve = |p: PathBuf| if p.is_absolute() { p } else { parent.join(p) };
         let lock = lock_configuration(path)?;
@@ -183,8 +206,12 @@ impl Manager {
             equipment,
             path: state_path,
             memory,
+            timings: config.timings,
             _lock: lock,
         })
+    }
+    pub fn preview(&self, power: bool) -> Value {
+        json!({"power":power,"timings":self.timings,"live_state_checked":false,"provisional":true,"shutdown_policy":"fixed_delay","physical_samsung_off_verified":false,"steps":if power {vec!["outlet_on_if_needed","configured_startup_wait_if_changed","samsung_wake_verify","digi_ready_with_configured_deadline","digi_wake_verify"]} else {vec!["if_outlet_on_digi_sleep_verify","samsung_shutdown_once","configured_shutdown_wait","outlet_off_verify"]}})
     }
     pub fn status(&self) -> Result<Value> {
         let outlet = self.equipment.plugs.status(&self.equipment.plug)?;
@@ -208,7 +235,7 @@ impl Manager {
         }
         self.memory.attempt = Some(now);
         save_private(&self.path, &self.memory)?;
-        sequence(&mut self.equipment, power)?;
+        sequence(&mut self.equipment, power, self.timings)?;
         self.memory.attempt = None;
         save_private(&self.path, &self.memory)?;
         Ok(
@@ -256,10 +283,18 @@ impl Adapter for Manager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn timings() -> Timings {
+        Timings {
+            startup_seconds: 5,
+            shutdown_seconds: 5,
+            ready_seconds: 120,
+        }
+    }
     struct Fake {
         outlet: bool,
         fail: Option<&'static str>,
         calls: Vec<String>,
+        ready_timeout: Option<u64>,
     }
     impl Fake {
         fn step(&mut self, name: &str) -> Result<()> {
@@ -283,15 +318,15 @@ mod tests {
         fn samsung(&mut self, p: bool) -> Result<()> {
             self.step(if p { "samsung_on" } else { "samsung_off" })
         }
-        fn ready_digi(&mut self) -> Result<()> {
+        fn ready_digi(&mut self, seconds: u64) -> Result<()> {
+            self.ready_timeout = Some(seconds);
             self.step("digi_ready")
         }
         fn digi(&mut self, p: bool) -> Result<()> {
             self.step(if p { "digi_on" } else { "digi_off" })
         }
         fn wait(&mut self, s: u64) {
-            assert_eq!(s, 5);
-            self.calls.push("wait5".into());
+            self.calls.push(format!("wait{s}"));
         }
     }
     #[test]
@@ -300,8 +335,9 @@ mod tests {
             outlet: false,
             fail: None,
             calls: vec![],
+            ready_timeout: None,
         };
-        sequence(&mut f, true)?;
+        sequence(&mut f, true, timings())?;
         assert_eq!(
             f.calls,
             [
@@ -314,7 +350,7 @@ mod tests {
             ]
         );
         f.calls.clear();
-        sequence(&mut f, false)?;
+        sequence(&mut f, false, timings())?;
         assert_eq!(
             f.calls,
             [
@@ -326,11 +362,11 @@ mod tests {
             ]
         );
         f.calls.clear();
-        sequence(&mut f, false)?;
+        sequence(&mut f, false, timings())?;
         assert_eq!(f.calls, ["outlet_status"]);
         f.outlet = true;
         f.calls.clear();
-        sequence(&mut f, true)?;
+        sequence(&mut f, true, timings())?;
         assert_eq!(
             f.calls,
             ["outlet_status", "samsung_on", "digi_ready", "digi_on"]
@@ -344,8 +380,9 @@ mod tests {
                 outlet: true,
                 fail: Some(fail),
                 calls: vec![],
+                ready_timeout: None,
             };
-            assert!(sequence(&mut f, false).is_err());
+            assert!(sequence(&mut f, false, timings()).is_err());
             assert!(f.outlet);
             assert!(!f.calls.iter().any(|s| s == "outlet_off"));
         }
@@ -354,9 +391,48 @@ mod tests {
                 outlet: false,
                 fail: Some(fail),
                 calls: vec![],
+                ready_timeout: None,
             };
-            assert!(sequence(&mut f, true).is_err());
+            assert!(sequence(&mut f, true, timings()).is_err());
             assert!(!f.calls.iter().any(|s| s == "digi_on"));
         }
+    }
+    #[test]
+    fn custom_timings_drive_every_sequence_wait() -> Result<()> {
+        let custom = Timings {
+            startup_seconds: 7,
+            shutdown_seconds: 9,
+            ready_seconds: 45,
+        };
+        custom.validate()?;
+        let mut f = Fake {
+            outlet: false,
+            fail: None,
+            calls: vec![],
+            ready_timeout: None,
+        };
+        sequence(&mut f, true, custom)?;
+        assert!(f.calls.iter().any(|s| s == "wait7"));
+        assert_eq!(f.ready_timeout, Some(45));
+        f.calls.clear();
+        sequence(&mut f, false, custom)?;
+        assert!(f.calls.iter().any(|s| s == "wait9"));
+        for bad in [
+            Timings {
+                startup_seconds: 0,
+                ..custom
+            },
+            Timings {
+                shutdown_seconds: 61,
+                ..custom
+            },
+            Timings {
+                ready_seconds: 121,
+                ..custom
+            },
+        ] {
+            assert!(bad.validate().is_err());
+        }
+        Ok(())
     }
 }

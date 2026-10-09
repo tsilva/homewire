@@ -2,7 +2,7 @@
 use crate::device::{Adapter, Field, Hints, Input, Tool};
 use crate::{
     Result,
-    config::{private_permissions, read_bounded, valid_unique_labels},
+    config::{private_permissions, valid_unique_labels},
     error, fault, klap, light_schedule,
 };
 use serde::{Deserialize, Serialize};
@@ -78,8 +78,7 @@ pub struct Config {
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         private_permissions(path)?;
-        let config: Self = serde_json::from_slice(&read_bounded(path, "Bulb configuration")?)
-            .map_err(|_| error("Invalid bulb configuration; use the documented schema"))?;
+        let config: Self = crate::config::load_secret_json(path, "Bulb configuration")?;
         config.validate()?;
         Ok(config)
     }

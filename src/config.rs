@@ -1,11 +1,74 @@
 use crate::{Result, error};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
 };
+
+fn secret_environment_name(text: &str) -> Option<&str> {
+    let name = text.strip_prefix("env:")?;
+    (name.starts_with("HOMEWIRE_SECRET_")
+        && name.len() <= 128
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_'))
+    .then_some(name)
+}
+
+pub(crate) fn environment_secret_path(path: &Path) -> bool {
+    path.to_str().and_then(secret_environment_name).is_some()
+}
+
+fn resolve_secrets(
+    value: &mut Value,
+    lookup: &impl Fn(&str) -> Option<String>,
+    depth: usize,
+) -> Result<()> {
+    if depth > 32 {
+        return Err(error("Configuration nesting exceeds its limit"));
+    }
+    match value {
+        Value::String(text) if text.starts_with("${HOMEWIRE_SECRET_") => {
+            let marker = text.strip_prefix("${").and_then(|s| s.strip_suffix('}'));
+            let name = marker
+                .filter(|s| {
+                    s.len() <= 128
+                        && s.bytes()
+                            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+                })
+                .ok_or_else(|| error("Invalid secret environment reference"))?;
+            *text = lookup(name)
+                .filter(|s| !s.is_empty() && s.len() <= 8192 && !s.contains('\0'))
+                .ok_or_else(|| {
+                    error("A required secret environment variable is missing or invalid")
+                })?;
+        }
+        Value::Array(values) => {
+            for child in values {
+                resolve_secrets(child, lookup, depth + 1)?;
+            }
+        }
+        Value::Object(values) => {
+            for child in values.values_mut() {
+                resolve_secrets(child, lookup, depth + 1)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+pub(crate) fn load_secret_json<T: DeserializeOwned>(path: &Path, label: &str) -> Result<T> {
+    private_permissions(path)?;
+    let mut value: Value = serde_json::from_slice(&read_bounded(path, label)?)
+        .map_err(|_| error("Invalid private JSON configuration"))?;
+    resolve_secrets(&mut value, &|name| std::env::var(name).ok(), 0)?;
+    serde_json::from_value(value).map_err(|_| error("Invalid private configuration schema"))
+}
 
 /// Configured groups contain at most eight devices: a stack array avoids
 /// allocating sets just to check names and identities during startup.
@@ -116,6 +179,9 @@ pub struct Config {
     pub timeout_seconds: u64,
     #[serde(default = "settle")]
     pub settle_seconds: u64,
+    #[serde(default)]
+    pub presets: crate::routine::meaco::Presets,
+    pub schedule: Option<crate::schedule::Config>,
 }
 fn port() -> u16 {
     6668
@@ -130,11 +196,14 @@ fn settle() -> u64 {
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         private_permissions(path)?;
-        let bytes = read_bounded(path, "Device configuration")?;
-        // Do not propagate parser diagnostics containing secret values.
-        let config: Self = serde_json::from_slice(&bytes).map_err(|_| {
-            error("Invalid device configuration; expected the documented JSON schema")
-        })?;
+        let config: Self = load_secret_json(path, "Device configuration")?;
+        config.presets.validate()?;
+        if let Some(schedule) = &config.schedule {
+            schedule.validate()?;
+            if config.presets.day.is_none() || config.presets.night.is_none() {
+                return Err(error("Meaco schedule requires both presets"));
+            }
+        }
         if config.protocol_version != "3.3" {
             return Err(error("Only Tuya protocol 3.3 is supported"));
         }
@@ -232,6 +301,9 @@ pub(crate) fn private_options() -> OpenOptions {
     options
 }
 pub(crate) fn private_permissions(path: &Path) -> Result<()> {
+    if environment_secret_path(path) {
+        return Ok(());
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -252,6 +324,18 @@ pub(crate) fn read_bounded_limit(
     label: &str,
     limit: usize,
 ) -> std::io::Result<Vec<u8>> {
+    if let Some(name) = path.to_str().and_then(secret_environment_name) {
+        let value = std::env::var(name)
+            .ok()
+            .filter(|v| !v.is_empty() && v.len() <= limit && !v.contains('\0'))
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "A required secret environment variable is missing or invalid",
+                )
+            })?;
+        return Ok(value.into_bytes());
+    }
     let mut bytes = Vec::new();
     File::open(path)?
         .take((limit + 1) as u64)
@@ -263,4 +347,37 @@ pub(crate) fn read_bounded_limit(
         ));
     }
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod secret_reference_tests {
+    use super::*;
+    #[test]
+    fn resolves_nested_secrets_without_json_interpolation() {
+        let mut value = serde_json::json!({"devices":[{"auth_hash":"${HOMEWIRE_SECRET_TEST}"}]});
+        resolve_secrets(&mut value, &|_| Some("quote\" newline\n".into()), 0)
+            .expect("resolve valid reference");
+        assert_eq!(value["devices"][0]["auth_hash"], "quote\" newline\n");
+    }
+    #[test]
+    fn missing_and_malformed_references_fail_without_disclosure() {
+        for marker in ["${HOMEWIRE_SECRET_MISSING}", "${HOMEWIRE_SECRET_BAD;VALUE}"] {
+            let mut value = Value::String(marker.into());
+            let failure = resolve_secrets(&mut value, &|_| None, 0)
+                .expect_err("reject missing reference")
+                .to_string();
+            assert!(!failure.contains(marker));
+        }
+    }
+    #[test]
+    fn unrelated_strings_and_paths_are_literal() {
+        let mut value = Value::String("${ordinary_config}".into());
+        resolve_secrets(&mut value, &|_| panic!("unexpected lookup"), 0)
+            .expect("resolve valid reference");
+        assert_eq!(value, "${ordinary_config}");
+        assert!(environment_secret_path(Path::new(
+            "env:HOMEWIRE_SECRET_PRIVATE_KEY"
+        )));
+        assert!(!environment_secret_path(Path::new("env:OTHER_VARIABLE")));
+    }
 }

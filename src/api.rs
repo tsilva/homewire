@@ -27,7 +27,7 @@ impl ApiTransport for rustls::StreamOwned<rustls::ServerConnection, crate::trans
         self.sock.response_deadline();
     }
 }
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Client {
     name: String,
@@ -35,13 +35,20 @@ struct Client {
     #[serde(default)]
     assistant: bool,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Assistant {
     url: String,
     bearer_token: String,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentEndpoint {
+    listen: SocketAddr,
+    token: String,
+    tools: Vec<String>,
+}
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
     listen: SocketAddr,
@@ -54,11 +61,47 @@ struct Config {
     private_key: Option<PathBuf>,
     #[serde(default)]
     assistant: Option<Assistant>,
+    #[serde(default)]
+    agent: Option<AgentEndpoint>,
+    #[serde(skip)]
+    agent_only: bool,
 }
 pub struct Server {
     listen: SocketAddr,
     stopped: Arc<AtomicBool>,
     worker: Option<thread::JoinHandle<()>>,
+    _agent: Option<Box<Server>>,
+}
+// Fixed-size counters live at the trusted endpoint, outside ZeroClaw. Denied
+// attempts never reach the device owner; time uses a monotonic clock.
+struct AgentBudget {
+    minute: (Instant, u16),
+    hour: (Instant, u16),
+}
+impl AgentBudget {
+    fn new(now: Instant) -> Self {
+        Self {
+            minute: (now, 0),
+            hour: (now, 0),
+        }
+    }
+    fn admit(&mut self, data: &Value, now: Instant) -> bool {
+        if now.duration_since(self.minute.0) >= Duration::from_secs(60) {
+            self.minute = (now, 0);
+        }
+        if now.duration_since(self.hour.0) >= Duration::from_secs(3600) {
+            self.hour = (now, 0);
+        }
+        let control = data["method"] == "tools/call"
+            && entity::tools(crate::device::Selection::ALL)
+                .any(|t| Some(t.name) == data["params"]["name"].as_str() && !t.hints.read_only);
+        if self.minute.1 >= 30 || (control && self.hour.1 >= 20) {
+            return false;
+        }
+        self.minute.1 += 1;
+        self.hour.1 += u16::from(control);
+        true
+    }
 }
 impl Server {
     pub fn local_addr(&self) -> SocketAddr {
@@ -71,7 +114,7 @@ impl Server {
             .into_iter()
             .flatten()
         {
-            if file.is_relative() {
+            if file.is_relative() && !config::environment_secret_path(file) {
                 *file = path.parent().unwrap_or(Path::new(".")).join(&*file);
             }
         }
@@ -99,6 +142,35 @@ impl Server {
                 ));
             }
         }
+        let agent = if let Some(a) = &cfg.agent {
+            if !a.listen.ip().is_loopback()
+                || !token_valid(&a.token)
+                || equal(&a.token, &cfg.dashboard_token)
+                || cfg.clients.iter().any(|c| equal(&a.token, &c.token))
+                || a.tools.is_empty()
+                || a.tools.len() > 32
+                || a.tools.iter().enumerate().any(|(i, n)| {
+                    n.is_empty()
+                        || n.len() > 64
+                        || !n.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                        || a.tools[..i].contains(n)
+                })
+            {
+                return Err(error(
+                    "Agent MCP requires loopback, a distinct token and an explicit tool scope",
+                ));
+            }
+            let mut restricted = cfg.clone();
+            restricted.listen = a.listen;
+            restricted.certificate = None;
+            restricted.private_key = None;
+            restricted.assistant = None;
+            restricted.clients.clear();
+            restricted.agent_only = true;
+            Some(Box::new(Self::listen(restricted, socket, None)?))
+        } else {
+            None
+        };
         let tls = match (&cfg.certificate, &cfg.private_key) {
             (Some(cert), Some(key)) => {
                 config::private_permissions(key)?;
@@ -122,6 +194,11 @@ impl Server {
                 ));
             }
         };
+        let mut server = Self::listen(cfg, socket, tls)?;
+        server._agent = agent;
+        Ok(server)
+    }
+    fn listen(cfg: Config, socket: &Path, tls: Option<Arc<rustls::ServerConfig>>) -> Result<Self> {
         let listener = TcpListener::bind(cfg.listen)?;
         let listen = listener.local_addr()?;
         let stopped = Arc::new(AtomicBool::new(false));
@@ -131,6 +208,7 @@ impl Server {
             .name("homewire-api".into())
             .stack_size(256 * 1024)
             .spawn(move || {
+                let mut budget = AgentBudget::new(Instant::now());
                 for stream in listener.incoming() {
                     if stop.load(Ordering::Acquire) {
                         break;
@@ -144,12 +222,17 @@ impl Server {
                         match rustls::ServerConnection::new(tls.clone()) {
                             Ok(mut conn) => {
                                 conn.set_buffer_limit(Some(8192));
-                                handle(&mut rustls::StreamOwned::new(conn, stream), &cfg, &socket)
+                                handle(
+                                    &mut rustls::StreamOwned::new(conn, stream),
+                                    &cfg,
+                                    &socket,
+                                    &mut budget,
+                                )
                             }
                             Err(e) => Err(e.into()),
                         }
                     } else {
-                        handle(&mut { stream }, &cfg, &socket)
+                        handle(&mut { stream }, &cfg, &socket, &mut budget)
                     };
                     if result.is_err() {
                         eprintln!("API connection rejected or interrupted");
@@ -160,6 +243,7 @@ impl Server {
             listen,
             stopped,
             worker: Some(worker),
+            _agent: None,
         })
     }
 }
@@ -181,7 +265,12 @@ fn equal(a: &str, b: &str) -> bool {
     }
     a.bytes().zip(b.bytes()).fold(0, |v, (x, y)| v | (x ^ y)) == 0
 }
-fn handle(stream: &mut impl ApiTransport, cfg: &Config, socket: &Path) -> Result<()> {
+fn handle(
+    stream: &mut impl ApiTransport,
+    cfg: &Config,
+    socket: &Path,
+    budget: &mut AgentBudget,
+) -> Result<()> {
     let mut input = BufReader::with_capacity(1024, &mut *stream);
     let mut line = String::new();
     input.by_ref().take(1025).read_line(&mut line)?;
@@ -243,7 +332,7 @@ fn handle(stream: &mut impl ApiTransport, cfg: &Config, socket: &Path) -> Result
     }) {
         return response(stream, 403, b"{}", "application/json");
     }
-    if method == "GET" && path == "/" {
+    if method == "GET" && path == "/" && !cfg.agent_only {
         return response(
             stream,
             200,
@@ -252,6 +341,44 @@ fn handle(stream: &mut impl ApiTransport, cfg: &Config, socket: &Path) -> Result
         );
     }
     let token = auth.strip_prefix("Bearer ").unwrap_or_default();
+    if cfg.agent_only {
+        let agent = cfg
+            .agent
+            .as_ref()
+            .ok_or_else(|| error("Missing agent scope"))?;
+        if !equal(token, &agent.token) {
+            return response(stream, 401, b"{}", "application/json");
+        }
+        if method != "POST" || path != "/mcp" {
+            return response(stream, 404, b"{}", "application/json");
+        }
+        let len = length.unwrap_or(0);
+        if len == 0 || len > 8192 {
+            return response(stream, 413, b"{}", "application/json");
+        }
+        let mut body = vec![0; len];
+        input.read_exact(&mut body)?;
+        drop(input);
+        let data: Value = serde_json::from_slice(&body).map_err(|_| error("Invalid MCP JSON"))?;
+        if !budget.admit(&data, Instant::now()) {
+            return response(stream, 429, b"{}", "application/json");
+        }
+        stream.response_deadline();
+        let request = json!({"jsonrpc":"2.0","id":1,"method":"homewire/api","params":{"role":"agent","route":"/mcp","tools":agent.tools,"data":data}});
+        let reply =
+            ipc::request(socket, &request.to_string())?.ok_or_else(|| error("No owner reply"))?;
+        let result = &reply["result"];
+        return if result.is_null() {
+            response(stream, 202, b"", "application/json")
+        } else {
+            response(
+                stream,
+                200,
+                &serde_json::to_vec(result)?,
+                "application/json",
+            )
+        };
+    }
     let role = if equal(token, &cfg.dashboard_token) {
         "dashboard".to_owned()
     } else if let Some(c) = cfg.clients.iter().find(|c| equal(token, &c.token)) {
@@ -357,6 +484,25 @@ pub fn dispatch(devices: &mut Devices, request: Value, allow_control: bool) -> O
     let route = params["route"].as_str().unwrap_or_default();
     let data = &params["data"];
     let result = (|| -> Result<Value> {
+        if role == "agent" && route == "/mcp" {
+            let scope = params["tools"]
+                .as_array()
+                .filter(|t| !t.is_empty() && t.len() <= 32)
+                .ok_or_else(|| error("Missing tool scope"))?;
+            let selection = devices.selection();
+            return Ok(mcp::handle_tools(
+                data.clone(),
+                entity::tools(selection)
+                    .filter(|t| scope.iter().any(|n| n.as_str() == Some(t.name))),
+                mcp::Options {
+                    allow_control,
+                    light_names: false,
+                },
+                false,
+                |name, args| entity::call(devices, name, args),
+            )
+            .unwrap_or(Value::Null));
+        }
         if role == "dashboard" && route == "/api/call" {
             let name = data["name"]
                 .as_str()
@@ -395,4 +541,54 @@ pub fn dispatch(devices: &mut Devices, request: Value, allow_control: bool) -> O
         Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
         Err(e) => mcp::rpc_error(id, -32602, &e.to_string()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn agent_listener_rejects_bad_credentials_and_other_api_routes() {
+        let cfg: Config = serde_json::from_value(json!({
+            "listen":"127.0.0.1:0", "dashboard_token":"a".repeat(64),
+            "agent":{"listen":"127.0.0.1:0","token":"b".repeat(64),"tools":["shopping_list"]}
+        }))
+        .expect("config");
+        let mut restricted = cfg;
+        restricted.agent_only = true;
+        let server = Server::listen(restricted, Path::new("/absent-homewire-owner.sock"), None)
+            .expect("server");
+        for (token, path, status) in [
+            ("a", "/mcp", "401"),
+            ("b", "/api/call", "404"),
+            ("b", "/api/assistant", "404"),
+        ] {
+            let mut client = TcpStream::connect(server.local_addr()).expect("connect");
+            client
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("deadline");
+            write!(client,"POST {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nContent-Length: 2\r\n\r\n{{}}",token.repeat(64)).expect("request");
+            let mut reply = String::new();
+            client.read_to_string(&mut reply).expect("reply");
+            assert!(reply.starts_with(&format!("HTTP/1.1 {status}")));
+        }
+    }
+    #[test]
+    fn endpoint_budget_bounds_reads_and_controls_independently() {
+        let start = Instant::now();
+        let mut budget = AgentBudget::new(start);
+        let read = json!({"method":"tools/call","params":{"name":"entity_status"}});
+        for _ in 0..30 {
+            assert!(budget.admit(&read, start));
+        }
+        assert!(!budget.admit(&read, start));
+        let next = start + Duration::from_secs(60);
+        let control = json!({"method":"tools/call","params":{"name":"switch_set"}});
+        for _ in 0..20 {
+            assert!(budget.admit(&control, next));
+        }
+        assert!(!budget.admit(&control, next));
+        assert!(budget.admit(&read, next));
+        assert!(!budget.admit(&control, next + Duration::from_secs(60)));
+        assert!(budget.admit(&control, start + Duration::from_secs(3600)));
+    }
 }

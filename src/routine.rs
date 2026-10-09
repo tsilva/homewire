@@ -9,20 +9,23 @@ use serde_json::{Value, json};
 pub mod meaco;
 pub mod tv;
 
-fn configured(selection: Selection, name: &str) -> bool {
+fn configured(devices: &Devices, name: &str) -> bool {
     match name {
-        "meaco_day" | "meaco_night" | "meaco_off" => selection.meaco,
-        "tv_on" | "tv_off" => selection.tv,
+        "meaco_day" | "meaco_night" | "meaco_off" => devices.meaco.as_ref().is_some_and(|m| {
+            name.strip_prefix("meaco_")
+                .and_then(|s| s.parse().ok())
+                .is_some_and(|op| m.has_preset(op))
+        }),
+        "tv_on" | "tv_off" => devices.tv.is_some(),
         _ => false,
     }
 }
 pub fn call(devices: &mut Devices, tool: &str, args: &Value) -> Result<Value> {
     if tool == "routine_list" {
-        let selection = devices.selection();
         let mut routines = Vec::new();
         for (name, description) in [
-            ("meaco_day", "Normal mode at 55% humidity"),
-            ("meaco_night", "Purify base mode followed by sleep"),
+            ("meaco_day", "Configured daytime preset"),
+            ("meaco_night", "Configured nighttime preset"),
             ("meaco_off", "Verified dehumidifier power off"),
             (
                 "tv_on",
@@ -33,8 +36,13 @@ pub fn call(devices: &mut Devices, tool: &str, args: &Value) -> Result<Value> {
                 "Verified DIGI sleep, Samsung shutdown once, explicit fixed-delay outlet cutoff",
             ),
         ] {
-            if configured(selection, name) {
-                routines.push(json!({"routine":name,"description":description}));
+            if configured(devices, name) {
+                let mut row = json!({"routine":name,"description":description});
+                if let Some(op) = name.strip_prefix("meaco_").and_then(|s| s.parse().ok()) {
+                    row["preset"] =
+                        serde_json::to_value(devices.meaco.as_ref().and_then(|m| m.preset(op)))?;
+                }
+                routines.push(row);
             }
         }
         return Ok(json!({"routines":routines}));
@@ -45,7 +53,7 @@ pub fn call(devices: &mut Devices, tool: &str, args: &Value) -> Result<Value> {
     let name = args["routine"]
         .as_str()
         .ok_or_else(|| error("Expected named routine"))?;
-    if !configured(devices.selection(), name) {
+    if !configured(devices, name) {
         return Err(error("Unknown configured routine"));
     }
     let result = if let Some(operation) = name.strip_prefix("meaco_") {
@@ -60,7 +68,11 @@ pub fn call(devices: &mut Devices, tool: &str, args: &Value) -> Result<Value> {
     } else if tool == "routine_run" {
         devices.call("tv_apply", &json!({"power":name == "tv_on"}))?
     } else {
-        json!({"power":name == "tv_on","live_state_checked":false,"provisional":true,"shutdown_policy":"fixed_delay","physical_samsung_off_verified":false,"note":"Execution checks live state; failures abort the sequence and uncertain controls are not replayed.","steps":if name == "tv_on" {vec!["outlet_on_if_needed","wait_5s_if_outlet_changed","samsung_wake_verify","wait_digi_ready_up_to_120s","digi_wake_verify"]} else {vec!["if_outlet_on_digi_sleep_verify","samsung_shutdown_once","wait_5s","outlet_off_verify"]}})
+        devices
+            .tv
+            .as_ref()
+            .ok_or_else(|| error("TV is not configured"))?
+            .preview(name == "tv_on")
     };
     Ok(json!({"routine":name,"result":result}))
 }

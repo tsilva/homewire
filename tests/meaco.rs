@@ -2,10 +2,24 @@ use homewire::{
     Result,
     config::Memory,
     error,
-    meaco::{Action, Device, Operation, State, apply, plan},
+    meaco::{Action, Device, Operation, State, apply as apply_configured, plan as plan_configured},
 };
 use serde_json::json;
 
+fn presets() -> homewire::routine::meaco::Presets {
+    serde_json::from_value(json!({"day":{"mode":"manual","target_humidity":50},"night":{"mode":"purify","sleep":true}})).expect("fixture")
+}
+fn apply(
+    device: &mut Fake,
+    operation: Operation,
+    memory: &mut Memory,
+    persist: impl FnMut(&Memory) -> Result<()>,
+) -> Result<homewire::meaco::Applied> {
+    apply_configured(device, operation, memory, &presets(), persist)
+}
+fn plan(state: &State, operation: Operation, memory: &Memory) -> Vec<Action> {
+    plan_configured(state, operation, memory, &presets()).expect("fixture")
+}
 struct Fake {
     state: State,
     base: String,
@@ -254,4 +268,36 @@ fn fault_mapping_matches_the_existing_device_mapping() -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[test]
+fn custom_presets_control_both_plan_and_verification() -> Result<()> {
+    let p: homewire::routine::meaco::Presets = serde_json::from_value(
+        json!({"day":{"mode":"manual","target_humidity":60},"night":{"mode":"manual","sleep":true}}),
+    )?;
+    let mut fake = Fake::new("purify", true);
+    let mut memory = Memory::default();
+    let expected = plan_configured(&fake.state, Operation::Day, &memory, &p)?;
+    let applied = apply_configured(&mut fake, Operation::Day, &mut memory, &p, |_| Ok(()))?;
+    assert_eq!(fake.commands, expected);
+    assert_eq!(applied.state.target_humidity, 60);
+    fake.commands.clear();
+    apply_configured(&mut fake, Operation::Night, &mut memory, &p, |_| Ok(()))?;
+    assert_eq!(fake.commands, vec![Action::Mode("sleep".into())]);
+    assert_eq!(memory.base_mode.as_deref(), Some("manual"));
+    assert!(!apply_configured(&mut fake, Operation::Night, &mut memory, &p, |_| Ok(()))?.changed);
+    Ok(())
+}
+#[test]
+fn missing_presets_and_invalid_targets_send_no_controls() {
+    let mut fake = Fake::new("manual", true);
+    let mut memory = Memory::default();
+    for p in [
+        homewire::routine::meaco::Presets::default(),
+        serde_json::from_value(json!({"day":{"mode":"manual","target_humidity":56}}))
+            .expect("deserialized"),
+    ] {
+        assert!(apply_configured(&mut fake, Operation::Day, &mut memory, &p, |_| Ok(())).is_err());
+        assert!(fake.commands.is_empty());
+    }
 }

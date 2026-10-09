@@ -11,12 +11,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
-pub const POINTS: &[(u16, u8, u16)] = &[
-    (360, 10, 2700),
-    (480, 80, 5000),
-    (960, 80, 5000),
-    (1200, 10, 2700),
-];
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -24,9 +18,24 @@ pub struct Config {
     pub timezone: String,
     pub latitude: f64,
     pub longitude: f64,
+    pub curve: Vec<(u16, u8, u16)>,
+    pub outside_curve: (u8, u16),
 }
 impl Config {
     pub fn validate(&self) -> Result<Tz> {
+        let valid_target = |b: u8, k: u16| (1..=100).contains(&b) && (2500..=9000).contains(&k);
+        if !(2..=16).contains(&self.curve.len())
+            || !valid_target(self.outside_curve.0, self.outside_curve.1)
+            || self
+                .curve
+                .iter()
+                .any(|&(m, b, k)| m >= 1440 || !valid_target(b, k))
+            || self.curve.windows(2).any(|p| p[0].0 >= p[1].0)
+        {
+            return Err(error(
+                "Invalid light curve: 2–16 ordered minute/brightness/temperature points required",
+            ));
+        }
         if !self.latitude.is_finite()
             || !self.longitude.is_finite()
             || self.latitude.abs() > 89.0
@@ -42,7 +51,7 @@ impl Config {
         let local = now.with_timezone(&self.validate()?);
         let minute =
             f64::from(local.hour() * 60 + local.minute()) + f64::from(local.second()) / 60.0;
-        let (brightness, temperature) = curve(minute);
+        let (brightness, temperature) = curve(&self.curve, self.outside_curve, minute);
         Ok(Change {
             brightness_percent: Some(brightness),
             color_temperature_k: Some(temperature),
@@ -55,12 +64,12 @@ impl Config {
     }
     pub fn preview(&self, now: DateTime<Utc>) -> Result<Value> {
         Ok(
-            json!({"light":self.light,"timezone":self.timezone,"at":now.to_rfc3339(),"target":self.target(now)?,"sunset":self.sunset(now)?.map(|t|t.to_rfc3339()),"curve":POINTS,"note":"Preview only. Brightness/temperature follow the curve while on; sunset turns on once. Schedule is opt-in."}),
+            json!({"light":self.light,"timezone":self.timezone,"at":now.to_rfc3339(),"target":self.target(now)?,"sunset":self.sunset(now)?.map(|t|t.to_rfc3339()),"curve":self.curve,"outside_curve":self.outside_curve,"note":"Preview only. Brightness/temperature follow the curve while on; sunset turns on once. Schedule is opt-in."}),
         )
     }
 }
-pub fn curve(minute: f64) -> (u8, u16) {
-    for pair in POINTS.windows(2) {
+pub fn curve(points: &[(u16, u8, u16)], outside: (u8, u16), minute: f64) -> (u8, u16) {
+    for pair in points.windows(2) {
         let (start, b0, k0) = pair[0];
         let (end, b1, k1) = pair[1];
         if (f64::from(start)..f64::from(end)).contains(&minute) {
@@ -71,7 +80,7 @@ pub fn curve(minute: f64) -> (u8, u16) {
             );
         }
     }
-    (10, 2700)
+    outside
 }
 #[derive(Default, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

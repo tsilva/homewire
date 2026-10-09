@@ -12,7 +12,11 @@ UE40H6200 uses an existing encrypted pairing; DIGI R2A uses pinned mutual TLS
 and absolute wake/sleep. The TV workflow composes those adapters and a shared plug.
 
 - Work on the current branch and preserve local changes.
-- Keep credentials in ignored private files; never log keys or device configuration.
+- Keep credentials in Infisical and references in ignored private configs. Necessary device runtime files must remain protected; never log keys or device configuration.
+- Keep tracked examples and documentation generic: use synthetic device names,
+  documentation-only addresses and credential placeholders. Store household
+  inventories, personal locations, device serials and deployment/migration logs
+  in ignored `.local/` files, never in public examples or reference documentation.
 - Keep messages, queues, caches, and retained state bounded. Measure resident memory
   on the target device before claiming a memory footprint.
 - Keep device protocol code separate from Meaco behavior, scheduling, and MCP.
@@ -69,4 +73,7 @@ and absolute wake/sleep. The TV workflow composes those adapters and a shared pl
 
 - Android deployment changes also run
   `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/android -p 'test_*.py'`
-  and `shellcheck scripts/android/build.sh`. Never copy test tunnel configs to phones.
+  and `shellcheck scripts/android/build.sh scripts/android/sandbox/build.sh scripts/android/sandbox/build-identity.sh`.
+  Sandbox changes also build the native guard and run its negative probe on the target.
+  Never restore permissive agent grants on failure or enable disabled channels.
+  Never copy test tunnel configs to phones.

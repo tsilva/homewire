@@ -1,6 +1,7 @@
 """Offline checks for config preservation and deployment input rejection."""
 import contextlib
 import io
+import json
 import tempfile
 import tomllib
 import unittest
@@ -9,6 +10,7 @@ import phone
 import direct_boot
 import pair_digi
 from unittest.mock import patch
+from unittest.mock import Mock
 
 
 class FakePhone:
@@ -26,6 +28,51 @@ class FakePhone:
 
 
 class DeploymentChecks(unittest.TestCase):
+    def test_deployment_resolves_nested_secrets_without_host_writes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / 'lights.json'
+            original = '{"lights":[{"token":"${HOMEWIRE_SECRET_TEST}"}]}'
+            path.write_text(original)
+            secret = 'synthetic "quote" \\ slash\nline'
+            with patch.dict('os.environ', {'HOMEWIRE_SECRET_TEST': secret}, clear=True):
+                configs = dict(phone.validate_configs(root))
+            self.assertEqual(json.loads(configs['lights.json'])['lights'][0]['token'], secret)
+            self.assertEqual(path.read_text(), original)
+            self.assertEqual(sorted(p.name for p in root.iterdir()), ['lights.json'])
+
+    def test_deployment_materializes_only_target_private_key_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / 'api.json'
+            path.write_text('{"private_key":"env:HOMEWIRE_SECRET_TEST_KEY"}')
+            secret = '-----BEGIN PRIVATE KEY-----\nsynthetic\n-----END PRIVATE KEY-----\n'
+            with patch.dict('os.environ', {'HOMEWIRE_SECRET_TEST_KEY': secret}, clear=True):
+                configs = dict(phone.validate_configs(root))
+            self.assertEqual(json.loads(configs['api.json'])['private_key'], 'api-key.pem')
+            self.assertEqual(configs['api-key.pem'], secret.encode())
+            self.assertFalse((root / 'api-key.pem').exists())
+            self.assertIn('env:HOMEWIRE_SECRET_TEST_KEY', path.read_text())
+
+    def test_deployment_missing_or_malformed_secret_fails_without_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for value in ('${HOMEWIRE_SECRET_TEST}', '${HOMEWIRE_SECRET_TEST}unexpected'):
+                (root / 'lights.json').write_text(json.dumps({'token': value}))
+                with patch.dict('os.environ', {}, clear=True):
+                    with self.assertRaises(ValueError):
+                        phone.validate_configs(root)
+
+    def test_direct_boot_restart_requires_a_reply_not_a_stale_socket(self):
+        p=phone.Phone.__new__(phone.Phone)
+        p.direct_boot=True
+        p.adb=['adb','-s','synthetic']
+        p.sh=Mock(return_value=b'yes\n')
+        p.request=Mock(side_effect=[RuntimeError('Owner is not ready'),{}])
+        with patch.object(direct_boot,'restart'),patch('time.sleep'):
+            p.restart()
+        self.assertEqual(p.request.call_count,2)
+
     def test_update_keeps_schedules_and_monitoring_and_requires_explicit_revocation(self):
         flags = b'--allow-control\n--schedule\n--watch-lights\n'
         self.assertEqual(phone.service_flags(flags), flags)

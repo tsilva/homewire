@@ -1,7 +1,17 @@
 use chrono::{TimeZone, Utc};
-use homewire::{meaco::Operation, schedule::due};
+use homewire::{meaco::Operation, schedule::due as due_configured};
 use std::collections::BTreeMap;
 
+fn config() -> homewire::schedule::Config {
+    serde_json::from_str(r#"{"timezone":"Europe/London","day":"09:00","night":"22:00"}"#)
+        .expect("fixture")
+}
+fn due(
+    now: chrono::DateTime<Utc>,
+    attempts: &BTreeMap<String, String>,
+) -> Option<(Operation, String, String)> {
+    due_configured(&config(), now, attempts)
+}
 #[test]
 fn minute_deadlines_sleep_to_the_next_boundary_without_per_second_polling() {
     let start = Utc
@@ -29,7 +39,7 @@ fn minute_deadlines_sleep_to_the_next_boundary_without_per_second_polling() {
 }
 
 #[test]
-fn lisbon_schedule_follows_summer_and_winter_offsets() {
+fn configured_schedule_follows_summer_and_winter_offsets() {
     let attempts = BTreeMap::new();
     for (month, day, hour, minute, expected) in [
         (7, 1, 8, 0, Operation::Day),
@@ -65,4 +75,34 @@ fn persisted_attempt_prevents_same_day_replay() {
     let attempts = BTreeMap::from([("day".into(), "2026-01-01".into())]);
     assert!(due(time, &attempts).is_none());
     assert!(due(time + chrono::Duration::days(1), &attempts).is_some());
+}
+
+#[test]
+fn custom_times_and_timezone_and_dst_replay_are_respected() {
+    let cfg: homewire::schedule::Config =
+        serde_json::from_str(r#"{"timezone":"America/New_York","day":"01:30","night":"23:00"}"#)
+            .expect("fixture");
+    cfg.validate().expect("valid");
+    let first = Utc
+        .with_ymd_and_hms(2026, 11, 1, 5, 30, 0)
+        .single()
+        .expect("date");
+    let repeated = first + chrono::Duration::hours(1);
+    let (_, key, date) = due_configured(&cfg, first, &BTreeMap::new()).expect("due");
+    assert!(due_configured(&cfg, repeated, &BTreeMap::from([(key, date)])).is_none());
+    assert!(due_configured(&cfg, first + chrono::Duration::minutes(1), &BTreeMap::new()).is_none());
+}
+#[test]
+fn ambiguous_or_invalid_schedule_configuration_is_rejected() {
+    for value in [
+        r#"{"timezone":"bad","day":"09:00","night":"22:00"}"#,
+        r#"{"timezone":"UTC","day":"9:00","night":"22:00"}"#,
+        r#"{"timezone":"UTC","day":"24:00","night":"22:00"}"#,
+    ] {
+        assert!(serde_json::from_str::<homewire::schedule::Config>(value).is_err());
+    }
+    let c: homewire::schedule::Config =
+        serde_json::from_str(r#"{"timezone":"UTC","day":"09:00","night":"09:00"}"#)
+            .expect("parsed");
+    assert!(c.validate().is_err());
 }

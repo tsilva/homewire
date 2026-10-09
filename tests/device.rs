@@ -116,7 +116,7 @@ fn standard_factory_and_catalog_dispatch_keep_validation_before_device_io() -> R
     for (tool, key, count) in [
         ("printer_list", "printers", 2),
         ("bulb_list", "bulbs", 3),
-        ("plug_list", "plugs", 8),
+        ("plug_list", "plugs", 3),
     ] {
         assert_eq!(
             devices.call(tool, &json!({}))?[key]
@@ -189,9 +189,9 @@ fn meaco_adapter_owns_durable_schedule_attempts_before_execution() -> Result<()>
     use chrono::{TimeZone, Utc};
     let configs = Configs::new()?;
     let now = Utc
-        .with_ymd_and_hms(2026, 10, 8, 8, 0, 0)
+        .with_ymd_and_hms(2026, 10, 8, 9, 0, 0)
         .single()
-        .expect("London 09:00");
+        .expect("configured UTC 09:00");
     let mut meaco = configs.open::<meaco::Manager>("meaco")?;
     assert_eq!(meaco.scheduled_operation(now)?, Some(meaco::Operation::Day));
     assert_eq!(meaco.scheduled_operation(now)?, None);
@@ -201,6 +201,31 @@ fn meaco_adapter_owns_durable_schedule_attempts_before_execution() -> Result<()>
         restarted.scheduled_operation(now)?,
         None,
         "restart cannot replay the attempt"
+    );
+    Ok(())
+}
+
+#[test]
+fn missing_presets_expose_only_off_and_never_query_for_unconfigured_runs() -> Result<()> {
+    let configs = Configs::new()?;
+    let path = configs.path("meaco");
+    let mut value: Value = serde_json::from_slice(&fs::read(&path)?)?;
+    let object = value.as_object_mut().expect("fixture");
+    object.remove("presets");
+    object.remove("schedule");
+    fs::write(&path, value.to_string())?;
+    let mut devices = Devices {
+        meaco: Some(meaco::Manager::open(&path)?),
+        ..Devices::default()
+    };
+    let list = homewire::routine::call(&mut devices, "routine_list", &json!({}))?;
+    assert_eq!(list["routines"].as_array().expect("list").len(), 1);
+    assert_eq!(list["routines"][0]["routine"], "meaco_off");
+    assert!(
+        homewire::routine::call(&mut devices, "routine_run", &json!({"routine":"meaco_day"}))
+            .expect_err("missing preset")
+            .to_string()
+            .contains("Unknown configured routine")
     );
     Ok(())
 }

@@ -3,17 +3,20 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import shlex
 import subprocess
 import tomllib
+import deployment
 
-CE_HOMEWIRE = '/data/data/com.termux/files/home/homewire'
+_LAYOUT = deployment.layout()
+CE_HOMEWIRE = _LAYOUT['ce']
 HOMEWIRE = CE_HOMEWIRE
-DE_HOMEWIRE = '/data/user_de/0/com.termux/files/homewire'
-PREFIX = '/data/data/com.termux/files/usr'
-ZCONFIG = '/data/data/com.termux/files/home/.zeroclaw/config.toml'
+DE_HOMEWIRE = _LAYOUT['de']
+PREFIX = _LAYOUT['prefix']
+ZCONFIG = _LAYOUT['zeroclaw']
 SERVICE = PREFIX + '/var/service/homewire'
 FILES = ('meaco.json', 'printers.json', 'awair.json', 'lights.json', 'plugs.json',
          'samsung.json', 'digi.json', 'tv.json', 'digi-cert.pem', 'digi-key.pem',
@@ -34,14 +37,15 @@ class Phone:
         try:
             self.sh('id >/dev/null')
         except RuntimeError as e:
-            if "couldn't stat /data/user/0/com.termux" in str(e):
-                raise RuntimeError('Unlock Android first; Termux protected storage is unavailable') from None
+            if "couldn't stat" in str(e):
+                raise RuntimeError('Check the configured package and unlock Android; protected storage is unavailable') from None
             raise
         self.direct_boot = bool(self.sh('[ ! -f ' + q(CE_HOMEWIRE + '/direct-boot') + ' ] || echo yes').strip())
         HOMEWIRE = DE_HOMEWIRE if self.direct_boot else CE_HOMEWIRE
 
     def sh(self, command, data=None):
-        command = ('run-as com.termux /system/bin/sh -c ' + q(
+        a = deployment.android()
+        command = ('run-as ' + q(a['package']) + ' --user ' + str(a['user']) + ' /system/bin/sh -c ' + q(
             'export PREFIX=' + q(PREFIX) + '; export PATH=' + q(PREFIX + '/bin:/system/bin') +
             '; export SVDIR=' + q(PREFIX + '/var/service') + '; ' + command))
         result = subprocess.run(self.adb + ['shell', '-T', command], input=data if data is not None else b'', capture_output=True, timeout=360)
@@ -70,7 +74,12 @@ class Phone:
             direct_boot.restart(self.adb[2])
             import time
             for _ in range(100):
-                if self.sh('[ ! -S '+q(HOMEWIRE+'/run/homewire.sock')+' ] || echo yes').strip(): return
+                if self.sh('[ ! -S '+q(HOMEWIRE+'/run/homewire.sock')+' ] || echo yes').strip():
+                    try:
+                        self.request('tools/list')
+                        return
+                    except (RuntimeError,json.JSONDecodeError):
+                        pass
                 time.sleep(.1)
             raise RuntimeError('Direct Boot owner did not start')
         self.sh('sv -w 10 down ' + q(SERVICE))
@@ -78,15 +87,52 @@ class Phone:
         self.sh('sv -w 10 check ' + q(SERVICE))
 
 
+def deployment_secrets(value, name, generated, field=(), depth=0):
+    """Resolve only explicit Homewire references in memory, never on the host disk."""
+    if depth > 32:
+        raise ValueError('Deployment configuration nesting exceeds its limit')
+    if isinstance(value, dict):
+        return {key: deployment_secrets(item, name, generated, field + (key,), depth + 1)
+                for key, item in value.items()}
+    if isinstance(value, list):
+        return [deployment_secrets(item, name, generated, field + (index,), depth + 1)
+                for index, item in enumerate(value)]
+    if not isinstance(value, str):
+        return value
+    pem = value.startswith('env:HOMEWIRE_SECRET_')
+    if not pem and not value.startswith('${HOMEWIRE_SECRET_'):
+        return value
+    variable = value[4:] if pem else value[2:-1] if value.endswith('}') else ''
+    if not re.fullmatch(r'HOMEWIRE_SECRET_[A-Z0-9_]{1,112}', variable):
+        raise ValueError('Invalid deployment secret reference')
+    secret = os.environ.get(variable, '')
+    if not secret or len(secret.encode()) > 8192 or '\0' in secret:
+        raise ValueError('Required deployment secret is missing or invalid; run through Infisical')
+    if not pem:
+        return secret
+    key_file = {('api.json', ('private_key',)): 'api-key.pem',
+                ('digi.json', ('client_key',)): 'digi-key.pem'}.get((name, field))
+    if not key_file or 'PRIVATE KEY-----' not in secret or not secret.startswith('-----BEGIN '):
+        raise ValueError('Invalid deployment private-key reference')
+    data = secret.encode()
+    if key_file in generated and generated[key_file] != data:
+        raise ValueError('Conflicting deployment private-key references')
+    generated[key_file] = data
+    return key_file
+
+
 def validate_configs(directory):
     configs = []
+    generated = {}
     for name in FILES:
         path = directory / name
         if not path.is_file():
             continue
         data = path.read_bytes()
+        if len(data) > 1048576:
+            raise ValueError('Deployment configuration exceeds its size limit')
         if name.endswith('.json'):
-            value = json.loads(data)
+            value = deployment_secrets(json.loads(data), name, generated)
             def check(v):
                 if isinstance(v, dict):
                     if 'connect' in v:
@@ -99,18 +145,24 @@ def validate_configs(directory):
                 elif isinstance(v, str) and ('REPLACE' in v or v.startswith('192.0.2.')):
                     raise ValueError('Unconfigured example: ' + name)
             check(value)
+            data = (json.dumps(value) + '\n').encode()
         configs.append((name, data))
     if not any(name.endswith('.json') for name, _ in configs):
         raise ValueError('No device configs found')
+    for name, data in configs:
+        if name in generated and data != generated[name]:
+            raise ValueError('Existing private key differs from its Infisical reference')
+    configs = [(name, data) for name, data in configs if name not in generated]
+    configs.extend(generated.items())
     return configs
 
 
 def service_script(root=None):
     # Existing configs determine family selection; TV owns its child managers.
-    script = '''#!/data/data/com.termux/files/usr/bin/sh
+    script = '''#!__SHELL__
 umask 077
 exec 2>&1
-root=/data/data/com.termux/files/home/homewire
+root=__ROOT__
 set --
 for pair in 'meaco:config' 'printers:printers' 'awair:awair' 'lights:lights'; do
   file=${pair%:*}; flag=${pair#*:}
@@ -133,9 +185,7 @@ done < "$root/service.args"
 exec "$root/current/homewire" "$@" daemon "$root/run/homewire.sock"
 '''
     root = root or HOMEWIRE
-    if root != CE_HOMEWIRE:
-        script=script.replace(CE_HOMEWIRE,root).replace('#!/data/data/com.termux/files/usr/bin/sh','#!/system/bin/sh')
-    return script
+    return script.replace('__ROOT__',q(root)).replace('__SHELL__',PREFIX+'/bin/sh' if root == CE_HOMEWIRE else '/system/bin/sh')
 
 
 def service_flags(existing, allow_control=None):
@@ -189,15 +239,11 @@ def install(phone, args):
         phone.put(HOMEWIRE+'/launch',service_script().encode(),'700')
     else:
         phone.put(SERVICE + '/run', service_script().encode(), '700')
-        phone.put(SERVICE + '/log/run', ('''#!/data/data/com.termux/files/usr/bin/sh
-umask 077
-mkdir -p /data/data/com.termux/files/home/homewire/log
-exec svlogd -tt /data/data/com.termux/files/home/homewire/log
-''').encode(), '700')
+        phone.put(SERVICE + '/log/run', ('#!'+PREFIX+'/bin/sh\numask 077\nmkdir -p '+q(HOMEWIRE+'/log')+'\nexec svlogd -tt '+q(HOMEWIRE+'/log')+'\n').encode(), '700')
     phone.sh('umask 077; mkdir -p ' + q(HOMEWIRE + '/log') + '; chmod 700 ' + q(HOMEWIRE + '/log'))
     phone.put(HOMEWIRE + '/log/config', b's65536\nn3\n')
     if not phone.direct_boot:
-        phone.put(SERVICE + '/check', ('#!/data/data/com.termux/files/usr/bin/sh\n[ -S ' + q(HOMEWIRE + '/run/homewire.sock') + ' ]\n').encode(), '700')
+        phone.put(SERVICE + '/check', ('#!'+PREFIX+'/bin/sh\n[ -S ' + q(HOMEWIRE + '/run/homewire.sock') + ' ]\n').encode(), '700')
     # Preserve the prior version and switch links atomically on the same filesystem.
     phone.sh('set -eu; cd ' + q(HOMEWIRE) + '; rm -f current.new previous.new; if [ -L current ]; then old=$(readlink current); '
              'if [ "$old" != ' + q(release) + ' ]; then ln -s "$old" previous.new; mv -fT previous.new previous; fi; fi; '
@@ -251,6 +297,7 @@ def rollback(phone):
 
 
 def connect(phone, agent):
+    require_legacy_zeroclaw(phone)
     original = phone.sh('cat ' + q(ZCONFIG))
     text = original.decode()
     config = tomllib.loads(text)
@@ -312,9 +359,15 @@ def connect(phone, agent):
     print('Homewire MCP granted to ' + agent + '; prior config retained at ' + backup)
 
 
+def require_legacy_zeroclaw(phone):
+    if phone.sh('[ ! -f ' + q(CE_HOMEWIRE.rsplit('/', 1)[0] + '/zeroclaw-isolated') + ' ] || echo yes').strip():
+        raise ValueError('ZeroClaw is isolated; use the root-only sandbox policy and scoped HTTP endpoint. Legacy grants are refused.')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--serial', required=True)
+    deployment.add_argument(parser)
     sub = parser.add_subparsers(dest='command', required=True)
     ins = sub.add_parser('install')
     ins.add_argument('--package', default='target/android-package')
@@ -326,6 +379,7 @@ def main():
     con = sub.add_parser('connect-zeroclaw')
     con.add_argument('--agent', required=True)
     args = parser.parse_args()
+    if args.deployment: deployment.load(args.deployment)
     phone = Phone(args.serial)
     if args.command == 'install': install(phone, args)
     elif args.command == 'verify': verify(phone, args.require_online)

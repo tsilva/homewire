@@ -13,9 +13,13 @@ import secrets
 import time
 import tomllib
 import phone
+import deployment
 
 
 def configure(p, path, agent):
+    profile = deployment.current()
+    if agent != profile.agent["name"]: raise ValueError("Agent must match the deployment profile")
+    phone.require_legacy_zeroclaw(p)
     cfg = json.loads(path.read_text())
     original = p.sh('cat ' + phone.q(phone.ZCONFIG))
     z = tomllib.loads(original.decode())
@@ -46,7 +50,7 @@ def configure(p, path, agent):
         p.put(phone.ZCONFIG + '.homewire-new', text.encode())
         p.sh('mv -f ' + phone.q(phone.ZCONFIG + '.homewire-new') + ' ' + phone.q(phone.ZCONFIG))
         p.sh('sv restart ' + phone.q(phone.PREFIX + '/var/service/zeroclaw'))
-    cfg['assistant'] = {'url': 'http://127.0.0.1:42617/webhook?agent=' + agent, 'bearer_token': token}
+    cfg['assistant'] = {'url': profile.assistant_url, 'bearer_token': token}
     # Each companion still needs an explicit assistant:true permission in clients.
     os.chmod(path, 0o600)
     path.write_text(json.dumps(cfg, indent=2) + '\n')
@@ -56,7 +60,9 @@ def configure(p, path, agent):
 if __name__ == '__main__':
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--serial', required=True)
+    deployment.add_argument(ap,required=True)
     ap.add_argument('--api-config', type=Path, required=True)
     ap.add_argument('--agent', required=True)
     args = ap.parse_args()
+    deployment.load(args.deployment)
     configure(phone.Phone(args.serial), args.api_config, args.agent)

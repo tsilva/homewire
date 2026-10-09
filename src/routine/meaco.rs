@@ -24,23 +24,89 @@ impl std::str::FromStr for Operation {
         }
     }
 }
-pub fn already_correct(state: &State, operation: Operation, memory: &Memory) -> bool {
-    match operation {
-        Operation::Off => !state.power,
-        Operation::Day => state.power && state.mode == "manual" && state.target_humidity == 50,
-        Operation::Night => {
-            state.power && state.mode == "sleep" && memory.base_mode.as_deref() == Some("purify")
+/// Typed, optional presets. Missing presets never fall back to household choices.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Preset {
+    pub mode: String,
+    #[serde(default)]
+    pub target_humidity: Option<u8>,
+    #[serde(default)]
+    pub sleep: bool,
+}
+impl Preset {
+    pub fn validate(&self) -> Result<()> {
+        if !matches!(self.mode.as_str(), "manual" | "purify")
+            || self.target_humidity.is_some_and(|h| {
+                !crate::meaco::HUMIDITY_SETTING.accepts(&serde_json::Value::from(h))
+            })
+        {
+            return Err(error(
+                "Invalid Meaco preset mode or humidity (35–70 in steps of 5)",
+            ));
         }
+        Ok(())
     }
 }
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Presets {
+    pub day: Option<Preset>,
+    pub night: Option<Preset>,
+}
+impl Presets {
+    pub fn validate(&self) -> Result<()> {
+        for p in [&self.day, &self.night].into_iter().flatten() {
+            p.validate()?;
+        }
+        Ok(())
+    }
+    pub fn configured(&self, operation: Operation) -> bool {
+        match operation {
+            Operation::Off => true,
+            Operation::Day => self.day.is_some(),
+            Operation::Night => self.night.is_some(),
+        }
+    }
+    fn get(&self, operation: Operation) -> Result<Option<&Preset>> {
+        let p = match operation {
+            Operation::Off => return Ok(None),
+            Operation::Day => &self.day,
+            Operation::Night => &self.night,
+        };
+        let p = p
+            .as_ref()
+            .ok_or_else(|| error("Configure the requested Meaco preset first"))?;
+        p.validate()?;
+        Ok(Some(p))
+    }
+}
+fn already_correct(state: &State, preset: Option<&Preset>, memory: &Memory) -> bool {
+    let Some(p) = preset else {
+        return !state.power;
+    };
+    state.power
+        && p.target_humidity.is_none_or(|h| state.target_humidity == h)
+        && if p.sleep {
+            state.mode == "sleep" && memory.base_mode.as_deref() == Some(p.mode.as_str())
+        } else {
+            state.mode == p.mode
+        }
+}
 
-pub fn plan(state: &State, operation: Operation, memory: &Memory) -> Vec<Action> {
-    if already_correct(state, operation, memory) {
-        return vec![];
+pub fn plan(
+    state: &State,
+    operation: Operation,
+    memory: &Memory,
+    presets: &Presets,
+) -> Result<Vec<Action>> {
+    let preset = presets.get(operation)?;
+    if already_correct(state, preset, memory) {
+        return Ok(vec![]);
     }
-    if operation == Operation::Off {
-        return vec![Action::Power(false)];
-    }
+    let Some(p) = preset else {
+        return Ok(vec![Action::Power(false)]);
+    };
     let mut steps = vec![];
     if !state.power {
         steps.push(Action::Power(true));
@@ -48,22 +114,17 @@ pub fn plan(state: &State, operation: Operation, memory: &Memory) -> Vec<Action>
     if state.mode == "sleep" {
         steps.push(Action::Mode("sleep".into()));
     }
-    if operation == Operation::Day && state.target_humidity != 50 {
-        steps.push(Action::Humidity(50));
+    if let Some(h) = p.target_humidity.filter(|h| state.target_humidity != *h) {
+        steps.push(Action::Humidity(h));
     }
-    let base = if operation == Operation::Day {
-        "manual"
-    } else {
-        "purify"
-    };
-    // Clearing sleep reveals an unknown underlying mode; a plan is provisional.
-    if state.mode != base {
-        steps.push(Action::Mode(base.into()));
+    // Clearing sleep reveals an unknown underlying mode; the plan is provisional.
+    if state.mode != p.mode {
+        steps.push(Action::Mode(p.mode.clone()));
     }
-    if operation == Operation::Night {
+    if p.sleep {
         steps.push(Action::Mode("sleep".into()));
     }
-    steps
+    Ok(steps)
 }
 
 #[derive(Serialize)]
@@ -77,21 +138,22 @@ pub fn apply<D: Device>(
     device: &mut D,
     operation: Operation,
     memory: &mut Memory,
+    presets: &Presets,
     mut persist: impl FnMut(&Memory) -> Result<()>,
 ) -> Result<Applied> {
+    let preset = presets.get(operation)?;
     let mut state = device.read()?;
-    if already_correct(&state, operation, memory) {
+    if already_correct(&state, preset, memory) {
         return Ok(Applied {
             operation,
             changed: false,
             state,
         });
     }
-    // Invalidate the old assumption BEFORE touching the device. If a command
-    // outcome is ambiguous, no later invocation assumes a known sleep base.
+    // Invalidate before I/O; an ambiguous result must never restore a sleep base.
     memory.base_mode = None;
     persist(memory)?;
-    if operation == Operation::Off {
+    let Some(p) = preset else {
         state = send_verified(device, &Action::Power(false))?;
         if state.power {
             return Err(error("Meaco did not remain off"));
@@ -101,7 +163,7 @@ pub fn apply<D: Device>(
             changed: true,
             state,
         });
-    }
+    };
     if !state.power {
         state = send_verified(device, &Action::Power(true))?;
         powered(&state)?;
@@ -115,27 +177,24 @@ pub fn apply<D: Device>(
             ));
         }
     }
-    if operation == Operation::Day && state.target_humidity != 50 {
-        state = send_verified(device, &Action::Humidity(50))?;
+    if let Some(h) = p.target_humidity.filter(|h| state.target_humidity != *h) {
+        state = send_verified(device, &Action::Humidity(h))?;
         powered(&state)?;
-        if state.target_humidity != 50 {
+        if state.target_humidity != h {
             return Err(error("Humidity target did not persist"));
         }
     }
-    let base = if operation == Operation::Day {
-        "manual"
-    } else {
-        "purify"
-    };
-    if state.mode != base {
-        powered(&state)?;
-        state = send_verified(device, &Action::Mode(base.into()))?;
+    if state.mode != p.mode {
+        state = send_verified(device, &Action::Mode(p.mode.clone()))?;
     }
     powered(&state)?;
-    if state.mode != base || (operation == Operation::Day && state.target_humidity != 50) {
+    if state.mode != p.mode
+        || p.target_humidity
+            .is_some_and(|h| state.target_humidity != h)
+    {
         return Err(error("Underlying mode or humidity target did not persist"));
     }
-    if operation == Operation::Night {
+    if p.sleep {
         state = send_verified(device, &Action::Mode("sleep".into()))?;
         powered(&state)?;
         if state.mode != "sleep" {
@@ -144,7 +203,7 @@ pub fn apply<D: Device>(
             ));
         }
     }
-    memory.base_mode = Some(base.into());
+    memory.base_mode = Some(p.mode.clone());
     persist(memory)?;
     Ok(Applied {
         operation,
