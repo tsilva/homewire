@@ -18,6 +18,12 @@ struct Config {
     samsung: PathBuf,
     digi: PathBuf,
     plugs: PathBuf,
+    #[serde(flatten)]
+    settings: Settings,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Settings {
     plug: String,
     shutdown_policy: String,
     timings: Timings,
@@ -168,7 +174,32 @@ impl Manager {
     }
 
     pub fn open(path: &Path) -> Result<Self> {
-        let config: Config = media::load(path)?;
+        Self::from_source(&crate::config::Source::file(path))
+    }
+    pub fn from_source(source: &crate::config::Source<'_>) -> Result<Self> {
+        let config: Config = source.decode()?;
+        let parent = source.path().parent().unwrap_or(Path::new("."));
+        let resolve = |p: PathBuf| if p.is_absolute() { p } else { parent.join(p) };
+        let samsung = samsung::Manager::open(&resolve(config.samsung))?;
+        let digi = androidtv::Manager::open(&resolve(config.digi))?;
+        let plugs = plug::Manager::open(&resolve(config.plugs))?;
+        Self::assemble(source.path(), config.settings, samsung, digi, plugs)
+    }
+    pub(crate) fn from_children(
+        source: &crate::config::Source<'_>,
+        samsung: samsung::Manager,
+        digi: androidtv::Manager,
+        plugs: plug::Manager,
+    ) -> Result<Self> {
+        Self::assemble(source.path(), source.decode()?, samsung, digi, plugs)
+    }
+    fn assemble(
+        path: &Path,
+        config: Settings,
+        samsung: samsung::Manager,
+        digi: androidtv::Manager,
+        plugs: plug::Manager,
+    ) -> Result<Self> {
         if config.shutdown_policy != "fixed_delay"
             || config.plug.is_empty()
             || config.plug.len() > 32
@@ -178,13 +209,11 @@ impl Manager {
             ));
         }
         config.timings.validate()?;
-        let parent = path.parent().unwrap_or(Path::new("."));
-        let resolve = |p: PathBuf| if p.is_absolute() { p } else { parent.join(p) };
         let lock = lock_configuration(path)?;
         let equipment = Equipment {
-            samsung: samsung::Manager::open(&resolve(config.samsung))?,
-            digi: androidtv::Manager::open(&resolve(config.digi))?,
-            plugs: plug::Manager::open(&resolve(config.plugs))?,
+            samsung,
+            digi,
+            plugs,
             plug: config.plug,
         };
         if !equipment
@@ -244,6 +273,7 @@ impl Manager {
     }
 }
 impl Adapter for Manager {
+    const CONFIG_SECTION: &'static str = "routines";
     const SUPPORT: crate::entity::Support = crate::entity::Support::ROUTINES;
     fn entities<'a>(&'a self, _visit: &mut impl FnMut(crate::entity::Entity<'a>)) {}
 
@@ -265,8 +295,8 @@ impl Adapter for Manager {
             },
         },
     ];
-    fn open(path: &Path) -> Result<Self> {
-        Self::open(path)
+    fn from_source(source: &crate::config::Source<'_>) -> Result<Self> {
+        Self::from_source(source)
     }
     fn execute(&mut self, name: &str, args: &Value) -> Result<Value> {
         match name {

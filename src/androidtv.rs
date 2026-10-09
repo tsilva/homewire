@@ -282,7 +282,11 @@ pub struct Manager {
 }
 impl Manager {
     pub fn open(path: &Path) -> Result<Self> {
-        let mut config: Config = media::load(path)?;
+        Self::from_source(&crate::config::Source::file(path))
+    }
+    pub fn from_source(source: &crate::config::Source<'_>) -> Result<Self> {
+        let path = source.path();
+        let mut config: Config = source.decode()?;
         config.validate()?;
         let parent = path.parent().unwrap_or(Path::new("."));
         if config.client_cert.is_relative() {
@@ -520,8 +524,8 @@ impl Adapter for Manager {
             },
         },
     ];
-    fn open(path: &Path) -> Result<Self> {
-        Self::open(path)
+    fn from_source(source: &crate::config::Source<'_>) -> Result<Self> {
+        Self::from_source(source)
     }
     fn execute(&mut self, name: &str, args: &Value) -> Result<Value> {
         match name {

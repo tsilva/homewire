@@ -55,3 +55,5 @@ pub mod brother;
 pub mod convenience;
 
 pub mod setup;
+
+pub mod bundle;

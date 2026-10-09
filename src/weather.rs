@@ -7,7 +7,7 @@ use crate::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{path::Path, time::Duration};
+use std::time::Duration;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -58,6 +58,7 @@ impl Config {
     }
 }
 impl Adapter for Config {
+    const CONFIG_SECTION: &'static str = "services";
     const TOOLS: &'static [Tool] = &[];
     const SUPPORT: Support = Support::READ;
     const PUBLIC_TOOLS: &'static [Tool] = &[Tool {
@@ -66,8 +67,8 @@ impl Adapter for Config {
         input: Input::Empty,
         hints: Hints::READ,
     }];
-    fn open(path: &Path) -> Result<Self> {
-        let c: Self = crate::media::load(path)?;
+    fn from_source(source: &crate::config::Source<'_>) -> Result<Self> {
+        let c: Self = source.decode()?;
         if !c.latitude.is_finite()
             || !(-90. ..=90.).contains(&c.latitude)
             || !c.longitude.is_finite()

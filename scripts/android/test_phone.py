@@ -34,6 +34,7 @@ class DeploymentChecks(unittest.TestCase):
             path = root / 'lights.json'
             original = '{"lights":[{"token":"${HOMEWIRE_SECRET_TEST}"}]}'
             path.write_text(original)
+            path.chmod(0o600)
             secret = 'synthetic "quote" \\ slash\nline'
             with patch.dict('os.environ', {'HOMEWIRE_SECRET_TEST': secret}, clear=True):
                 configs = dict(phone.validate_configs(root))
@@ -46,6 +47,7 @@ class DeploymentChecks(unittest.TestCase):
             root = Path(directory)
             path = root / 'api.json'
             path.write_text('{"private_key":"env:HOMEWIRE_SECRET_TEST_KEY"}')
+            path.chmod(0o600)
             secret = '-----BEGIN PRIVATE KEY-----\nsynthetic\n-----END PRIVATE KEY-----\n'
             with patch.dict('os.environ', {'HOMEWIRE_SECRET_TEST_KEY': secret}, clear=True):
                 configs = dict(phone.validate_configs(root))
@@ -59,6 +61,7 @@ class DeploymentChecks(unittest.TestCase):
             root = Path(directory)
             for value in ('${HOMEWIRE_SECRET_TEST}', '${HOMEWIRE_SECRET_TEST}unexpected'):
                 (root / 'lights.json').write_text(json.dumps({'token': value}))
+                (root / 'lights.json').chmod(0o600)
                 with patch.dict('os.environ', {}, clear=True):
                     with self.assertRaises(ValueError):
                         phone.validate_configs(root)
@@ -144,6 +147,7 @@ command = "/unchanged"
             (root / 'plugs.json').write_text('{"plugs":[{"host":"192.168.1.10"}]}')
             (root / 'plugs-test.json').write_text('not copied')
             (root / 'plugs.state.json').write_text('not copied')
+            (root / 'plugs.json').chmod(0o600)
             self.assertEqual([name for name, _ in phone.validate_configs(root)], ['plugs.json'])
 
 

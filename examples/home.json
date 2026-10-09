@@ -1,0 +1,266 @@
+{
+  "version": 1,
+  "adapters": {
+    "meaco": {
+      "device_id": "REPLACE_WITH_DEVICE_ID",
+      "host": "192.0.2.1",
+      "local_key": "REPLACE_16_BYTES",
+      "protocol_version": "3.3",
+      "port": 6668,
+      "timeout_seconds": 8,
+      "settle_seconds": 20
+    },
+    "printers": {
+      "printers": [
+        {
+          "name": "brother",
+          "host": "192.0.2.10",
+          "port": 631,
+          "path": "/ipp/print"
+        },
+        {
+          "name": "hp",
+          "host": "192.0.2.11",
+          "port": 631,
+          "path": "/ipp/print"
+        }
+      ],
+      "timeout_seconds": 8,
+      "poll_seconds": 30
+    },
+    "awair": {
+      "host": "192.0.2.12",
+      "port": 80,
+      "timeout_seconds": 8,
+      "max_age_seconds": 120
+    },
+    "lights": {
+      "lights": [
+        {
+          "name": "bulb_1",
+          "model": "L430C",
+          "host": "192.0.2.20",
+          "device_id": "REPLACEWITHDEVICEID1",
+          "auth_hash": "REPLACE_WITH_64_HEX_DIGITS"
+        },
+        {
+          "name": "bulb_2",
+          "model": "L430C",
+          "host": "192.0.2.21",
+          "device_id": "REPLACEWITHDEVICEID2",
+          "auth_hash": "REPLACE_WITH_64_HEX_DIGITS"
+        },
+        {
+          "name": "led_strip",
+          "model": "L900",
+          "host": "192.0.2.22",
+          "device_id": "REPLACEWITHSTRIPDEVICEID",
+          "auth_hash": "REPLACE_WITH_64_HEX_DIGITS"
+        }
+      ],
+      "timeout_seconds": 8,
+      "settle_seconds": 2,
+      "poll_seconds": 30
+    },
+    "plugs": {
+      "plugs": [
+        {
+          "name": "relay",
+          "model": "P100",
+          "host": "192.0.2.30",
+          "device_id": "REPLACEWITHPLUGDEVICEID1",
+          "auth_hash": "REPLACE_WITH_64_HEX_DIGITS"
+        },
+        {
+          "name": "metered_outlet",
+          "model": "P110",
+          "host": "192.0.2.31",
+          "device_id": "REPLACEWITHPLUGDEVICEID2",
+          "auth_hash": "REPLACE_WITH_64_HEX_DIGITS"
+        },
+        {
+          "name": "tv",
+          "model": "P110",
+          "host": "192.0.2.32",
+          "device_id": "REPLACEWITHPLUGDEVICEID3",
+          "auth_hash": "REPLACE_WITH_64_HEX_DIGITS"
+        }
+      ],
+      "timeout_seconds": 8,
+      "settle_seconds": 2,
+      "poll_seconds": 30
+    },
+    "samsung": {
+      "host": "192.0.2.194",
+      "device_id": "REPLACE-WITH-API-DEVICE-ID",
+      "mac": "00:11:22:33:44:55",
+      "token": "REPLACE-WITH-32-HEX-PAIRING-TOKEN",
+      "session_id": 1,
+      "wake_address": "192.0.2.255:9",
+      "off_key": "KEY_POWEROFF",
+      "timeout_seconds": 8,
+      "verify_seconds": 60
+    },
+    "digi": {
+      "host": "192.0.2.30",
+      "server_cert_sha256": "REPLACE-WITH-64-HEX-SERVER-CERT-SHA256",
+      "client_cert": "digi-cert.pem",
+      "client_key": "digi-key.pem",
+      "timeout_seconds": 8,
+      "verify_seconds": 20
+    },
+    "router": {
+      "name": "router",
+      "url": "http://192.0.2.1",
+      "password": "REPLACE_WITH_LOCAL_ADMIN_PASSWORD",
+      "poll_seconds": 60,
+      "absence_seconds": 180,
+      "trackers": [
+        {
+          "name": "lan_phone",
+          "mac": "02:00:00:00:00:01",
+          "person": true
+        }
+      ]
+    },
+    "brother": {
+      "name": "printer_diagnostics",
+      "host": "192.0.2.50",
+      "community": "REPLACE_WITH_SNMP_COMMUNITY"
+    },
+    "cast": {
+      "name": "cast_player",
+      "host": "192.0.2.60",
+      "server_cert_sha256": "REPLACE_WITH_SERVER_CERT_SHA256"
+    },
+    "dlna": {
+      "name": "dlna_player",
+      "description_url": "http://192.0.2.61:9197/dmr",
+      "udn": "uuid:REPLACE_WITH_DEVICE_UDN"
+    }
+  },
+  "routines": {
+    "meaco": {
+      "day": {
+        "mode": "manual",
+        "target_humidity": 50,
+        "sleep": false
+      },
+      "night": {
+        "mode": "purify",
+        "sleep": true
+      }
+    },
+    "tv": {
+      "plug": "tv",
+      "shutdown_policy": "fixed_delay",
+      "timings": {
+        "startup_seconds": 5,
+        "shutdown_seconds": 5,
+        "ready_seconds": 120
+      }
+    }
+  },
+  "automations": {
+    "meaco": {
+      "timezone": "Etc/UTC",
+      "day": "09:00",
+      "night": "22:00"
+    },
+    "lights": {
+      "light": "led_strip",
+      "timezone": "Etc/UTC",
+      "latitude": 0.0,
+      "longitude": 0.0,
+      "curve": [
+        [
+          360,
+          20,
+          3000
+        ],
+        [
+          1080,
+          80,
+          5000
+        ]
+      ],
+      "outside_curve": [
+        20,
+        2700
+      ]
+    }
+  },
+  "services": {
+    "alerts": {
+      "companions": [
+        "phone"
+      ],
+      "channels": []
+    },
+    "history": {
+      "entities": [
+        "sensor.metered_outlet_today_energy",
+        "sensor.metered_outlet_power"
+      ],
+      "interval_seconds": 300,
+      "max_points": 4096
+    },
+    "mobile": {
+      "devices": [
+        "phone"
+      ],
+      "persons": [
+        {
+          "name": "resident",
+          "device": "phone"
+        }
+      ],
+      "latitude": 0.0,
+      "longitude": 0.0,
+      "home_radius_m": 150,
+      "max_age_seconds": 600
+    },
+    "weather": {
+      "latitude": 0.0,
+      "longitude": 0.0
+    },
+    "shopping": {},
+    "radio": {},
+    "speech": {
+      "language": "en"
+    },
+    "api": {
+      "listen": "0.0.0.0:8443",
+      "dashboard_token": "REPLACE_WITH_RANDOM_64_HEX_DIGITS",
+      "clients": [
+        {
+          "name": "phone",
+          "token": "REPLACE_WITH_DIFFERENT_RANDOM_64_HEX_DIGITS",
+          "assistant": false
+        }
+      ],
+      "certificate": "api-cert.pem",
+      "private_key": "api-key.pem"
+    }
+  },
+  "deployment": {
+    "android": {
+      "package": "com.termux",
+      "user": 0
+    },
+    "agent": {
+      "name": "home_agent",
+      "gateway_port": 42617,
+      "mcp_port": 42620,
+      "transcription_port": null,
+      "provider_host": "provider.example"
+    },
+    "network": {
+      "dns_servers": [
+        "192.0.2.1"
+      ],
+      "lan_probe": "192.0.2.1:80",
+      "admin_port": 8443
+    }
+  }
+}

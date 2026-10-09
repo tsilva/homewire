@@ -165,7 +165,11 @@ impl Channel {
 }
 impl Manager {
     pub fn open(path: &Path) -> Result<Self> {
-        let config: Config = media::load(path)?;
+        Self::from_source(&crate::config::Source::file(path))
+    }
+    pub fn from_source(source: &crate::config::Source<'_>) -> Result<Self> {
+        let path = source.path();
+        let config: Config = source.decode()?;
         media::valid_endpoint(config.port, config.connect, config.timeout_seconds)?;
         media::hex::<32>(&config.server_cert_sha256)?;
         if !crate::config::valid_unique_labels(std::iter::once(config.name.as_str()), 32, b"-_") {
@@ -271,8 +275,8 @@ impl Manager {
 impl Adapter for Manager {
     const TOOLS: &'static [Tool] = &[];
     const SUPPORT: Support = Support::PLAYBACK;
-    fn open(p: &Path) -> Result<Self> {
-        Self::open(p)
+    fn from_source(source: &crate::config::Source<'_>) -> Result<Self> {
+        Self::from_source(source)
     }
     fn execute(&mut self, _: &str, _: &Value) -> Result<Value> {
         Err(error("Use media entity tools"))

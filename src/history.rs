@@ -37,7 +37,11 @@ pub struct Manager {
 }
 impl Manager {
     pub fn open(path: &Path) -> Result<Self> {
-        let config: Config = crate::media::load(path)?;
+        Self::from_source(&crate::config::Source::file(path))
+    }
+    pub fn from_source(source: &crate::config::Source<'_>) -> Result<Self> {
+        let path = source.path();
+        let config: Config = source.decode()?;
         if config.entities.is_empty()
             || config.entities.len() > 32
             || !(60..=3600).contains(&config.interval_seconds)
@@ -224,6 +228,7 @@ fn scan(path: &Path, max: usize, mut visit: impl FnMut(u64, i64, f64)) -> Result
     Ok(())
 }
 impl Adapter for Manager {
+    const CONFIG_SECTION: &'static str = "services";
     const TOOLS: &'static [Tool] = &[];
     const PUBLIC_TOOLS: &'static [Tool] = &[
         Tool {
@@ -244,8 +249,8 @@ impl Adapter for Manager {
         },
     ];
     const SUPPORT: Support = Support::NONE;
-    fn open(path: &Path) -> Result<Self> {
-        Self::open(path)
+    fn from_source(source: &crate::config::Source<'_>) -> Result<Self> {
+        Self::from_source(source)
     }
     fn entities<'a>(&'a self, _: &mut impl FnMut(Entity<'a>)) {}
     fn execute(&mut self, name: &str, args: &Value) -> Result<Value> {

@@ -64,7 +64,11 @@ pub struct Manager {
 }
 impl Manager {
     pub fn open(path: &Path) -> Result<Self> {
-        let config: Config = crate::media::load(path)?;
+        Self::from_source(&crate::config::Source::file(path))
+    }
+    pub fn from_source(source: &crate::config::Source<'_>) -> Result<Self> {
+        let path = source.path();
+        let config: Config = source.decode()?;
         if config.devices.is_empty()
             || config.devices.len() > 8
             || !config::valid_unique_labels(config.devices.iter().map(String::as_str), 32, b"-_")
@@ -180,10 +184,11 @@ fn distance_m(a: f64, b: f64, c: f64, d: f64) -> f64 {
     6371000.0 * 2.0 * x.sqrt().atan2((1.0 - x).max(0.0).sqrt())
 }
 impl Adapter for Manager {
+    const CONFIG_SECTION: &'static str = "services";
     const TOOLS: &'static [Tool] = &[];
     const SUPPORT: Support = Support::READ;
-    fn open(path: &Path) -> Result<Self> {
-        Self::open(path)
+    fn from_source(source: &crate::config::Source<'_>) -> Result<Self> {
+        Self::from_source(source)
     }
     fn execute(&mut self, _: &str, _: &Value) -> Result<Value> {
         Err(error("Companion ingestion requires its paired private API"))

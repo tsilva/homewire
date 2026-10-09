@@ -23,7 +23,7 @@ MARKER = phone.CE_HOMEWIRE.rsplit('/', 1)[0] + '/zeroclaw-isolated'
 
 
 def probe_args(profile, network=False):
-    args = [profile.agent['name'], phone.DE_HOMEWIRE+'/config/api.json', phone.ZCONFIG,
+    args = [profile.agent['name'], phone.DE_HOMEWIRE+'/config/home.json' if getattr(profile, 'config_file', None) else phone.DE_HOMEWIRE+'/config/api.json', phone.ZCONFIG,
             profile.android['root_command']]
     if network:
         host, port = profile.network['lan_probe'].split(':')
@@ -140,7 +140,7 @@ def require_supported_binary(p):
 
 
 def preflight(p,profile):
-    api=json.loads(p.sh('cat '+phone.q(phone.HOMEWIRE+'/config/api.json')))
+    _, _, api, _ = phone.read_api(p)
     if int(api['listen'].rsplit(':',1)[1])!=profile.network['admin_port'] or api.get('assistant',{}).get('url')!=profile.assistant_url:
         raise ValueError('Deployment ports/agent must match the existing API/assistant configuration')
     return api
@@ -200,12 +200,11 @@ def activate(p,token):
     print(output.decode().strip())
     if b'filesystem_and_execution_denied=true' not in output:
         raise ValueError('Native sandbox probe failed; no service cutover')
-    api_path = phone.HOMEWIRE + '/config/api.json'
-    raw = p.sh('cat '+q(api_path)); api = json.loads(raw)
+    api_path, document, api, raw = phone.read_api(p)
     if 'agent' in api: raise ValueError('An agent endpoint already exists; inspect before replacing')
     api['agent']={'listen':deployment.current().endpoint,'token':token,'tools':list(deployment.current().tools)}
     p.put(api_path+'.before-isolation',raw)
-    p.put(api_path,(json.dumps(api,indent=2)+'\n').encode())
+    phone.write_api(p, api_path, document)
     try:
         p.restart()
     except Exception:
@@ -255,7 +254,8 @@ def restart(serial):
 def update(serial,artifacts):
     p=phone.Phone(serial)
     profile=deployment.current()
-    api=preflight(p,profile)
+    preflight(p,profile)
+    api_path, document, api, _ = phone.read_api(p)
     if api.get('agent',{}).get('listen')!=profile.endpoint:
         raise ValueError('Change API agent listen through the operator before updating its deployment profile')
     cfg=tomllib.loads(direct_boot.root_sh(serial,'cat '+phone.q(ROOT+'/policy/config.toml')).decode())
@@ -276,7 +276,7 @@ def update(serial,artifacts):
     root_put(serial,ROOT+'/policy/config.toml',prepared.encode())
     direct_boot.root_sh(serial,'chown '+str(agent_uid(serial))+':'+str(agent_uid(serial))+' '+phone.q(ROOT+'/policy/config.toml'))
     api['agent']['tools']=list(profile.tools)
-    p.put(phone.HOMEWIRE+'/config/api.json',(json.dumps(api,indent=2)+'\n').encode())
+    phone.write_api(p, api_path, document)
     p.restart()
     root_put(serial,ROOT+'/policy/TOOLS.md',lockdown.instructions(deployment.current().tools).encode())
     direct_boot.root_sh(serial,'chown '+str(agent_uid(serial))+':'+str(agent_uid(serial))+' '+ROOT+'/policy/TOOLS.md')

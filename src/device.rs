@@ -11,7 +11,11 @@ pub trait Adapter: Sized {
     const TOOLS: &'static [Tool];
     const PUBLIC_TOOLS: &'static [Tool] = &[];
     const SUPPORT: crate::entity::Support;
-    fn open(path: &Path) -> Result<Self>;
+    const CONFIG_SECTION: &'static str = "adapters";
+    fn open(path: &Path) -> Result<Self> {
+        Self::from_source(&crate::config::Source::file(path))
+    }
+    fn from_source(source: &crate::config::Source<'_>) -> Result<Self>;
     /// Implementation hook for validated canonical commands. Callers should
     /// use `Devices::call`; transport permission policy remains outside adapters.
     fn execute(&mut self, name: &str, arguments: &Value) -> Result<Value>;
@@ -222,6 +226,22 @@ macro_rules! static_adapters {
             }
         }
         impl Devices {
+            pub fn config_section(family: &str) -> Option<&'static str> {
+                match family {
+                    $(stringify!($field) => Some(<$adapter as Adapter>::CONFIG_SECTION),)+
+                    _ => None,
+                }
+            }
+            pub fn open_source(&mut self, family: &str, source: &crate::config::Source<'_>) -> Result<()> {
+                match family {
+                    $(stringify!($field) => {
+                        if self.$field.is_some() { return Err(error("Adapter configured more than once")); }
+                        self.$field = Some(<$adapter as Adapter>::from_source(source)?);
+                    },)+
+                    _ => return Err(error("Unknown static adapter family")),
+                }
+                Ok(())
+            }
             pub fn next_background(&self) -> Option<std::time::Instant> {
                 [$(self.$field.as_ref().and_then(Adapter::next_background),)+].into_iter().flatten().min()
             }

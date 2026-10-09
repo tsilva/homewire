@@ -179,7 +179,11 @@ fn fields(bytes: &[u8]) -> Result<Vec<(u8, u32)>> {
 }
 impl Manager {
     pub fn open(path: &Path) -> Result<Self> {
-        let config: Config = crate::media::load(path)?;
+        Self::from_source(&crate::config::Source::file(path))
+    }
+    pub fn from_source(source: &crate::config::Source<'_>) -> Result<Self> {
+        let path = source.path();
+        let config: Config = source.decode()?;
         if !crate::config::valid_unique_labels(std::iter::once(config.name.as_str()), 32, b"-_")
             || config.community.is_empty()
             || config.community.len() > 64
@@ -282,8 +286,8 @@ impl Manager {
 impl Adapter for Manager {
     const TOOLS: &'static [Tool] = &[];
     const SUPPORT: Support = Support::READ;
-    fn open(p: &Path) -> Result<Self> {
-        Self::open(p)
+    fn from_source(source: &crate::config::Source<'_>) -> Result<Self> {
+        Self::from_source(source)
     }
     fn execute(&mut self, _: &str, _: &Value) -> Result<Value> {
         Err(error("Use diagnostic entities"))

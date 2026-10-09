@@ -66,6 +66,91 @@ struct Config {
     #[serde(skip)]
     agent_only: bool,
 }
+pub struct Settings {
+    config: Config,
+    tls: Option<Arc<rustls::ServerConfig>>,
+}
+impl Settings {
+    pub fn from_source(source: &config::Source<'_>) -> Result<Self> {
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
+        let mut cfg: Config = source.decode()?;
+        let path = source.path();
+        for file in [&mut cfg.certificate, &mut cfg.private_key]
+            .into_iter()
+            .flatten()
+        {
+            if file.is_relative() && !config::environment_secret_path(file) {
+                *file = path.parent().unwrap_or(Path::new(".")).join(&*file);
+            }
+        }
+        if !token_valid(&cfg.dashboard_token)
+            || cfg.clients.len() > 8
+            || !config::valid_unique_labels(cfg.clients.iter().map(|c| c.name.as_str()), 32, b"-_")
+            || cfg.clients.iter().enumerate().any(|(i, c)| {
+                !token_valid(&c.token)
+                    || equal(&c.token, &cfg.dashboard_token)
+                    || cfg.clients[..i].iter().any(|p| equal(&p.token, &c.token))
+            })
+        {
+            return Err(error("API needs distinct 32-byte hexadecimal tokens"));
+        }
+        if let Some(a) = &cfg.assistant {
+            let u = crate::web::Url::parse(&a.url)?;
+            if u.host != "127.0.0.1"
+                || !u.path.starts_with("/webhook")
+                || a.bearer_token.is_empty()
+                || a.bearer_token.len() > 256
+                || a.bearer_token.bytes().any(|b| !b.is_ascii_graphic())
+            {
+                return Err(error(
+                    "Assistant requires a loopback ZeroClaw webhook and its dedicated gateway token",
+                ));
+            }
+        }
+        if let Some(a) = &cfg.agent
+            && (!a.listen.ip().is_loopback()
+                || !token_valid(&a.token)
+                || equal(&a.token, &cfg.dashboard_token)
+                || cfg.clients.iter().any(|c| equal(&a.token, &c.token))
+                || a.tools.is_empty()
+                || a.tools.len() > 32
+                || a.tools.iter().enumerate().any(|(i, n)| {
+                    n.is_empty()
+                        || n.len() > 64
+                        || !n.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                        || a.tools[..i].contains(n)
+                }))
+        {
+            return Err(error(
+                "Agent MCP requires loopback, a distinct token and an explicit tool scope",
+            ));
+        }
+        let tls = match (&cfg.certificate, &cfg.private_key) {
+            (Some(cert), Some(key)) => {
+                config::private_permissions(key)?;
+                let cert = CertificateDer::from_pem_slice(&config::read_bounded(
+                    cert,
+                    "API certificate",
+                )?)?;
+                let key = PrivateKeyDer::from_pem_slice(&config::read_bounded(key, "API key")?)?;
+                let provider = Arc::new(rustls::crypto::ring::default_provider());
+                Some(Arc::new(
+                    rustls::ServerConfig::builder_with_provider(provider)
+                        .with_safe_default_protocol_versions()?
+                        .with_no_client_auth()
+                        .with_single_cert(vec![cert], key)?,
+                ))
+            }
+            (None, None) if cfg.listen.ip().is_loopback() => None,
+            _ => {
+                return Err(error(
+                    "LAN API requires an HTTPS certificate and private key",
+                ));
+            }
+        };
+        Ok(Self { config: cfg, tls })
+    }
+}
 pub struct Server {
     listen: SocketAddr,
     stopped: Arc<AtomicBool>,
@@ -108,58 +193,11 @@ impl Server {
         self.listen
     }
     pub fn start(path: &Path, socket: &Path) -> Result<Self> {
-        use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
-        let mut cfg: Config = crate::media::load(path)?;
-        for file in [&mut cfg.certificate, &mut cfg.private_key]
-            .into_iter()
-            .flatten()
-        {
-            if file.is_relative() && !config::environment_secret_path(file) {
-                *file = path.parent().unwrap_or(Path::new(".")).join(&*file);
-            }
-        }
-        if !token_valid(&cfg.dashboard_token)
-            || cfg.clients.len() > 8
-            || !config::valid_unique_labels(cfg.clients.iter().map(|c| c.name.as_str()), 32, b"-_")
-            || cfg.clients.iter().enumerate().any(|(i, c)| {
-                !token_valid(&c.token)
-                    || equal(&c.token, &cfg.dashboard_token)
-                    || cfg.clients[..i].iter().any(|p| equal(&p.token, &c.token))
-            })
-        {
-            return Err(error("API needs distinct 32-byte hexadecimal tokens"));
-        }
-        if let Some(a) = &cfg.assistant {
-            let u = crate::web::Url::parse(&a.url)?;
-            if u.host != "127.0.0.1"
-                || !u.path.starts_with("/webhook")
-                || a.bearer_token.is_empty()
-                || a.bearer_token.len() > 256
-                || a.bearer_token.bytes().any(|b| !b.is_ascii_graphic())
-            {
-                return Err(error(
-                    "Assistant requires a loopback ZeroClaw webhook and its dedicated gateway token",
-                ));
-            }
-        }
+        Self::start_settings(Settings::from_source(&config::Source::file(path))?, socket)
+    }
+    pub fn start_settings(settings: Settings, socket: &Path) -> Result<Self> {
+        let Settings { config: cfg, tls } = settings;
         let agent = if let Some(a) = &cfg.agent {
-            if !a.listen.ip().is_loopback()
-                || !token_valid(&a.token)
-                || equal(&a.token, &cfg.dashboard_token)
-                || cfg.clients.iter().any(|c| equal(&a.token, &c.token))
-                || a.tools.is_empty()
-                || a.tools.len() > 32
-                || a.tools.iter().enumerate().any(|(i, n)| {
-                    n.is_empty()
-                        || n.len() > 64
-                        || !n.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
-                        || a.tools[..i].contains(n)
-                })
-            {
-                return Err(error(
-                    "Agent MCP requires loopback, a distinct token and an explicit tool scope",
-                ));
-            }
             let mut restricted = cfg.clone();
             restricted.listen = a.listen;
             restricted.certificate = None;
@@ -170,29 +208,6 @@ impl Server {
             Some(Box::new(Self::listen(restricted, socket, None)?))
         } else {
             None
-        };
-        let tls = match (&cfg.certificate, &cfg.private_key) {
-            (Some(cert), Some(key)) => {
-                config::private_permissions(key)?;
-                let cert = CertificateDer::from_pem_slice(&config::read_bounded(
-                    cert,
-                    "API certificate",
-                )?)?;
-                let key = PrivateKeyDer::from_pem_slice(&config::read_bounded(key, "API key")?)?;
-                let provider = Arc::new(rustls::crypto::ring::default_provider());
-                Some(Arc::new(
-                    rustls::ServerConfig::builder_with_provider(provider)
-                        .with_safe_default_protocol_versions()?
-                        .with_no_client_auth()
-                        .with_single_cert(vec![cert], key)?,
-                ))
-            }
-            (None, None) if cfg.listen.ip().is_loopback() => None,
-            _ => {
-                return Err(error(
-                    "LAN API requires an HTTPS certificate and private key",
-                ));
-            }
         };
         let mut server = Self::listen(cfg, socket, tls)?;
         server._agent = agent;

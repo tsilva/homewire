@@ -7,10 +7,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{
-    fs::File,
-    path::{Path, PathBuf},
-};
+use std::{fs::File, path::PathBuf};
 #[derive(Default, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Memory {
@@ -32,6 +29,7 @@ pub struct Manager {
     _lock: File,
 }
 impl Adapter for Manager {
+    const CONFIG_SECTION: &'static str = "services";
     const TOOLS: &'static [Tool] = &[];
     const SUPPORT: Support = Support::NONE;
     const PUBLIC_TOOLS: &'static [Tool] = &[
@@ -52,8 +50,9 @@ impl Adapter for Manager {
             hints: Hints::CONTROL,
         },
     ];
-    fn open(path: &Path) -> Result<Self> {
-        let value: Value = crate::media::load(path)?;
+    fn from_source(source: &crate::config::Source<'_>) -> Result<Self> {
+        let path = source.path();
+        let value: Value = source.decode()?;
         if value != json!({}) {
             return Err(error("Shopping configuration must be an empty object"));
         }

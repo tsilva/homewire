@@ -15,7 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const HELP: &str = "Homewire — lightweight home automation\n\nUsage: homewire [--config MEACO_JSON] [--printers PRINTERS_JSON] [--awair AWAIR_JSON] [--lights LIGHTS_JSON] [--plugs PLUGS_JSON] [--samsung SAMSUNG_JSON] [--digi DIGI_JSON] [--tv TV_JSON] COMMAND\n\nCommands:\n  call TOOL JSON        Use a standard capability tool from CLI\n  certificate-sha256 IP:PORT  Inspect a new TLS pin; confirm device identity\n  daemon SOCKET          Persistent device owner; accepts local MCP clients\n  bridge SOCKET          MCP stdio client for a running daemon\n  tv-status               Read shared outlet and both media devices\n  tv-set on|off           Run configured shared-outlet sequence\n  samsung-status          Read Samsung identity and remote state\n  samsung-set on|off      Wake or request Samsung shutdown\n  samsung-key KEY         Send one Samsung remote key\n  digi-status             Read DIGI identity and power state\n  digi-set on|off         Apply verified DIGI wake/sleep\n  digi-key KEY            Send one DIGI remote key\n  plugs                   List configured Tapo P100/P110 plugs\n  plug-status NAME        Read relay, overload and P110 energy\n  plug-set NAME on|off    Apply and verify absolute relay power\n  plug-check              Poll plugs and retained overload faults\n  watch-plugs             Monitor reported overload events\n  status                  Read Meaco status\n  plan day|night|off       Preview a Meaco sequence\n  apply day|night|off      Apply and verify a Meaco sequence\n  awair-status            Read fresh air-quality measurements\n  printers                List configured printers\n  printer-status NAME     Read printer status and supplies\n  printer-check           Poll printers and retained faults\n  watch-printers          Monitor debounced printer fault events\n  lights                  List configured Tapo bulbs and strips\n  light-status NAME       Read light state and overheating\n  light-set NAME JSON     Apply and verify absolute settings\n  light-check             Poll lights and retained faults\n  light-plan              Preview optional L900 curve and sunset\n  light-schedule          Run optional L900 curve and sunset rules\n  watch-lights            Monitor overheating events\n  bulbs                   Legacy bulb commands (also --bulbs)\n  bulb-status NAME        Read bulb state and overheating status\n  bulb-set NAME JSON      Apply and verify absolute bulb settings\n  bulb-check              Poll bulbs and retained overheating faults\n  watch-bulbs             Monitor debounced overheating events\n  serve [--allow-control] [--legacy-tools] [--maintenance] [--schedule] [--light-schedule] [--watch-printers] [--watch-lights] [--watch-plugs]\n                          MCP entities/routines; read-only by default\n--legacy-tools exposes original adapter tools.\n--maintenance permits direct power controls owned by the TV routine.\n  schedule                Run the explicitly configured daily Meaco rules\n\n--adapter FAMILY=PATH loads a statically compiled adapter; may be repeated.\n--api API_JSON adds a bounded HTTPS dashboard/companion frontend to daemon.\n--watch-meaco enables independent Meaco fault monitoring.\n--connect IP:PORT overrides only the Meaco TCP destination.\nPrinter, Awair, light, plug and media configs may have connect overrides for testing.\nSchedule mode sends controls. Enable it only after disabling the two\ncorresponding Home Assistant rules. Fault monitoring sends no controls.\n";
+const HELP: &str = "Homewire — lightweight home automation\n\nUsage: homewire [--config HOME_JSON] [--printers PRINTERS_JSON] [--awair AWAIR_JSON] [--lights LIGHTS_JSON] [--plugs PLUGS_JSON] [--samsung SAMSUNG_JSON] [--digi DIGI_JSON] [--tv TV_JSON] COMMAND\n\nCommands:\n  config-check            Validate adapter schemas/state without device I/O\n  call TOOL JSON        Use a standard capability tool from CLI\n  certificate-sha256 IP:PORT  Inspect a new TLS pin; confirm device identity\n  daemon SOCKET          Persistent device owner; accepts local MCP clients\n  bridge SOCKET          MCP stdio client for a running daemon\n  tv-status               Read shared outlet and both media devices\n  tv-set on|off           Run configured shared-outlet sequence\n  samsung-status          Read Samsung identity and remote state\n  samsung-set on|off      Wake or request Samsung shutdown\n  samsung-key KEY         Send one Samsung remote key\n  digi-status             Read DIGI identity and power state\n  digi-set on|off         Apply verified DIGI wake/sleep\n  digi-key KEY            Send one DIGI remote key\n  plugs                   List configured Tapo P100/P110 plugs\n  plug-status NAME        Read relay, overload and P110 energy\n  plug-set NAME on|off    Apply and verify absolute relay power\n  plug-check              Poll plugs and retained overload faults\n  watch-plugs             Monitor reported overload events\n  status                  Read Meaco status\n  plan day|night|off       Preview a Meaco sequence\n  apply day|night|off      Apply and verify a Meaco sequence\n  awair-status            Read fresh air-quality measurements\n  printers                List configured printers\n  printer-status NAME     Read printer status and supplies\n  printer-check           Poll printers and retained faults\n  watch-printers          Monitor debounced printer fault events\n  lights                  List configured Tapo bulbs and strips\n  light-status NAME       Read light state and overheating\n  light-set NAME JSON     Apply and verify absolute settings\n  light-check             Poll lights and retained faults\n  light-plan              Preview optional L900 curve and sunset\n  light-schedule          Run optional L900 curve and sunset rules\n  watch-lights            Monitor overheating events\n  bulbs                   Legacy bulb commands (also --bulbs)\n  bulb-status NAME        Read bulb state and overheating status\n  bulb-set NAME JSON      Apply and verify absolute bulb settings\n  bulb-check              Poll bulbs and retained overheating faults\n  watch-bulbs             Monitor debounced overheating events\n  serve [--allow-control] [--legacy-tools] [--maintenance] [--schedule] [--light-schedule] [--watch-printers] [--watch-lights] [--watch-plugs]\n                          MCP entities/routines; read-only by default\n--legacy-tools exposes original adapter tools.\n--maintenance permits direct power controls owned by the TV routine.\n  schedule                Run the explicitly configured daily Meaco rules\n\n--config HOME_JSON loads a version 1 unified configuration.\nLegacy Meaco JSON and per-family flags remain supported; do not mix formats.\n--adapter FAMILY=PATH loads a statically compiled adapter; may be repeated.\n--api API_JSON adds a bounded HTTPS dashboard/companion frontend to daemon.\n--watch-meaco enables independent Meaco fault monitoring.\n--connect IP:PORT overrides only the Meaco TCP destination.\nPrinter, Awair, light, plug and media configs may have connect overrides for testing.\nSchedule mode sends controls. Enable it only after disabling the two\ncorresponding Home Assistant rules. Fault monitoring sends no controls.\n";
 
 struct App {
     devices: Devices,
@@ -489,7 +489,8 @@ fn run() -> Result<()> {
     let light_command = raw_command.starts_with("light") || raw_command == "watch-lights";
     if !matches!(
         command,
-        "tv-status"
+        "config-check"
+            | "tv-status"
             | "tv-set"
             | "samsung-status"
             | "samsung-set"
@@ -571,121 +572,192 @@ fn run() -> Result<()> {
         command,
         "printers" | "printer-status" | "printer-check" | "watch-printers"
     ) || watching;
-    if needs_meaco && config_path.is_none() || connect.is_some() && config_path.is_none() {
-        return Err(error("Specify --config PATH for Meaco"));
-    }
-    if needs_printers && printers_path.is_none() {
-        return Err(error("Specify --printers PATH"));
-    }
-    if (matches!(
-        command,
-        "bulbs"
-            | "bulb-status"
-            | "bulb-set"
-            | "bulb-check"
-            | "watch-bulbs"
-            | "light-plan"
-            | "light-schedule"
-    ) || watching_bulbs
-        || light_scheduling)
-        && bulbs_path.is_none()
+    let bundle = config_path
+        .as_ref()
+        .map(|p| homewire::bundle::Bundle::load(p))
+        .transpose()?
+        .flatten();
+    if bundle.is_some()
+        && (printers_path.is_some()
+            || awair_path.is_some()
+            || bulbs_path.is_some()
+            || plugs_path.is_some()
+            || samsung_path.is_some()
+            || digi_path.is_some()
+            || tv_path.is_some()
+            || api_path.is_some()
+            || !adapters.is_empty())
     {
-        return Err(error("Specify --lights or --bulbs PATH"));
+        return Err(error(
+            "Unified --config cannot be combined with per-family configuration flags",
+        ));
     }
-    if (matches!(
-        command,
-        "plugs" | "plug-status" | "plug-set" | "plug-check" | "watch-plugs"
-    ) || watching_plugs)
-        && plugs_path.is_none()
-        && tv_path.is_none()
-        && adapters.is_empty()
-    {
-        return Err(error("Specify --plugs or --tv PATH"));
+    if bundle.is_none() {
+        if needs_meaco && config_path.is_none() || connect.is_some() && config_path.is_none() {
+            return Err(error("Specify --config PATH for Meaco"));
+        }
+        if needs_printers && printers_path.is_none() {
+            return Err(error("Specify --printers PATH"));
+        }
+        if (matches!(
+            command,
+            "bulbs"
+                | "bulb-status"
+                | "bulb-set"
+                | "bulb-check"
+                | "watch-bulbs"
+                | "light-plan"
+                | "light-schedule"
+        ) || watching_bulbs
+            || light_scheduling)
+            && bulbs_path.is_none()
+        {
+            return Err(error("Specify --lights or --bulbs PATH"));
+        }
+        if (matches!(
+            command,
+            "plugs" | "plug-status" | "plug-set" | "plug-check" | "watch-plugs"
+        ) || watching_plugs)
+            && plugs_path.is_none()
+            && tv_path.is_none()
+            && adapters.is_empty()
+        {
+            return Err(error("Specify --plugs or --tv PATH"));
+        }
+        if command.starts_with("tv-") && tv_path.is_none() {
+            return Err(error("Specify --tv PATH"));
+        }
+        if command.starts_with("samsung-") && samsung_path.is_none() && tv_path.is_none() {
+            return Err(error("Specify --samsung PATH"));
+        }
+        if command.starts_with("digi-") && digi_path.is_none() && tv_path.is_none() {
+            return Err(error("Specify --digi PATH"));
+        }
+        if command == "awair-status" && awair_path.is_none() {
+            return Err(error("Specify --awair PATH"));
+        }
+        if matches!(command, "serve" | "daemon")
+            && config_path.is_none()
+            && printers_path.is_none()
+            && awair_path.is_none()
+            && bulbs_path.is_none()
+            && plugs_path.is_none()
+            && samsung_path.is_none()
+            && digi_path.is_none()
+            && tv_path.is_none()
+            && adapters.is_empty()
+        {
+            return Err(error("Configure at least one device adapter for serve"));
+        }
     }
-    if command.starts_with("tv-") && tv_path.is_none() {
-        return Err(error("Specify --tv PATH"));
-    }
-    if command.starts_with("samsung-") && samsung_path.is_none() && tv_path.is_none() {
-        return Err(error("Specify --samsung PATH"));
-    }
-    if command.starts_with("digi-") && digi_path.is_none() && tv_path.is_none() {
-        return Err(error("Specify --digi PATH"));
-    }
-    if command == "awair-status" && awair_path.is_none() {
-        return Err(error("Specify --awair PATH"));
-    }
-    if matches!(command, "serve" | "daemon")
-        && config_path.is_none()
-        && printers_path.is_none()
-        && awair_path.is_none()
-        && bulbs_path.is_none()
-        && plugs_path.is_none()
-        && samsung_path.is_none()
-        && digi_path.is_none()
-        && tv_path.is_none()
-        && adapters.is_empty()
-    {
-        return Err(error("Configure at least one device adapter for serve"));
-    }
-    let meaco = config_path
-        .map(|path| meaco::Manager::open_with_connect(&path, connect))
-        .transpose()?;
-    if (scheduling || command == "schedule")
-        && !meaco.as_ref().is_some_and(meaco::Manager::has_schedule)
-    {
-        return Err(error("Configure schedule and presets in the Meaco JSON"));
-    }
-    let printers = printers_path
-        .map(|path| printer::Manager::open(&path))
-        .transpose()?;
-    let first_printer_poll = Instant::now()
-        + Duration::from_secs(
-            printers
+    light_names |= bundle.is_some();
+    let api_settings = match &bundle {
+        Some(b) => b.api_settings()?,
+        None => api_path
+            .as_ref()
+            .map(|p| homewire::api::Settings::from_source(&homewire::config::Source::file(p)))
+            .transpose()?,
+    };
+    // API settings are validated for every command, but retained only by daemon.
+    let api_settings = if command == "daemon" {
+        api_settings
+    } else {
+        None
+    };
+    let mut devices = if let Some(b) = &bundle {
+        b.open_devices(connect)?
+    } else {
+        Devices {
+            meaco: config_path
                 .as_ref()
-                .map(|p| p.config.poll_seconds)
-                .unwrap_or(30),
-        );
-    let awair = awair_path
-        .map(|path| awair::Config::open(&path))
-        .transpose()?;
-    let bulbs = bulbs_path
-        .map(|path| bulb::Manager::open(&path))
-        .transpose()?;
-    let first_bulb_poll = Instant::now()
-        + Duration::from_secs(bulbs.as_ref().map(|b| b.config.poll_seconds).unwrap_or(30));
+                .map(|p| meaco::Manager::open_with_connect(p, connect))
+                .transpose()?,
+            printers: printers_path
+                .as_ref()
+                .map(|p| printer::Manager::open(p))
+                .transpose()?,
+            awair: awair_path
+                .as_ref()
+                .map(|p| awair::Config::open(p))
+                .transpose()?,
+            bulbs: bulbs_path
+                .as_ref()
+                .map(|p| bulb::Manager::open(p))
+                .transpose()?,
+            plugs: plugs_path
+                .as_ref()
+                .map(|p| plug::Manager::open(p))
+                .transpose()?,
+            samsung: samsung_path
+                .as_ref()
+                .map(|p| samsung::Manager::open(p))
+                .transpose()?,
+            digi: digi_path
+                .as_ref()
+                .map(|p| androidtv::Manager::open(p))
+                .transpose()?,
+            tv: tv_path.as_ref().map(|p| tv::Manager::open(p)).transpose()?,
+            ..Devices::default()
+        }
+    };
+    // The root JSON and resolved temporary secrets leave memory before serving.
+    let _configuration_lock = bundle.map(homewire::bundle::Bundle::into_lock);
+    devices.maintenance = maintenance;
+    if needs_meaco && devices.meaco.is_none() {
+        return Err(error("Meaco is not configured"));
+    }
+    if needs_printers && devices.printers.is_none() {
+        return Err(error("Printers are not configured"));
+    }
+    if watching_bulbs && devices.bulbs.is_none() {
+        return Err(error("Lights are not configured"));
+    }
+    if watching_plugs && devices.plugs().is_none() {
+        return Err(error("Plugs are not configured"));
+    }
+    if (scheduling || command == "schedule")
+        && !devices
+            .meaco
+            .as_ref()
+            .is_some_and(meaco::Manager::has_schedule)
+    {
+        return Err(error("Configure Meaco schedule and presets"));
+    }
     if (light_scheduling || matches!(command, "light-plan" | "light-schedule"))
-        && bulbs
+        && devices
+            .bulbs
             .as_ref()
             .and_then(|b| b.config.automation.as_ref())
             .is_none()
     {
-        return Err(error("Configure automation in the lights JSON"));
+        return Err(error("Configure lights automation"));
     }
-    let plugs = plugs_path
-        .map(|path| plug::Manager::open(&path))
-        .transpose()?;
+    let first_printer_poll = Instant::now()
+        + Duration::from_secs(
+            devices
+                .printers
+                .as_ref()
+                .map(|p| p.config.poll_seconds)
+                .unwrap_or(30),
+        );
+    let first_bulb_poll = Instant::now()
+        + Duration::from_secs(
+            devices
+                .bulbs
+                .as_ref()
+                .map(|p| p.config.poll_seconds)
+                .unwrap_or(30),
+        );
     let first_plug_poll = Instant::now()
-        + Duration::from_secs(plugs.as_ref().map(|p| p.config.poll_seconds).unwrap_or(30));
-    let samsung = samsung_path
-        .map(|p| samsung::Manager::open(&p))
-        .transpose()?;
-    let digi = digi_path
-        .map(|p| androidtv::Manager::open(&p))
-        .transpose()?;
-    let tv = tv_path.map(|p| tv::Manager::open(&p)).transpose()?;
+        + Duration::from_secs(
+            devices
+                .plugs
+                .as_ref()
+                .map(|p| p.config.poll_seconds)
+                .unwrap_or(30),
+        );
     let mut app = App {
-        devices: Devices {
-            meaco,
-            printers,
-            awair,
-            bulbs,
-            plugs,
-            samsung,
-            digi,
-            tv,
-            maintenance,
-            ..Devices::default()
-        },
+        devices,
         next_meaco_schedule: Instant::now(),
         next_plug_poll: first_plug_poll,
         next_bulb_poll: first_bulb_poll,
@@ -708,6 +780,7 @@ fn run() -> Result<()> {
         allow_control: control,
     };
     match command {
+        "config-check" => println!("{}", json!({"valid":true,"device_io":false})),
         "tv-status" => println!("{}", app.devices.call("tv_status", &json!({}))?),
         "tv-set" => {
             let power = match positional[1] {
@@ -886,9 +959,13 @@ fn run() -> Result<()> {
                 || app.devices.alerts.is_some()
                 || app.devices.history.is_some()
                 || app.devices.next_background().is_some();
-            let _api = api_path
-                .as_ref()
-                .map(|path| homewire::api::Server::start(path, std::path::Path::new(positional[1])))
+            let _api = api_settings
+                .map(|settings| {
+                    homewire::api::Server::start_settings(
+                        settings,
+                        std::path::Path::new(positional[1]),
+                    )
+                })
                 .transpose()?;
             eprintln!("Homewire daemon ready");
             loop {

@@ -1,10 +1,6 @@
 //! Read-only Awair Element local API. No cloud account or persistent connection.
 use crate::device::{Adapter, Hints, Input, Tool};
-use crate::{
-    Result,
-    config::{private_permissions, read_bounded},
-    error, http,
-};
+use crate::{Result, error, http};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -38,9 +34,10 @@ fn max_age() -> u64 {
 }
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
-        private_permissions(path)?;
-        let config: Self = serde_json::from_slice(&read_bounded(path, "Awair configuration")?)
-            .map_err(|_| error("Invalid Awair configuration"))?;
+        Self::from_source(&crate::config::Source::file(path))
+    }
+    pub fn from_source(source: &crate::config::Source<'_>) -> Result<Self> {
+        let config: Self = source.decode()?;
         config.validate()?;
         Ok(config)
     }
@@ -176,8 +173,8 @@ impl Adapter for Config {
         input: Input::Empty,
         hints: Hints::READ,
     }];
-    fn open(path: &Path) -> Result<Self> {
-        Self::load(path)
+    fn from_source(source: &crate::config::Source<'_>) -> Result<Self> {
+        Self::from_source(source)
     }
     fn execute(&mut self, name: &str, _args: &Value) -> Result<Value> {
         match name {

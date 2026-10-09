@@ -10,6 +10,7 @@ import shlex
 import subprocess
 import tomllib
 import deployment
+import configuration
 
 _LAYOUT = deployment.layout()
 CE_HOMEWIRE = _LAYOUT['ce']
@@ -18,7 +19,7 @@ DE_HOMEWIRE = _LAYOUT['de']
 PREFIX = _LAYOUT['prefix']
 ZCONFIG = _LAYOUT['zeroclaw']
 SERVICE = PREFIX + '/var/service/homewire'
-FILES = ('meaco.json', 'printers.json', 'awair.json', 'lights.json', 'plugs.json',
+FILES = ('home.json', 'meaco.json', 'printers.json', 'awair.json', 'lights.json', 'plugs.json',
          'samsung.json', 'digi.json', 'tv.json', 'digi-cert.pem', 'digi-key.pem',
          'router.json','brother.json','cast.json','dlna.json','alerts.json','history.json',
          'mobile.json','weather.json','shopping.json','radio.json','speech.json','api.json',
@@ -111,7 +112,9 @@ def deployment_secrets(value, name, generated, field=(), depth=0):
     if not pem:
         return secret
     key_file = {('api.json', ('private_key',)): 'api-key.pem',
-                ('digi.json', ('client_key',)): 'digi-key.pem'}.get((name, field))
+                ('digi.json', ('client_key',)): 'digi-key.pem',
+                ('home.json', ('services', 'api', 'private_key')): 'api-key.pem',
+                ('home.json', ('adapters', 'digi', 'client_key')): 'digi-key.pem'}.get((name, field))
     if not key_file or 'PRIVATE KEY-----' not in secret or not secret.startswith('-----BEGIN '):
         raise ValueError('Invalid deployment private-key reference')
     data = secret.encode()
@@ -122,17 +125,22 @@ def deployment_secrets(value, name, generated, field=(), depth=0):
 
 
 def validate_configs(directory):
+    directory = Path(directory)
+    unified = directory if directory.is_file() else directory / 'home.json'
+    names = ('home.json', 'digi-cert.pem', 'digi-key.pem', 'api-cert.pem', 'api-key.pem') if unified.is_file() else FILES
+    directory = unified.parent if unified.is_file() else directory
     configs = []
     generated = {}
-    for name in FILES:
-        path = directory / name
+    for name in names:
+        path = unified if name == 'home.json' else directory / name
         if not path.is_file():
             continue
         data = path.read_bytes()
         if len(data) > 1048576:
             raise ValueError('Deployment configuration exceeds its size limit')
         if name.endswith('.json'):
-            value = deployment_secrets(json.loads(data), name, generated)
+            value = configuration.runtime(configuration.load(unified)) if name == 'home.json' else configuration.load(path)
+            value = deployment_secrets(value, name, generated)
             def check(v):
                 if isinstance(v, dict):
                     if 'connect' in v:
@@ -146,6 +154,8 @@ def validate_configs(directory):
                     raise ValueError('Unconfigured example: ' + name)
             check(value)
             data = (json.dumps(value) + '\n').encode()
+            if len(data) > (configuration.LIMIT if name == 'home.json' else 8192):
+                raise ValueError('Resolved configuration exceeds the runtime size limit')
         configs.append((name, data))
     if not any(name.endswith('.json') for name, _ in configs):
         raise ValueError('No device configs found')
@@ -157,6 +167,19 @@ def validate_configs(directory):
     return configs
 
 
+def read_api(p):
+    unified = HOMEWIRE + '/config/home.json'
+    legacy = HOMEWIRE + '/config/api.json'
+    raw = p.sh('if [ -f ' + q(unified) + ' ]; then cat ' + q(unified) + '; else cat ' + q(legacy) + '; fi')
+    document = json.loads(raw)
+    path = unified if 'version' in document else legacy
+    return path, document, configuration.api(document), raw
+
+
+def write_api(p, path, document):
+    p.put(path, (json.dumps(document, indent=2) + '\n').encode())
+
+
 def service_script(root=None):
     # Existing configs determine family selection; TV owns its child managers.
     script = '''#!__SHELL__
@@ -164,6 +187,9 @@ umask 077
 exec 2>&1
 root=__ROOT__
 set --
+if [ -f "$root/config/home.json" ]; then
+  set -- --config "$root/config/home.json"
+else
 for pair in 'meaco:config' 'printers:printers' 'awair:awair' 'lights:lights'; do
   file=${pair%:*}; flag=${pair#*:}
   [ ! -f "$root/config/$file.json" ] || set -- "$@" "--$flag" "$root/config/$file.json"
@@ -179,6 +205,7 @@ for family in router brother cast dlna alerts history mobile weather shopping ra
   [ ! -f "$root/config/$family.json" ] || set -- "$@" --adapter "$family=$root/config/$family.json"
 done
 [ ! -f "$root/config/api.json" ] || set -- "$@" --api "$root/config/api.json"
+fi
 while IFS= read -r flag; do
   [ -z "$flag" ] || set -- "$@" "$flag"
 done < "$root/service.args"
@@ -203,6 +230,32 @@ def service_flags(existing, allow_control=None):
     return ''.join(flag + '\n' for flag in flags).encode()
 
 
+def preserve_agent_endpoint(p, configs):
+    """Keep the installed operator-managed MCP scope through config imports."""
+    for index, (name, data) in enumerate(configs):
+        if name not in ('home.json', 'api.json'):
+            continue
+        document = json.loads(data)
+        if name == 'home.json' and 'api' not in document.get('services', {}):
+            # Deliberate removal of the frontend; no hidden endpoint is added.
+            continue
+        incoming = configuration.api(document)
+        if 'agent' in incoming:
+            continue
+        exists = p.sh('if [ -f ' + q(HOMEWIRE + '/config/home.json') +
+                      ' ] || [ -f ' + q(HOMEWIRE + '/config/api.json') + ' ]; then echo yes; fi')
+        if not exists.strip():
+            continue
+        _, _, installed, _ = read_api(p)
+        if 'agent' in installed:
+            incoming['agent'] = installed['agent']
+            data = (json.dumps(document) + '\n').encode()
+            if len(data) > (configuration.LIMIT if name == 'home.json' else 8192):
+                raise ValueError('Configuration with preserved agent scope exceeds its limit')
+            configs[index] = (name, data)
+    return configs
+
+
 def install(phone, args):
     package = Path(args.package)
     binary = (package / 'homewire').read_bytes()
@@ -210,7 +263,11 @@ def install(phone, args):
     digest = hashlib.sha256(binary).hexdigest()
     if digest != manifest['sha256'] or manifest['target'] != 'aarch64-linux-android':
         raise ValueError('Package hash/target mismatch')
-    configs = validate_configs(Path(args.configs)) if args.configs else []
+    profile_file = getattr(deployment.current(), 'config_file', None) if deployment._ACTIVE else None
+    if args.configs and profile_file:
+        raise ValueError('Use one unified --config or legacy --configs directory')
+    config_source = args.configs or profile_file
+    configs = preserve_agent_endpoint(phone, validate_configs(Path(config_source))) if config_source else []
     release = HOMEWIRE + '/releases/' + digest[:16]
     phone.sh('umask 077; mkdir -p ' + ' '.join(q(HOMEWIRE + '/' + p) for p in ('releases', 'config', 'run', 'backups')) + '; mkdir -p ' + q(release))
     if not phone.direct_boot:

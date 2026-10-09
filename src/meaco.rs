@@ -9,7 +9,6 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::{
-    path::Path,
     thread,
     time::{Duration, Instant},
 };
@@ -192,8 +191,8 @@ impl Adapter for Manager {
             },
         },
     ];
-    fn open(path: &Path) -> Result<Self> {
-        Self::open(path)
+    fn from_source(source: &crate::config::Source<'_>) -> Result<Self> {
+        Self::from_source(source)
     }
     fn execute(&mut self, name: &str, args: &Value) -> Result<Value> {
         self.operation_call(
@@ -246,7 +245,17 @@ impl Manager {
         path: &std::path::Path,
         connect: Option<std::net::SocketAddr>,
     ) -> Result<Self> {
-        let config = crate::config::Config::load(path)?;
+        Self::from_source_with_connect(&crate::config::Source::file(path), connect)
+    }
+    pub fn from_source(source: &crate::config::Source<'_>) -> Result<Self> {
+        Self::from_source_with_connect(source, None)
+    }
+    pub fn from_source_with_connect(
+        source: &crate::config::Source<'_>,
+        connect: Option<std::net::SocketAddr>,
+    ) -> Result<Self> {
+        let path = source.path();
+        let config = crate::config::Config::from_source(source)?;
         let store = Store::open(path, &config.device_id)?;
         let memory = store.read()?;
         let monitor = crate::fault::Monitor::from_memory(memory.faults.clone());

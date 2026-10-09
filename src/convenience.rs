@@ -7,7 +7,7 @@ use crate::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{path::Path, time::Duration};
+use std::time::Duration;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Radio {
@@ -23,6 +23,7 @@ fn timeout() -> u64 {
     8
 }
 impl Adapter for Radio {
+    const CONFIG_SECTION: &'static str = "services";
     const TOOLS: &'static [Tool] = &[];
     const SUPPORT: Support = Support::NONE;
     const PUBLIC_TOOLS: &'static [Tool] = &[Tool {
@@ -40,8 +41,8 @@ impl Adapter for Radio {
         },
         hints: Hints::READ,
     }];
-    fn open(path: &Path) -> Result<Self> {
-        let c: Self = crate::media::load(path)?;
+    fn from_source(source: &crate::config::Source<'_>) -> Result<Self> {
+        let c: Self = source.decode()?;
         let url = web::Url::parse(&c.server)?;
         if !url.secure
             || url.path != "/"
@@ -90,6 +91,7 @@ fn language() -> String {
     "en".into()
 }
 impl Adapter for Speech {
+    const CONFIG_SECTION: &'static str = "services";
     const TOOLS: &'static [Tool] = &[];
     const SUPPORT: Support = Support::NONE;
     const PUBLIC_TOOLS: &'static [Tool] = &[Tool {
@@ -107,8 +109,8 @@ impl Adapter for Speech {
         },
         hints: Hints::LIST,
     }];
-    fn open(p: &Path) -> Result<Self> {
-        let c: Self = crate::media::load(p)?;
+    fn from_source(source: &crate::config::Source<'_>) -> Result<Self> {
+        let c: Self = source.decode()?;
         if c.language.is_empty()
             || c.language.len() > 12
             || !c

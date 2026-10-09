@@ -3,7 +3,7 @@ import ipaddress
 import json
 from pathlib import Path
 import re
-import stat
+import configuration
 import subprocess
 
 DEFAULT_ANDROID = {'package': 'com.termux', 'user': 0}
@@ -98,7 +98,7 @@ class Profile:
 
 
 def current():
-    if _ACTIVE is None: raise ValueError('Supply --deployment with a private deployment.json')
+    if _ACTIVE is None: raise ValueError('Supply --config with a private home.json deployment section')
     return _ACTIVE
 
 
@@ -120,19 +120,20 @@ def use(profile):
 
 def load(path):
     path=Path(path)
-    if path.stat().st_mode & (stat.S_IRWXG | stat.S_IRWXO): raise ValueError('Deployment configuration requires chmod 600')
-    with path.open('rb') as source: raw=source.read(8193)
-    if len(raw)>8192: raise ValueError('Deployment profile exceeds 8192 bytes')
-    try: value=json.loads(raw)
-    except (ValueError,UnicodeError): raise ValueError('Invalid deployment JSON') from None
+    value=configuration.load(path)
+    unified='version' in value
+    if unified:
+        configuration.validate(value)
+        value=value.get('deployment')
     profile=Profile(value)
+    profile.config_file=path if unified else None
     if profile.agent["provider_host"].endswith(".example") or any(ipaddress.IPv4Address(a) in ipaddress.IPv4Network("192.0.2.0/24") for a in profile.network["dns_servers"]):
         raise ValueError("Replace documentation-only deployment placeholders")
     return use(profile)
 
 
 def add_argument(parser, required=False):
-    parser.add_argument('--deployment', type=Path, required=required, help='Private installation profile (chmod 600)')
+    parser.add_argument('--config', '--deployment', dest='deployment', type=Path, required=required, help='Private home.json (legacy deployment.json accepted; chmod 600)')
 
 
 def root_executable(serial):

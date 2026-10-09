@@ -18,17 +18,36 @@ use std::{
 };
 
 const LIMIT: usize = 64;
+#[derive(Default, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum Delivery {
+    #[default]
+    Webhook,
+    Telegram,
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Channel {
     pub name: String,
     pub url: String,
     #[serde(default)]
+    pub delivery: Delivery,
+    #[serde(default)]
+    pub chat_id: Option<String>,
+    /// Empty means all alert keys; otherwise exact bounded keys only.
+    #[serde(default)]
+    pub keys: Vec<String>,
+    #[serde(default)]
     pub push_token: Option<String>,
     #[serde(default)]
     pub registration_info: Value,
     #[serde(default)]
     pub authorization: Option<String>,
+}
+impl Channel {
+    fn accepts(&self, key: &str) -> bool {
+        self.keys.is_empty() || self.keys.iter().any(|k| k == key)
+    }
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -70,7 +89,11 @@ pub struct Manager {
 }
 impl Manager {
     pub fn open(path: &Path) -> Result<Self> {
-        let config: Config = crate::media::load(path)?;
+        Self::from_source(&crate::config::Source::file(path))
+    }
+    pub fn from_source(source: &crate::config::Source<'_>) -> Result<Self> {
+        let path = source.path();
+        let config: Config = source.decode()?;
         if config.channels.len() > 4
             || config.companions.len() > 8
             || !config::valid_unique_labels(config.companions.iter().map(String::as_str), 32, b"-_")
@@ -84,6 +107,43 @@ impl Manager {
             return Err(error("Configure at most four named notification channels"));
         }
         for channel in &config.channels {
+            if channel.keys.len() > LIMIT
+                || channel.keys.iter().any(|key| !valid_key(key))
+                || channel
+                    .keys
+                    .iter()
+                    .enumerate()
+                    .any(|(i, key)| channel.keys[..i].contains(key))
+            {
+                return Err(error("Invalid notification key filter"));
+            }
+            if channel.delivery == Delivery::Telegram {
+                let token = channel
+                    .url
+                    .strip_prefix("https://api.telegram.org/bot")
+                    .and_then(|s| s.strip_suffix("/sendMessage"));
+                let valid_token =
+                    token
+                        .and_then(|s| s.split_once(':'))
+                        .is_some_and(|(id, secret)| {
+                            !id.is_empty()
+                                && id.bytes().all(|b| b.is_ascii_digit())
+                                && !secret.is_empty()
+                                && secret
+                                    .bytes()
+                                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+                        });
+                if !valid_token
+                    || !channel.chat_id.as_deref().is_some_and(valid_chat_id)
+                    || channel.push_token.is_some()
+                    || channel.authorization.is_some()
+                    || !channel.registration_info.is_null()
+                {
+                    return Err(error("Invalid Telegram notification configuration"));
+                }
+            } else if channel.chat_id.is_some() {
+                return Err(error("chat_id requires Telegram delivery"));
+            }
             if !web::Url::parse(&channel.url)?.secure
                 && !channel.url.starts_with("http://127.0.0.1:")
             {
@@ -155,13 +215,11 @@ impl Manager {
             let oldest = next
                 .alerts
                 .iter()
-                .filter(|(_, a)| {
+                .filter(|(key, a)| {
                     !a.active
-                        && self
-                            .config
-                            .channels
-                            .iter()
-                            .all(|c| a.delivered.get(&c.name) == Some(&fingerprint(c, a)))
+                        && self.config.channels.iter().all(|c| {
+                            !c.accepts(key) || a.delivered.get(&c.name) == Some(&fingerprint(c, a))
+                        })
                         && self
                             .config
                             .companions
@@ -224,7 +282,7 @@ impl Manager {
             .iter()
             .flat_map(|(key, a)| {
                 self.config.channels.iter().filter_map(move |c| {
-                    if a.delivered.get(&c.name) == Some(&fingerprint(c, a)) {
+                    if !c.accepts(key) || a.delivered.get(&c.name) == Some(&fingerprint(c, a)) {
                         None
                     } else {
                         Some(
@@ -253,7 +311,8 @@ impl Manager {
             for channel in &self.config.channels {
                 let expected = fingerprint(channel, alert);
                 let route = (key.clone(), channel.name.clone());
-                if self.retry_at.get(&route).is_some_and(|at| now < *at)
+                if !channel.accepts(key)
+                    || self.retry_at.get(&route).is_some_and(|at| now < *at)
                     || alert.delivered.get(&channel.name) == Some(&expected)
                 {
                     continue;
@@ -315,7 +374,7 @@ impl Manager {
         Ok(json!({"acknowledged":true}))
     }
     pub fn list(&self) -> Value {
-        let alerts:Vec<_>=self.memory.alerts.iter().map(|(key,a)|json!({"key":key,"active":a.active,"title":a.title,"message":a.message,"updated_at":a.updated_at,"pending_channels":self.config.channels.iter().filter(|c|a.delivered.get(&c.name)!=Some(&fingerprint(c,a))).map(|c|&c.name).collect::<Vec<_>>()})).collect();
+        let alerts:Vec<_>=self.memory.alerts.iter().map(|(key,a)|json!({"key":key,"active":a.active,"title":a.title,"message":a.message,"updated_at":a.updated_at,"pending_channels":self.config.channels.iter().filter(|c|c.accepts(key) && a.delivered.get(&c.name)!=Some(&fingerprint(c,a))).map(|c|&c.name).collect::<Vec<_>>()})).collect();
         json!({"alerts":alerts,"delivery_channels":self.config.channels.len()})
     }
 }
@@ -324,6 +383,15 @@ fn valid_key(s: &str) -> bool {
         && s.len() <= 96
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+fn valid_chat_id(s: &str) -> bool {
+    let digits = s.strip_prefix('-').unwrap_or(s);
+    (!digits.is_empty() && digits.len() <= 20 && digits.bytes().all(|b| b.is_ascii_digit()))
+        || s.strip_prefix('@').is_some_and(|name| {
+            !name.is_empty()
+                && name.len() <= 32
+                && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        })
 }
 fn fingerprint(channel: &Channel, alert: &Alert) -> String {
     let digest = Sha256::digest(format!(
@@ -338,9 +406,17 @@ fn fingerprint(channel: &Channel, alert: &Alert) -> String {
     let mut hash = Sha256::new();
     hash.update(digest);
     hash.update(channel.registration_info.to_string());
+    // Preserve webhook acknowledgement fingerprints across this upgrade.
+    if channel.delivery == Delivery::Telegram {
+        hash.update(b"telegram\0");
+        hash.update(channel.chat_id.as_deref().unwrap_or_default());
+    }
     hash.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 fn send(channel: &Channel, key: &str, alert: &Alert, timeout: Duration) -> Result<()> {
+    if channel.delivery == Delivery::Telegram {
+        return send_telegram(channel, alert, timeout);
+    }
     let mut payload = json!({"title":alert.title,"message":if alert.active {alert.message.as_str()} else {"clear_notification"},"data":{"tag":key,"alert_once":true}});
     if let Some(token) = &channel.push_token {
         payload["push_token"] = json!(token);
@@ -370,7 +446,48 @@ fn send(channel: &Channel, key: &str, alert: &Alert, timeout: Duration) -> Resul
     })?;
     Ok(())
 }
+fn telegram_payload(channel: &Channel, alert: &Alert) -> Value {
+    let text = if !alert.active {
+        format!(
+            "Resolved: {}\nThe reported device fault has cleared.",
+            alert.title
+        )
+    } else if alert.message == "tank_full" {
+        "Dehumidifier tank full\nPlease empty the water tank.".into()
+    } else {
+        format!("{}\n{}", alert.title, alert.message)
+    };
+    json!({"chat_id":channel.chat_id,"text":text})
+}
+fn telegram_accepted(body: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .is_some_and(|response| {
+            response["ok"] == true && response["result"]["message_id"].as_i64().is_some()
+        })
+}
+fn send_telegram(channel: &Channel, alert: &Alert, timeout: Duration) -> Result<()> {
+    let failed = || {
+        error(format!(
+            "Notification delivery failed for {}; pending retry retained",
+            channel.name
+        ))
+    };
+    let response = web::request(
+        &channel.url,
+        "POST",
+        &[("Content-Type", "application/json")],
+        &serde_json::to_vec(&telegram_payload(channel, alert))?,
+        timeout,
+    )
+    .map_err(|_| failed())?;
+    if !telegram_accepted(&response.body) {
+        return Err(failed());
+    }
+    Ok(())
+}
 impl Adapter for Manager {
+    const CONFIG_SECTION: &'static str = "services";
     const TOOLS: &'static [Tool] = &[];
     const PUBLIC_TOOLS: &'static [Tool] = &[Tool {
         name: "alert_list",
@@ -379,8 +496,8 @@ impl Adapter for Manager {
         hints: Hints::READ,
     }];
     const SUPPORT: Support = Support::NONE;
-    fn open(path: &Path) -> Result<Self> {
-        Self::open(path)
+    fn from_source(source: &crate::config::Source<'_>) -> Result<Self> {
+        Self::from_source(source)
     }
     fn entities<'a>(&'a self, _: &mut impl FnMut(Entity<'a>)) {}
     fn execute(&mut self, name: &str, _: &Value) -> Result<Value> {
@@ -400,4 +517,138 @@ fn revision(a: &Alert) -> String {
     .iter()
     .map(|b| format!("{b:02x}"))
     .collect()
+}
+
+#[cfg(test)]
+mod telegram_tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Read, Write};
+
+    fn channel(url: &str) -> Channel {
+        serde_json::from_value(json!({"name":"telegram","url":url,"delivery":"telegram","chat_id":"-100123456789","keys":["meaco.meaco"]})).expect("channel")
+    }
+    fn alert(active: bool) -> Alert {
+        Alert {
+            active,
+            title: "Dehumidifier".into(),
+            message: if active { "tank_full" } else { "" }.into(),
+            updated_at: 100,
+            delivered: BTreeMap::new(),
+            companion_receipts: BTreeMap::new(),
+        }
+    }
+    #[test]
+    fn payload_is_plain_text_and_recovery_is_explicit() {
+        let c = channel("https://api.telegram.org/bot123:synthetic/sendMessage");
+        assert_eq!(
+            telegram_payload(&c, &alert(true))["text"],
+            "Dehumidifier tank full\nPlease empty the water tank."
+        );
+        assert_eq!(
+            telegram_payload(&c, &alert(true))["chat_id"],
+            "-100123456789"
+        );
+        assert!(
+            telegram_payload(&c, &alert(false))["text"]
+                .as_str()
+                .expect("text")
+                .starts_with("Resolved:")
+        );
+        assert!(!c.accepts("schedule.meaco"));
+        assert!(c.accepts("meaco.meaco"));
+        assert!(valid_chat_id("123"));
+        assert!(valid_chat_id("@example_alerts"));
+        assert!(!valid_chat_id("-"));
+        assert!(!valid_chat_id("@bad/name"));
+    }
+    #[test]
+    fn telegram_requires_api_success_and_message_receipt() {
+        assert!(telegram_accepted(
+            br#"{"ok":true,"result":{"message_id":42}}"#
+        ));
+        for body in [
+            br#"{"ok":false,"description":"SECRET"}"#.as_slice(),
+            br#"{"ok":true}"#,
+            b"invalid",
+        ] {
+            assert!(!telegram_accepted(body));
+        }
+    }
+    #[test]
+    fn failed_send_retries_and_success_survives_restart() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("homewire-telegram-{}", getrandom_id()?));
+        std::fs::create_dir(&root)?;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let url = format!("http://{}/sendMessage", listener.local_addr()?);
+        let worker = std::thread::spawn(move || -> Result<()> {
+            for response in [
+                r#"{"ok":false,"description":"SECRET"}"#,
+                r#"{"ok":true,"result":{"message_id":1}}"#,
+                r#"{"ok":true,"result":{"message_id":2}}"#,
+            ] {
+                let (mut socket, _) = listener.accept()?;
+                socket.set_read_timeout(Some(Duration::from_secs(3)))?;
+                let mut reader = BufReader::new(&mut socket);
+                let mut line = String::new();
+                let mut length = 0;
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line)?;
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(n) = line.strip_prefix("Content-Length: ") {
+                        length = n.trim().parse::<usize>()?;
+                    }
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body)?;
+                assert_eq!(
+                    serde_json::from_slice::<Value>(&body)?["chat_id"],
+                    "-100123456789"
+                );
+                drop(reader);
+                write!(
+                    socket,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response.len(),
+                    response
+                )?;
+            }
+            Ok(())
+        });
+        let path = root.join("alerts.json");
+        // The local mock is permitted only as a webhook in saved config;
+        // production validation pins Telegram delivery to api.telegram.org.
+        config::save_private(
+            &path,
+            &json!({"channels":[{"name":"telegram","url":url,"keys":["meaco.meaco"]}]}),
+        )?;
+        let mut manager = Manager::open(&path)?;
+        manager.config.channels[0] = channel(&url);
+        manager.record("other", true, "Other", "Not routed", 100)?;
+        assert_eq!(manager.next_delay(100), None);
+        manager.reconcile("meaco", "meaco", &["tank_full".into()], 100)?;
+        let e = manager.deliver(100).expect_err("API failure");
+        assert!(!e.to_string().contains("SECRET"));
+        assert_eq!(manager.next_delay(101), Some(29));
+        assert_eq!(manager.deliver(130)?, 1);
+        drop(manager);
+        let mut manager = Manager::open(&path)?;
+        manager.config.channels[0] = channel(&url);
+        assert_eq!(manager.next_delay(131), None);
+        manager.reconcile("meaco", "meaco", &["tank_full".into()], 131)?;
+        assert_eq!(manager.deliver(131)?, 0);
+        manager.reconcile("meaco", "meaco", &[], 132)?;
+        assert_eq!(manager.deliver(132)?, 1);
+        worker.join().expect("server")?;
+        drop(manager);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+    fn getrandom_id() -> Result<u64> {
+        let mut bytes = [0u8; 8];
+        getrandom::getrandom(&mut bytes)?;
+        Ok(u64::from_ne_bytes(bytes))
+    }
 }

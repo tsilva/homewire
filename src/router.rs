@@ -159,7 +159,11 @@ impl Drop for Session<'_> {
 }
 impl Manager {
     pub fn open(path: &Path) -> Result<Self> {
-        let config: Config = crate::media::load(path)?;
+        Self::from_source(&crate::config::Source::file(path))
+    }
+    pub fn from_source(source: &crate::config::Source<'_>) -> Result<Self> {
+        let path = source.path();
+        let config: Config = source.decode()?;
         let url = web::Url::parse(&config.url)?;
         if url.path != "/"
             || config.url.ends_with('/')
@@ -489,8 +493,8 @@ impl Adapter for Manager {
     }
     const TOOLS: &'static [Tool] = &[];
     const SUPPORT: Support = Support::READ.union(Support::CONFIGURE);
-    fn open(path: &Path) -> Result<Self> {
-        Self::open(path)
+    fn from_source(source: &crate::config::Source<'_>) -> Result<Self> {
+        Self::from_source(source)
     }
     fn execute(&mut self, _: &str, _: &Value) -> Result<Value> {
         Err(error("Use standard entity tools for router"))

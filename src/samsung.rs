@@ -175,7 +175,11 @@ impl Config {
 }
 impl Manager {
     pub fn open(path: &Path) -> Result<Self> {
-        let config: Config = media::load(path)?;
+        Self::from_source(&crate::config::Source::file(path))
+    }
+    pub fn from_source(source: &crate::config::Source<'_>) -> Result<Self> {
+        let path = source.path();
+        let config: Config = source.decode()?;
         config.validate()?;
         let lock = lock_configuration(path)?;
         let state_path = path.with_extension("state.json");
@@ -462,8 +466,8 @@ impl Adapter for Manager {
             },
         },
     ];
-    fn open(path: &Path) -> Result<Self> {
-        Self::open(path)
+    fn from_source(source: &crate::config::Source<'_>) -> Result<Self> {
+        Self::from_source(source)
     }
     fn execute(&mut self, name: &str, args: &Value) -> Result<Value> {
         match name {

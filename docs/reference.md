@@ -4,6 +4,74 @@ See the [README](../README.md) for installation and first use. This reference
 covers configuration, verified control behavior, agent integration, scheduling,
 printer monitoring, Awair measurements, bulb controls, and implementation limits.
 
+## Unified configuration
+
+The primary input is `homewire --config .local/home.json COMMAND`.
+Copy [examples/home.json](../examples/home.json) into ignored `.local/`,
+protect it with `chmod 600`, replace the synthetic values and remove unused
+families. The file is bounded to 64 KiB and requires `version: 1`.
+
+| Section | Contents |
+| --- | --- |
+| `adapters` | `meaco`, `printers`, `awair`, `lights`, `plugs`, `samsung`, `digi`, `router`, `brother`, `cast`, `dlna`; objects use the existing adapter schemas below |
+| `routines.meaco` | Day/night presets, previously `meaco.json`'s `presets` |
+| `routines.tv` | `plug`, `shutdown_policy`, `timings`; its children are the configured Samsung, DIGI and plugs adapters, without file references |
+| `automations.meaco` | `timezone`, `day`, `night`, previously Meaco `schedule` |
+| `automations.lights` | L900 curve/location/timezone settings, previously lights `automation` |
+| `services` | `api`, `alerts`, `history`, `mobile`, `weather`, `shopping`, `radio`, `speech`; objects use the service schemas below |
+| `deployment` | Host-only Android installation profile described under Android deployment |
+
+Sections are optional, but enabled routines and automations require their
+adapters. Unknown root keys, misplaced families, unsupported versions and
+conflicting routine/automation declarations fail loading. Each statically
+compiled adapter decodes and validates its own typed settings through
+`config::Source`; the catalog declares whether it belongs to `adapters` or
+`services`. A new adapter needs no additional loader switch. The TV routine
+composes typed child managers and retains their existing ownership safeguards.
+
+The file is read once at startup. Temporary JSON, including the host-only
+`deployment` block, is discarded before serving; there is no configuration
+service, dynamic module loader or JSON cache. `${HOMEWIRE_SECRET_NAME}` and
+PEM `env:HOMEWIRE_SECRET_NAME` references work as before. Relative certificate
+and history paths resolve beside `home.json`. Runtime state and locks keep
+canonical filenames such as `meaco.state.json`, `lights.state.json` and
+`tv.state.json`, including `FAMILY.json.lock`, beside the unified file. The root
+also has an exclusive `home.json.lock`. Keep one config directory per
+installation and use the daemon bridge for additional clients.
+
+```sh
+infisical run --env=prod -- target/release/homewire --config .local/home.json config-check
+infisical run --env=prod -- target/release/homewire --config .local/home.json serve
+```
+
+`config-check` validates adapter/service schemas, API credentials/TLS and stored
+state without device requests or listener binding. It does not verify online
+availability. Configuration presence alone does not enable controls or
+schedules: `--allow-control`, `--schedule`, `--light-schedule` and watch flags
+remain explicit runtime grants. Android updates preserve saved grants.
+
+To migrate existing private files in place:
+
+```sh
+python3 scripts/android/configuration.py --configs .local --output .local/home.json
+infisical run --env=prod -- target/release/homewire --config .local/home.json config-check
+```
+
+The helper imports known adapter/service JSON and `deployment.json`, moves
+presets/schedules into the unified sections, and removes TV child file
+references. Imported originals are copied to a mode-700 `.local/backups/`
+directory before being retired. State, history, certificates, keys and unrelated
+setup/test records remain untouched. It refuses an existing output, a changed
+config directory or mismatching TV child paths. Verify with the new executable
+before installation; backups provide recovery if adapter validation fails.
+
+Legacy separate-file flags and legacy Meaco `--config` remain supported.
+Do not mix unified `--config` with `--adapter`, `--api` or per-family config
+flags. Adapter examples and the older command snippets below also document
+those compatibility interfaces. A previous executable that predates unified
+configuration requires restoration of the backed-up separate configs and
+launcher; binary-only rollback cannot reverse a configuration format migration.
+
 ## Configuration
 
 Tracked JSON files under `examples/` are synthetic templates. They contain
@@ -320,6 +388,14 @@ Having it configured does **not** enable controls: `light-plan` previews, while
 `light-schedule` explicitly runs the rules. MCP uses `serve --allow-control
 --light-schedule`; the scheduler starts only after the client's initialized
 notification. It shares the existing event loop and config ownership lock.
+
+The persistent Android daemon enables the same rules with `--light-schedule` in
+its saved `service.args`, alongside `--allow-control`. Preserve other saved flags;
+`--schedule` selects Meaco, so it does not substitute for the light flag. Validate
+staged private schemas using `config-check` without server flags or `--api`, then
+preview the staged light config using `light-plan` before cutover. API settings are
+checked when the actual daemon starts. Rollback across a schema change requires
+the matching old configs as well as the old executable; preserve attempt state.
 
 Disable any competing light-curve and sunset automations in your existing
 automation system before starting native scheduling. Use the single shared
@@ -756,7 +832,8 @@ stdin open. Supervise the standalone scheduler when running without an MCP clien
 
 - `device`: standard adapter/monitoring interfaces, command definitions and one
   compile-time catalog generating concrete storage, discovery and dispatch.
-- `config`: private configuration, durable state, exclusive device ownership.
+- `config` / `bundle`: private typed adapter inputs, bounded unified startup
+  loading, durable state and exclusive device ownership.
 - `tuya`: bounded TCP frames, AES/CRC handling; no interpreter subprocesses.
 - `transport`: one deadline-bound socket for HTTP, WebSocket and TLS.
 - `http`: bounded HTTP framing; 1 KiB reader buffer, 8 KiB header budget, up to
@@ -772,7 +849,7 @@ stdin open. Supervise the standalone scheduler when running without an MCP clien
 - `routine` / `routine::tv`: named routines and the shared-outlet workflow with
   statically owned/borrowed child managers; `tv` remains a Rust compatibility re-export.
 - `entity`: standard capability tools, borrowed metadata and per-request snapshot sharing.
-- `media`: shared small private-config helpers and schemas for media adapters.
+- `media`: shared small protocol helpers and schemas for media adapters.
 - `light_schedule` / `solar`: optional native L900 curve and local sunset calculation.
 - `fault`: one statically dispatched polling implementation for printers, lights
   and plugs, shared confirmation and durable deduplication. Background monitoring
@@ -851,7 +928,11 @@ To add a device family:
 2. Implement `Adapter` and select static category `SUPPORT`. Register the concrete
    type and `Family` variant in `static_adapters!`. Existing category tools need
    no MCP changes; introduce a new category only for materially different behavior.
-3. Add CLI configuration/factory wiring. Use `Monitored` for real fault monitoring.
+3. Implement `Adapter::from_source` using the shared typed decoder; declare
+   `CONFIG_SECTION = "services"` for a service (hardware defaults to `adapters`).
+   Unified configuration wiring follows the static catalog automatically. Keep
+   separate-file CLI flags only when needed for compatibility. Use `Monitored`
+   for real fault monitoring.
    Compose multi-device behavior in `routine`, keeping ordering and durable guards
    out of agent prompts. New routines must provide explicit discovery and execution.
 4. Add protocol/behavior tests, update docs, run formatting/tests/Clippy and
@@ -1097,11 +1178,12 @@ Supervision can restart the daemon; existing durable attempt guards still apply.
 
 ### Private installation profile
 
-Copy `examples/deployment.json` to `.local/deployment.json` and `chmod 600`.
-Pass `--deployment .local/deployment.json` before the command to the Android
-helpers. It is required for isolation and assistant setup, and recommended for
-all installation/recovery operations. Basic owner-only installation without a
-profile retains the standard primary-user Termux layout.
+Set `deployment` in `.local/home.json` using the generic
+`examples/deployment.json` schema, and pass `--config .local/home.json`
+before the command to Android helpers. It is required for isolation and
+assistant setup, and recommended for recovery operations. Legacy
+`--deployment .local/deployment.json` remains supported. Basic owner-only
+installation without a profile retains the primary-user Termux layout.
 
 - `android.package` and `android.user` select the supported debuggable Android
   package/profile. CE/DE, service and sandbox paths are derived consistently.
@@ -1153,14 +1235,14 @@ not a generic Linux or macOS binary. NDK host tools run only on the build host.
 
 ```sh
 scripts/android/build.sh
-python3 scripts/android/phone.py --deployment .local/deployment.json --serial "$HOMEWIRE_ADB_SERIAL" install --configs .local
-python3 scripts/android/phone.py --deployment .local/deployment.json --serial "$HOMEWIRE_ADB_SERIAL" connect-zeroclaw --agent "$HOMEWIRE_AGENT"
-python3 scripts/android/phone.py --deployment .local/deployment.json --serial "$HOMEWIRE_ADB_SERIAL" verify
+python3 scripts/android/phone.py --config .local/home.json --serial "$HOMEWIRE_ADB_SERIAL" install
+python3 scripts/android/phone.py --config .local/home.json --serial "$HOMEWIRE_ADB_SERIAL" connect-zeroclaw --agent "$HOMEWIRE_AGENT"
+python3 scripts/android/phone.py --config .local/home.json --serial "$HOMEWIRE_ADB_SERIAL" verify
 # Optional strict availability check (offline devices make this fail):
-python3 scripts/android/phone.py --deployment .local/deployment.json --serial "$HOMEWIRE_ADB_SERIAL" verify --require-online
+python3 scripts/android/phone.py --config .local/home.json --serial "$HOMEWIRE_ADB_SERIAL" verify --require-online
 # Update the executable and enable MCP controls, preserving configs/state:
-python3 scripts/android/phone.py --deployment .local/deployment.json --serial "$HOMEWIRE_ADB_SERIAL" install --allow-control
-python3 scripts/android/phone.py --deployment .local/deployment.json --serial "$HOMEWIRE_ADB_SERIAL" rollback
+python3 scripts/android/phone.py --config .local/home.json --serial "$HOMEWIRE_ADB_SERIAL" install --allow-control
+python3 scripts/android/phone.py --config .local/home.json --serial "$HOMEWIRE_ADB_SERIAL" rollback
 ```
 
 Set `HOMEWIRE_ADB_SERIAL` to the target shown by `adb devices` and choose an existing
@@ -1180,12 +1262,17 @@ switching the active version. Executables live in `~/homewire/releases/HASH/`;
 `~/homewire/config/`, independently of executable updates. This is a local build
 and installation procedure, not a package publication or GitHub Release workflow.
 
-`--configs` explicitly imports only known LAN configs and DIGI cert/key files;
+`--config` imports one runtime `home.json` plus known certificate/key files;
+the host-only deployment block is omitted. Legacy `--configs` imports known separate files;
 it does not copy test configs, lock files, saved state or validation recordings.
 Test/tunnel `connect` overrides, sample addresses and placeholders are rejected.
-Existing phone configs are archived privately before explicit imports. Certificate
+Existing phone configs are archived privately before explicit imports. An installed
+API agent endpoint is retained when the imported API omits that generated endpoint;
+its token and exact tool scope remain unchanged. An explicit endpoint overrides it,
+and removal of the API service removes the frontend. Certificate
 and TV child paths should be relative to the config directory. Subsequent installs
-omit `--configs` to retain them. A TV config owns its Samsung, DIGI and entire plug
+use a legacy deployment-only profile and omit `--configs` to retain target configs.
+With unified `--config`, installation also updates runtime settings. A TV config owns its Samsung, DIGI and entire plug
 manager, so the generated service does not load those separately.
 
 The installer writes an enabled `termux-services` service at
@@ -1332,6 +1419,26 @@ companions acknowledge their current revision. Unchanged alerts cause no writes.
 Delivery is at least once; receipt persistence prevents routine repeats. A full
 ledger retains pending alerts rather than silently evicting them.
 
+Channels default to `delivery: "webhook"`, preserving existing payloads and
+acknowledgements. Optional `keys` is an exact allowlist of at most 64 alert keys;
+omitting it or using an empty list routes all alerts. Filtered-out cards do not
+become pending deliveries for that channel.
+
+For Telegram, use `delivery: "telegram"`, `chat_id` (a numeric chat ID string or
+`@channel_username`), and `url` in the form
+`https://api.telegram.org/bot<BOT_TOKEN>/sendMessage`. Only that official HTTPS
+endpoint is accepted. No push registration or authorization header is allowed
+for this delivery type. Keep the URL in protected private configuration because
+it contains the bot token. A changed recipient invalidates the previous receipt.
+Telegram delivery requires both HTTP success and `ok: true` with a message ID;
+response bodies and token-bearing URLs are never included in delivery errors.
+Messages use plain text. `tank_full` becomes a request to empty the dehumidifier
+tank, and confirmed recovery sends an explicit resolved message. This is outbound
+notification only; it does not enable an agent's Telegram input channel. Telegram
+may accept a message before a connection or local persistence failure, so retries
+can still duplicate it; recipient reading and phone display are not guaranteed.
+See [Telegram's sendMessage contract](https://core.telegram.org/bots/api#sendmessage).
+
 `history_series {}` lists configured entities/retention. `history_query` accepts
 entity, optional Unix start/end, aggregation raw/hour/day and limit 1–96. Each
 fixed 32-byte CRC record lives in an on-disk ring; maximum disk storage is
@@ -1387,7 +1494,7 @@ shows the transcript for review and sends it to ZeroClaw. Text is also available
 To configure the local assistant proxy, run on the host:
 
 ```sh
-python3 scripts/android/connect_assistant.py --deployment .local/deployment.json --serial SERIAL --api-config .local/api.json --agent "$HOMEWIRE_AGENT"
+python3 scripts/android/connect_assistant.py --config .local/home.json --serial SERIAL --agent "$HOMEWIRE_AGENT"
 ```
 
 It adds a dedicated gateway token while preserving model keys and existing paired
@@ -1499,11 +1606,11 @@ sh scripts/android/sandbox/build.sh
 # Set JAVA_HOME, HOMEWIRE_ANDROID_PLATFORM, HOMEWIRE_ANDROID_BUILD_TOOLS,
 # HOMEWIRE_SIGNING_KEY and HOMEWIRE_SIGNING_PASSWORD_FILE as for the companion.
 sh scripts/android/sandbox/build-identity.sh
-python3 scripts/android/isolate.py --deployment .local/deployment.json --serial SERIAL install
-python3 scripts/android/isolate.py --deployment .local/deployment.json --serial SERIAL verify
+python3 scripts/android/isolate.py --config .local/home.json --serial SERIAL install
+python3 scripts/android/isolate.py --config .local/home.json --serial SERIAL verify
 # Rebuild native artifacts before updating them; policy/model keys remain intact.
-python3 scripts/android/isolate.py --deployment .local/deployment.json --serial SERIAL update
-python3 scripts/android/isolate.py --deployment .local/deployment.json --serial SERIAL restart
+python3 scripts/android/isolate.py --config .local/home.json --serial SERIAL update
+python3 scripts/android/isolate.py --config .local/home.json --serial SERIAL restart
 ```
 
 The installer checks the configured MCP port is free, takes a cold copy of agent state,
@@ -1535,7 +1642,7 @@ change the active deployment. The agent cannot administer this procedure.
 ## Android Direct Boot and recovery
 
 On a supported rooted Android device with Magisk,
-`scripts/android/direct_boot.py --deployment .local/deployment.json --serial SERIAL install`
+`scripts/android/direct_boot.py --config .local/home.json --serial SERIAL install`
 can move the native owner into `/data/user_de/0/com.termux/files/homewire` and
 install a Magisk boot supervisor under `/data/adb/service.d`. It preserves the CE
 copy, verifies the native executable as Termux's UID, keeps private modes/SELinux
@@ -1587,4 +1694,4 @@ also resolves JSON references in memory. For `api.json` `private_key` and `digi.
 `client_key`, it sends referenced PEM bytes to the corresponding protected device key file
 and rewrites only the destination JSON path. Host files remain references, while target
 files use the existing atomic mode-0600 transfer. Use Infisical when installing with
-`--configs`; binary-only updates preserve existing target credentials.
+unified `--config` or legacy `--configs`; deployment-only updates preserve existing target credentials.

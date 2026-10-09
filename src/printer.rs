@@ -2,7 +2,7 @@
 use crate::device::{Adapter, Hints, Input, Tool};
 use crate::{
     Result,
-    config::{private_permissions, read_bounded, valid_unique_labels},
+    config::valid_unique_labels,
     error, fault,
     ipp::{self, Attributes},
 };
@@ -55,9 +55,10 @@ pub struct Config {
 }
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
-        private_permissions(path)?;
-        let config: Self = serde_json::from_slice(&read_bounded(path, "Printer configuration")?)
-            .map_err(|_| error("Invalid printer configuration"))?;
+        Self::from_source(&crate::config::Source::file(path))
+    }
+    pub fn from_source(source: &crate::config::Source<'_>) -> Result<Self> {
+        let config: Self = source.decode()?;
         config.validate()?;
         Ok(config)
     }
@@ -323,7 +324,11 @@ pub struct Unavailable {
 }
 impl Manager {
     pub fn open(path: &Path) -> Result<Self> {
-        let config = Config::load(path)?;
+        Self::from_source(&crate::config::Source::file(path))
+    }
+    pub fn from_source(source: &crate::config::Source<'_>) -> Result<Self> {
+        let path = source.path();
+        let config = Config::from_source(source)?;
         let (store, monitor) = fault::Store::open(path, &config.printers)?;
         let warning_path = path.with_extension("supply-state.json");
         let mut identities = std::collections::BTreeMap::new();
@@ -478,8 +483,8 @@ impl Adapter for Manager {
             hints: Hints::READ,
         },
     ];
-    fn open(path: &Path) -> Result<Self> {
-        Self::open(path)
+    fn from_source(source: &crate::config::Source<'_>) -> Result<Self> {
+        Self::from_source(source)
     }
     fn execute(&mut self, name: &str, args: &Value) -> Result<Value> {
         match name {

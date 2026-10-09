@@ -23,7 +23,7 @@ pub(crate) fn environment_secret_path(path: &Path) -> bool {
     path.to_str().and_then(secret_environment_name).is_some()
 }
 
-fn resolve_secrets(
+pub(crate) fn resolve_secrets(
     value: &mut Value,
     lookup: &impl Fn(&str) -> Option<String>,
     depth: usize,
@@ -68,6 +68,42 @@ pub(crate) fn load_secret_json<T: DeserializeOwned>(path: &Path, label: &str) ->
         .map_err(|_| error("Invalid private JSON configuration"))?;
     resolve_secrets(&mut value, &|name| std::env::var(name).ok(), 0)?;
     serde_json::from_value(value).map_err(|_| error("Invalid private configuration schema"))
+}
+
+/// A startup-only configuration input. Adapters decode their own typed schema;
+/// the borrowed JSON is never retained by a running device manager.
+pub struct Source<'a> {
+    path: std::borrow::Cow<'a, Path>,
+    value: Option<&'a Value>,
+}
+impl<'a> Source<'a> {
+    pub fn file(path: &'a Path) -> Self {
+        Self {
+            path: path.into(),
+            value: None,
+        }
+    }
+    pub(crate) fn section(root: &Path, family: &str, value: &'a Value) -> Self {
+        Self {
+            path: root
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join(format!("{family}.json"))
+                .into(),
+            value: Some(value),
+        }
+    }
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+    pub fn decode<T: DeserializeOwned>(&self) -> Result<T> {
+        match self.value {
+            Some(value) => {
+                T::deserialize(value).map_err(|_| error("Invalid private configuration schema"))
+            }
+            None => load_secret_json(self.path(), "Adapter configuration"),
+        }
+    }
 }
 
 /// Configured groups contain at most eight devices: a stack array avoids
@@ -195,8 +231,10 @@ fn settle() -> u64 {
 
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
-        private_permissions(path)?;
-        let config: Self = load_secret_json(path, "Device configuration")?;
+        Self::from_source(&crate::config::Source::file(path))
+    }
+    pub fn from_source(source: &crate::config::Source<'_>) -> Result<Self> {
+        let config: Self = source.decode()?;
         config.presets.validate()?;
         if let Some(schedule) = &config.schedule {
             schedule.validate()?;
