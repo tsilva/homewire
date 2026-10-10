@@ -119,6 +119,11 @@ impl Config {
             {
                 return Err(error("Light automation requires a configured L900 target"));
             }
+            for name in &automation.brightness_lights {
+                if !self.bulbs.iter().any(|b| b.name == *name) {
+                    return Err(error("Brightness follower requires a configured light"));
+                }
+            }
         }
         Ok(())
     }
@@ -417,6 +422,7 @@ pub struct Manager {
     pub monitor: fault::Monitor,
     store: fault::Store,
     pub scheduler: Option<light_schedule::Controller>,
+    brightness_schedulers: Vec<light_schedule::Controller>,
 }
 pub type Check = fault::Check<Status, Unavailable>;
 #[derive(Serialize)]
@@ -447,9 +453,27 @@ impl Manager {
         } else {
             None
         };
+        let mut brightness_schedulers = Vec::new();
+        if let Some(automation) = &config.automation {
+            for name in &automation.brightness_lights {
+                let endpoint = config
+                    .bulbs
+                    .iter()
+                    .find(|b| b.name == *name)
+                    .ok_or_else(|| error("Missing brightness follower light"))?;
+                brightness_schedulers.push(light_schedule::Controller::open_brightness(
+                    automation.clone(),
+                    name,
+                    &path.with_extension(format!("schedule.{name}.state.json")),
+                    &endpoint.identity(),
+                    chrono::Utc::now(),
+                )?);
+            }
+        }
         Ok(Self {
             config,
             scheduler,
+            brightness_schedulers,
             monitor,
             store,
         })
@@ -477,20 +501,43 @@ impl Manager {
         device.delay = Duration::from_secs(self.config.settle_seconds);
         apply(&mut device, change)
     }
-    pub fn schedule_tick(&mut self) -> Result<Option<Applied>> {
-        let mut scheduler = self
+    pub fn schedule_tick(&mut self) -> Result<Vec<Applied>> {
+        if self.scheduler.is_none() {
+            return Err(error("No light automation configured"));
+        }
+        let mut applied = Vec::new();
+        let mut failure = None;
+        for scheduler in self
             .scheduler
-            .take()
-            .ok_or_else(|| error("No light automation configured"))?;
-        let result = (|| {
-            let mut device = self
-                .endpoint(&scheduler.config.light)?
-                .connect(Duration::from_secs(self.config.timeout_seconds))?;
-            device.delay = Duration::from_secs(self.config.settle_seconds);
-            scheduler.tick(chrono::Utc::now(), &mut device)
-        })();
-        self.scheduler = Some(scheduler);
-        result
+            .iter_mut()
+            .chain(&mut self.brightness_schedulers)
+        {
+            let result = (|| {
+                let endpoint = self
+                    .config
+                    .bulbs
+                    .iter()
+                    .find(|b| b.name == scheduler.config.light)
+                    .ok_or_else(|| error("Missing scheduled light"))?;
+                let mut device =
+                    endpoint.connect(Duration::from_secs(self.config.timeout_seconds))?;
+                device.delay = Duration::from_secs(self.config.settle_seconds);
+                scheduler.tick(chrono::Utc::now(), &mut device)
+            })();
+            match result {
+                Ok(Some(result)) => applied.push(result),
+                Ok(None) => (),
+                Err(e) if failure.is_none() => {
+                    failure = Some(error(format!("{}: {e}", scheduler.config.light)))
+                }
+                Err(_) => (),
+            }
+        }
+        if let Some(e) = failure {
+            Err(e)
+        } else {
+            Ok(applied)
+        }
     }
     pub fn check(&mut self) -> Result<Check> {
         self.store.check(

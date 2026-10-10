@@ -300,6 +300,8 @@ target/release/homewire --config .local/home.json serve --allow-control --schedu
 
 [L900 scheduling](docs/reference.md#l900-scheduling) adjusts an on strip along a
 daily brightness/temperature curve and turns it on at locally calculated sunset.
+Optional `brightness_lights` adds up to seven configured lights that follow the
+same brightness curve while on, preserving their colors and power state.
 Configure its timezone and actual location in the lights file, then use
 `light-plan` to preview or `light-schedule` to run. For MCP, add
 `--allow-control --light-schedule`. Missed timed runs are not caught up;
