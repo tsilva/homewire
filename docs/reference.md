@@ -401,11 +401,13 @@ reported overheating notifications independently of the light protocol.
 ## L900 scheduling
 
 The optional `automation` object selects one configured L900 and supplies its
-local timezone and location:
+local timezone and location. Optional `brightness_lights` names up to seven
+additional configured L430C/L900 lights that follow the same brightness curve:
 
 ```json
 "automation": {
   "light": "led_strip",
+  "brightness_lights": ["lamp_a", "lamp_b"],
   "timezone": "Etc/UTC",
   "latitude": 0.0,
   "longitude": 0.0,
@@ -415,7 +417,9 @@ local timezone and location:
 ```
 
 Replace the sample timezone and zero coordinates with your desired timezone and
-location in the private config. The tracked lights template omits `automation`.
+location in the private config. Omit `brightness_lights` or use an empty list
+when no followers are wanted. All targets must exist and be distinct. The tracked
+lights template omits `automation`.
 A valid IANA timezone, latitude within ±89°, longitude within ±180° and
 `poll_seconds` of 5–30 are required. Omit `automation` to disable its configuration.
 Having it configured does **not** enable controls: `light-plan` previews, while
@@ -446,6 +450,16 @@ curve adjustment.
 External power-on detection is polled rather than pushed; the default interval
 is 30 seconds. Changes are absolute and verified, with the usual settle delay;
 no transition/fade duration is sent. Effects/music must be confirmed off.
+
+Brightness followers use the same local-time interpolation and outside brightness,
+while preserving their white temperature, hue, saturation and power state. They
+never turn on at sunset. Each follower has independent identity-bound attempt
+state in `lights.schedule.NAME.state.json`; existing primary-light state remains
+in `lights.schedule.state.json`. Failure on one light does not prevent the other
+targets from being assessed, and uncertain writes are not replayed in that minute,
+including after restart. Disable competing brightness automations for each added
+target before enabling it in the native owner. Targets are processed serially
+without extra threads or retained device-state snapshots.
 
 Sunset uses local-date NOAA/Meeus solar equations with 90.833° zenith and two
 iterations, without network calls or new runtime dependencies. It is an

@@ -1,4 +1,4 @@
-//! Optional L900 biorhythm and sunset rules; no agent/model calls.
+//! Optional light curves and sunset rules; no agent/model calls.
 use crate::{
     Result,
     bulb::{self, Change, Device},
@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub light: String,
+    #[serde(default)]
+    pub brightness_lights: Vec<String>,
     pub timezone: String,
     pub latitude: f64,
     pub longitude: f64,
@@ -23,6 +25,18 @@ pub struct Config {
 }
 impl Config {
     pub fn validate(&self) -> Result<Tz> {
+        if self.brightness_lights.len() > 7
+            || !crate::config::valid_unique_labels(
+                std::iter::once(self.light.as_str())
+                    .chain(self.brightness_lights.iter().map(String::as_str)),
+                32,
+                b"_-",
+            )
+        {
+            return Err(error(
+                "Configure up to seven distinct brightness follower lights",
+            ));
+        }
         let valid_target = |b: u8, k: u16| (1..=100).contains(&b) && (2500..=9000).contains(&k);
         if !(2..=16).contains(&self.curve.len())
             || !valid_target(self.outside_curve.0, self.outside_curve.1)
@@ -64,7 +78,7 @@ impl Config {
     }
     pub fn preview(&self, now: DateTime<Utc>) -> Result<Value> {
         Ok(
-            json!({"light":self.light,"timezone":self.timezone,"at":now.to_rfc3339(),"target":self.target(now)?,"sunset":self.sunset(now)?.map(|t|t.to_rfc3339()),"curve":self.curve,"outside_curve":self.outside_curve,"note":"Preview only. Brightness/temperature follow the curve while on; sunset turns on once. Schedule is opt-in."}),
+            json!({"light":self.light,"brightness_lights":self.brightness_lights,"timezone":self.timezone,"at":now.to_rfc3339(),"target":self.target(now)?,"sunset":self.sunset(now)?.map(|t|t.to_rfc3339()),"curve":self.curve,"outside_curve":self.outside_curve,"note":"Preview only. Primary light follows brightness/temperature while on and turns on at sunset. Followers change only brightness while on. Schedule is opt-in."}),
         )
     }
 }
@@ -95,6 +109,7 @@ pub struct Controller {
     path: PathBuf,
     last_check: DateTime<Utc>,
     last_power: Option<bool>,
+    brightness_only: bool,
 }
 impl Controller {
     pub fn open(config: Config, path: &Path, identity: &str, now: DateTime<Utc>) -> Result<Self> {
@@ -117,7 +132,21 @@ impl Controller {
             path: path.to_owned(),
             last_check: now,
             last_power: None,
+            brightness_only: false,
         })
+    }
+    pub fn open_brightness(
+        mut config: Config,
+        light: &str,
+        path: &Path,
+        identity: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Self> {
+        config.light = light.to_owned();
+        config.brightness_lights.clear();
+        let mut controller = Self::open(config, path, identity, now)?;
+        controller.brightness_only = true;
+        Ok(controller)
     }
     pub fn tick(
         &mut self,
@@ -129,9 +158,11 @@ impl Controller {
             .with_timezone(&self.config.validate()?)
             .date_naive()
             .to_string();
-        let sunset_due = sunset.is_some_and(|t| {
-            self.last_check < t && now >= t && now - t <= chrono::Duration::seconds(60)
-        }) && self.memory.sunset_attempt.as_deref() != Some(&date);
+        let sunset_due = !self.brightness_only
+            && sunset.is_some_and(|t| {
+                self.last_check < t && now >= t && now - t <= chrono::Duration::seconds(60)
+            })
+            && self.memory.sunset_attempt.as_deref() != Some(&date);
         let previous_minute = self.last_check.timestamp().div_euclid(60);
         let minute = now.timestamp().div_euclid(60);
         self.last_check = now;
@@ -153,6 +184,9 @@ impl Controller {
             return Ok(None);
         }
         let mut target = self.config.target(now)?;
+        if self.brightness_only {
+            target.color_temperature_k = None;
+        }
         if sunset_due {
             target.power = Some(true);
         }

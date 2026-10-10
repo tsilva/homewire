@@ -28,6 +28,7 @@ fn at(value: &str) -> DateTime<Utc> {
 fn config() -> Config {
     Config {
         light: "strip".into(),
+        brightness_lights: vec![],
         timezone: "Europe/London".into(),
         latitude: 51.5,
         longitude: -0.12,
@@ -379,6 +380,101 @@ fn custom_curve_and_outside_target_are_not_legacy_defaults() -> Result<()> {
     ] {
         c.curve = points;
         assert!(c.validate().is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn brightness_followers_preserve_colour_and_power_even_at_sunset() -> Result<()> {
+    let t = Temp::new();
+    let sunset = config()
+        .sunset(at("2026-10-07T12:00:00Z"))?
+        .expect("sunset");
+    let mut c = Controller::open_brightness(
+        config(),
+        "lamp",
+        &t.state(),
+        "lamp1",
+        sunset - Duration::seconds(10),
+    )?;
+    let mut d = Fake::new(false);
+    d.state.model = Model::L430C;
+    d.state.temperature_range_k = [2500, 6500];
+    d.state.color_temperature_k = 2700;
+    d.state.hue = 135;
+    d.state.saturation_percent = 42;
+    assert!(c.tick(sunset - Duration::seconds(5), &mut d)?.is_none());
+    assert!(c.tick(sunset + Duration::seconds(5), &mut d)?.is_none());
+    assert_eq!(d.sets, 0, "sunset must not turn on followers");
+    d.state.power = true;
+    let now = sunset + Duration::seconds(15);
+    assert!(c.tick(now, &mut d)?.is_some());
+    assert_eq!(
+        d.state.brightness_percent,
+        config()
+            .target(now)?
+            .brightness_percent
+            .expect("brightness")
+    );
+    assert_eq!(d.state.color_temperature_k, 2700);
+    assert_eq!(d.state.hue, 135);
+    assert_eq!(d.state.saturation_percent, 42);
+    d.state.power = false;
+    assert!(c.tick(now + Duration::minutes(1), &mut d)?.is_none());
+    assert!(!d.state.power);
+    Ok(())
+}
+
+#[test]
+fn followers_have_independent_durable_attempts_and_share_local_curve() -> Result<()> {
+    let t = Temp::new();
+    let now = at("2026-07-01T06:00:00Z");
+    let mut config = config();
+    config.brightness_lights = vec!["lamp_a".into(), "lamp_b".into()];
+    let mut a = Controller::open_brightness(config.clone(), "lamp_a", &t.state(), "a", now)?;
+    let b_path = t.0.join("b.state.json");
+    let mut b = Controller::open_brightness(config.clone(), "lamp_b", &b_path, "b", now)?;
+    let mut da = Fake::new(true);
+    let mut db = Fake::new(true);
+    da.fail_set = true;
+    assert!(a.tick(now, &mut da).is_err());
+    assert!(b.tick(now, &mut db)?.is_some());
+    assert_eq!(db.state.brightness_percent, 45, "07:00 local summer time");
+    let mut a = Controller::open_brightness(config, "lamp_a", &t.state(), "a", now)?;
+    da.fail_set = false;
+    assert!(a.tick(now + Duration::seconds(10), &mut da)?.is_none());
+    assert_eq!(da.sets, 1, "uncertain write cannot replay after restart");
+    assert!(a.tick(now + Duration::minutes(1), &mut da)?.is_some());
+    Ok(())
+}
+
+#[test]
+fn follower_configuration_requires_distinct_configured_bounded_targets() -> Result<()> {
+    let base = json!({"lights":[
+        {"name":"strip","model":"L900","host":"192.0.2.1","device_id":"syntheticStrip","auth_hash":"00".repeat(32)},
+        {"name":"lamp","model":"L430C","host":"192.0.2.2","device_id":"syntheticLamp","auth_hash":"00".repeat(32)}
+    ],"automation":{"light":"strip","brightness_lights":["lamp"],"timezone":"UTC","latitude":0,"longitude":0,"curve":POINTS,"outside_curve":[10,2700]}});
+    let config: homewire::bulb::Config = serde_json::from_value(base.clone())?;
+    config.validate()?;
+    assert_eq!(
+        config
+            .automation
+            .as_ref()
+            .expect("automation")
+            .preview(at("2026-01-01T12:00:00Z"))?["brightness_lights"],
+        json!(["lamp"])
+    );
+    for targets in [
+        json!(["missing"]),
+        json!(["lamp", "lamp"]),
+        json!(["strip"]),
+        json!(["../lamp"]),
+        json!(["a", "b", "c", "d", "e", "f", "g", "h"]),
+    ] {
+        let mut value = base.clone();
+        value["automation"]["brightness_lights"] = targets;
+        let config: homewire::bulb::Config = serde_json::from_value(value)?;
+        assert!(config.validate().is_err());
     }
     Ok(())
 }

@@ -173,11 +173,13 @@ impl App {
                 .as_mut()
                 .ok_or_else(|| error("No lights configured"))?;
             match bulbs.schedule_tick() {
-                Ok(Some(result)) => {
-                    eprintln!(
-                        "Light schedule completed: {}",
-                        naming::light_output(serde_json::to_value(result)?)
-                    );
+                Ok(results) if !results.is_empty() => {
+                    for result in results {
+                        eprintln!(
+                            "Light schedule completed: {}",
+                            naming::light_output(serde_json::to_value(result)?)
+                        );
+                    }
                     if let Some(alerts) = alerts.as_mut()
                         && let Err(e) = alerts.record(
                             "schedule.lights",
@@ -190,7 +192,7 @@ impl App {
                         eprintln!("Alert ledger write failed: {e}");
                     }
                 }
-                Ok(None) => {}
+                Ok(_) => {}
                 Err(e) => {
                     eprintln!("Light schedule failed (no immediate retry): {e}");
                     if let Some(alerts) = alerts.as_mut()
