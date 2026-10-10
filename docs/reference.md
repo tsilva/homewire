@@ -6,6 +6,10 @@ printer monitoring, Awair measurements, bulb controls, and implementation limits
 
 ## Unified configuration
 
+Computer sequencing uses `adapters.computer` plus `routines.computer`; see
+[computer setup](#computer-shutdown-service). Its outlet may share the plugs
+adapter with TV but cannot be the outlet owned by the TV routine.
+
 The primary input is `homewire --config .local/home.json COMMAND`.
 Copy [examples/home.json](../examples/home.json) into ignored `.local/`,
 protect it with `chmod 600`, replace the synthetic values and remove unused
@@ -701,6 +705,135 @@ when deliberately cutting over ownership to explicit Homewire/agent commands.
 Protocol references: [Samsung encrypted remote](https://github.com/xchwarze/samsung-tv-ws-api/tree/master/samsungtvws/encrypted),
 [HA Samsung bridge](https://github.com/home-assistant/core/blob/dev/homeassistant/components/samsungtv/bridge.py),
 [Android TV remote protocol](https://github.com/tronikos/androidtvremote2/blob/main/src/androidtvremote2/remotemessage.proto).
+
+## Computer shutdown service
+
+This optional Linux service uses Ed25519 signatures on fixed 162-byte UDP
+frames in both directions. It accepts status/validation and orderly shutdown,
+with no shell, SSH login, reboot, file access or arbitrary command interface.
+Fresh random challenges expire after 10 seconds, bind the client nonce, device
+identity and peer address, and are consumed before controls. There are at most
+eight pending challenges; malformed or unauthenticated traffic is discarded
+without per-packet logs. The native server has one thread and blocks while idle.
+The client has a total 1–10-second request deadline (default 3) and sends each
+protocol phase once. An uncertain shutdown is never automatically retried.
+
+`adapters.computer` follows [computer.json](../examples/computer.json): one named
+computer, a literal UDP `address`, pinned `server_public_key`, private
+`signing_key`, unicast nonzero `mac`, and explicit `wake_address`. The name is
+1–24 ASCII letters/digits/underscores/hyphens and must match the server name.
+Public keys and signing seeds are 64 hex characters. Store the client signing
+seed in Infisical using a `${HOMEWIRE_SECRET_...}` reference. Runtime deployment
+resolves it into protected backend storage; Betty never needs the key itself.
+As with other device credentials, compromise of that backend can expose the key.
+A stolen authorization key grants shutdown requests, not a general login.
+The separate computer identity key authenticates responses and cannot authorize
+shutdown. Keep its seed root-only and deliver it to the unprivileged service
+through systemd `LoadCredential`.
+
+Build both native executables with `cargo build --release --locked` on the
+computer. Generate the client seed into a protected temporary file outside the
+repository with `homewire-power keygen PATH`, which prints only the public key.
+Store the seed in Infisical, delete the temporary file, and put its public key
+in a private copy of [computer-server.json](../examples/computer-server.json).
+Set `listen` to the computer's LAN address; the default example uses UDP 39817.
+Install with root privileges:
+
+```sh
+sudo sh scripts/computer/install.sh target/release/homewire-power SHA256 SERVER_JSON
+```
+
+Supply the binary's exact SHA-256. The installer verifies it, creates a dedicated
+non-login account, keeps versioned binaries, generates the root-only response
+identity once, and prints its public key for pinning. Existing identity and
+authorization configurations are preserved; a different configuration requires
+explicit rotation. The listener is enabled at boot with systemd hardening.
+Polkit grants that account only starting the fixed, root-owned
+`homewire-poweroff.service`, whose sole action is orderly OS poweroff.
+The installer does not run that action. Restrict LAN exposure with the target's
+firewall as appropriate; neither an obscure port nor source IP replaces signatures.
+
+Run `homewire-power status CLIENT_JSON` for authenticated running/pending status
+and `homewire-power validate CLIENT_JSON` for a challenge/signature round trip
+without shutdown. Validation does not execute the OS action. Unreachable is
+unknown, never confirmed off. `homewire-power shutdown CLIENT_JSON` is the
+deliberate administrative control; its acknowledgement proves only that the
+fixed OS action was queued. The server rejects another shutdown until restart.
+
+For coordinated power, add:
+
+```json
+"routines": {
+  "computer": {
+    "plug": "metered_outlet",
+    "startup_seconds": 5,
+    "ready_seconds": 120,
+    "shutdown_policy": "metered_standby",
+    "shutdown_verification": {
+      "standby_power_w": 1.0,
+      "stable_seconds": 30,
+      "timeout_seconds": 180,
+      "poll_seconds": 2
+    }
+  }
+}
+```
+
+Startup delay is 1–60 seconds; readiness is 1–120 seconds. `computer_on` verifies
+the outlet, turns it on if needed, waits for standby power, sends one WoL packet
+if the authenticated service is not already running, and verifies readiness.
+Enable persistent WoL on the host NIC separately; wake after outlet power loss
+also depends on firmware support. `computer_off` reads the P110 relay and meter,
+requires auto-off to be confirmed inactive, and requires running consumption
+more than 10 W above the configured standby threshold before sending one signed
+orderly shutdown request. After authenticated acceptance, it waits for both the
+service to become unreachable and consumption to stay at/below the calibrated
+threshold continuously for the configured interval, with at least three fresh
+samples. Any reachable service or higher consumption restarts that interval.
+Only then does it persist the cutoff attempt, turn off the outlet and verify
+its relay. Missing/invalid consumption, unknown/active auto-off, authentication
+or protocol errors, device errors and timeouts abort without cutting power.
+Transport unavailability alone never authorizes cutoff.
+
+Use [computer-routine.json](../examples/computer-routine.json) as a schema example,
+not as a universal threshold. Measure actual orderly-shutdown standby consumption
+with the monitor/charger off or disconnected, account for observed variation and
+a small margin, and verify an entire off/on cycle before enabling the policy.
+Thresholds are 0.05–5 W, stability 10–60 seconds, polling 1–5 seconds and timeout
+30–300 seconds, at least 20 seconds longer than stability. Choose timeouts that
+fit the caller's timeout including adapter reads; the standard bridge waits 300
+seconds. Shared monitors and chargers can keep consumption above the threshold,
+in which case the outlet safely stays on. Recalibrate after hardware/firmware
+changes. Never raise the threshold merely to make a running monitor/charger pass.
+
+Results report `shutdown_verified:true` under the explicit `metered_standby`
+evidence policy, its measured maximum standby draw, elapsed stable interval,
+sample count and verified outlet state. They retain `physical_off_verified:false`:
+this is corroborated electrical/network evidence, not an independent hardware
+power-state sensor. Neither an acknowledgement nor disappearance alone proves
+physical shutdown. To disable cutoff, use `shutdown_policy:"leave_on"` and omit
+`shutdown_verification`; that policy requests shutdown and keeps the outlet on.
+
+Standard `routine_list`, `routine_plan`, `routine_run`, `entity_status` and
+`wake_list` discover this adapter without family-specific MCP tools. Plans do
+not query devices. Direct computer wake/shutdown, outlet power and outlet auto-off
+changes require explicit `--maintenance` while the routine owns them. Workflow
+attempts are persisted before controls and replay is blocked for 180 seconds
+after an uncertain result, including across backend restart. Accepted shutdowns
+also persist their acceptance time and a fingerprint binding both devices and
+credentials. For up to 10 minutes, an explicit `computer_off` call may resume
+verification after timeout/restart without resending shutdown. Changing a
+calibrated threshold does not change that equipment fingerprint. Changed devices
+or credentials, expired acceptance and unresolved attempts fail explicitly.
+Acceptance is consumed and the attempt timestamp refreshed before relay cutoff,
+so an uncertain cutoff cannot be replayed as a resumed verification. Errors leave
+outlet power unchanged after any completed startup step; no implicit rollback occurs.
+
+Disable with `sudo systemctl disable --now homewire-power.service`. Remove its
+Polkit rule to revoke the OS privilege. For binary rollback, select the preserved
+`/opt/homewire-power/previous` version and restart only the listener; retain keys
+and authorization config. A phone rollback must restore its matching config and
+binary, preserving all monitor, schedule, alert and device-attempt state.
 
 ## Wake-on-LAN
 

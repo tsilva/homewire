@@ -1,0 +1,9 @@
+{
+  "name": "workstation",
+  "address": "192.0.2.50:39817",
+  "server_public_key": "REPLACE_WITH_SERVER_PUBLIC_KEY_64_HEX",
+  "signing_key": "${HOMEWIRE_SECRET_COMPUTER_SHUTDOWN_KEY}",
+  "mac": "02:00:00:00:00:50",
+  "wake_address": "192.0.2.255:9",
+  "timeout_seconds": 3
+}

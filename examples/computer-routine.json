@@ -1,0 +1,12 @@
+{
+  "plug": "metered_outlet",
+  "startup_seconds": 5,
+  "ready_seconds": 120,
+  "shutdown_policy": "metered_standby",
+  "shutdown_verification": {
+    "standby_power_w": 1.0,
+    "stable_seconds": 30,
+    "timeout_seconds": 180,
+    "poll_seconds": 2
+  }
+}

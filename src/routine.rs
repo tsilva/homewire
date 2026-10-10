@@ -6,6 +6,7 @@ use crate::{
     error,
 };
 use serde_json::{Value, json};
+pub mod computer;
 pub mod meaco;
 pub mod tv;
 
@@ -17,6 +18,7 @@ fn configured(devices: &Devices, name: &str) -> bool {
                 .is_some_and(|op| m.has_preset(op))
         }),
         "tv_on" | "tv_off" => devices.tv.is_some(),
+        "computer_on" | "computer_off" => devices.computer_routine.is_some(),
         _ => false,
     }
 }
@@ -27,6 +29,14 @@ pub fn call(devices: &mut Devices, tool: &str, args: &Value) -> Result<Value> {
             ("meaco_day", "Configured daytime preset"),
             ("meaco_night", "Configured nighttime preset"),
             ("meaco_off", "Verified dehumidifier power off"),
+            (
+                "computer_on",
+                "Outlet first, one Wake-on-LAN packet, authenticated readiness",
+            ),
+            (
+                "computer_off",
+                "Signed shutdown once, configured shutdown verification, then verified outlet cutoff; leave_on disables cutoff",
+            ),
             (
                 "tv_on",
                 "Outlet first, Samsung wake, DIGI ready and verified wake",
@@ -56,7 +66,19 @@ pub fn call(devices: &mut Devices, tool: &str, args: &Value) -> Result<Value> {
     if !configured(devices, name) {
         return Err(error("Unknown configured routine"));
     }
-    let result = if let Some(operation) = name.strip_prefix("meaco_") {
+    let result = if let Some(operation) = name.strip_prefix("computer_") {
+        let mut routine = devices
+            .computer_routine
+            .take()
+            .ok_or_else(|| error("Computer routine is not configured"))?;
+        let result = if tool == "routine_plan" {
+            Ok(routine.preview(operation == "on"))
+        } else {
+            routine.run(devices, operation == "on")
+        };
+        devices.computer_routine = Some(routine);
+        result?
+    } else if let Some(operation) = name.strip_prefix("meaco_") {
         devices.call(
             if tool == "routine_plan" {
                 "meaco_plan"

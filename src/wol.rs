@@ -190,8 +190,8 @@ pub(crate) fn call(devices: &mut Devices, name: &str, args: &Value) -> Result<Va
     if name == "wake_list" {
         let mut targets = Vec::new();
         devices.wake_targets(&mut |t| {
-            let owned = devices.tv.as_ref().is_some_and(|tv|tv.owns_power(t.device));
-            targets.push(json!({"device":t.id(),"wake_verifiable":t.verified,"power_owner":if owned { Some("tv_on/tv_off") } else { None },"maintenance_required":owned && !devices.maintenance}));
+            let owner = if devices.computer_owns_power(t.device) {Some("computer_on/computer_off")} else if devices.tv.as_ref().is_some_and(|tv|tv.owns_power(t.device)) {Some("tv_on/tv_off")} else {None};
+            targets.push(json!({"device":t.id(),"wake_verifiable":t.verified,"power_owner":owner,"maintenance_required":owner.is_some() && !devices.maintenance}));
         });
         return Ok(json!({"devices":targets}));
     }
