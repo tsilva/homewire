@@ -9,7 +9,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, TcpListener},
     time::Duration,
 };
-#[path = "support/media.rs"]
+#[path = "support/mod.rs"]
 #[allow(dead_code)]
 mod support;
 
@@ -356,26 +356,8 @@ fn monitoring_persists_before_emitting_and_restart_does_not_repeat_a_fault() -> 
     use std::fs;
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let address = listener.local_addr()?;
-    let temp = std::env::temp_dir().join(format!(
-        "homewire-printer-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_nanos()
-    ));
-    fs::create_dir(&temp)?;
-    let config_path = temp.join("printers.json");
-    fs::write(
-        &config_path,
-        serde_json::to_vec(
-            &json!({"printers":[{"name":"brother","host":"192.0.2.1","connect":address.to_string()}],"timeout_seconds":3,"poll_seconds":5}),
-        )?,
-    )?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600))?;
-    }
+    let temp = support::Directory::new()?;
+    let config_path = temp.config("printers.json", &json!({"printers":[{"name":"brother","host":"192.0.2.1","connect":address.to_string()}],"timeout_seconds":3,"poll_seconds":5}))?;
     let worker = std::thread::spawn(move || -> Result<()> {
         for _ in 0..3 {
             let (mut socket, _) = listener.accept()?;
@@ -436,6 +418,5 @@ fn monitoring_persists_before_emitting_and_restart_does_not_repeat_a_fault() -> 
     assert_eq!(check.active_faults["brother"], vec!["cover-open"]);
     drop(restarted);
     worker.join().expect("worker")?;
-    fs::remove_dir_all(temp)?;
     Ok(())
 }

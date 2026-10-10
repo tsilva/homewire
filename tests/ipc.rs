@@ -14,30 +14,26 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "support/mod.rs"]
+mod support;
 struct Fixture {
-    dir: PathBuf,
+    dir: support::Directory,
     daemon: Option<Child>,
 }
 impl Fixture {
     fn new() -> Result<Self> {
-        let dir = std::env::temp_dir().join(format!("homewire-ipc-{}-{}", std::process::id(), {
-            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        }));
-        fs::create_dir(&dir)?;
-        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
-        fs::write(dir.join("awair.json"), "{\"host\":\"192.0.2.1\"}")?;
-        fs::set_permissions(dir.join("awair.json"), fs::Permissions::from_mode(0o600))?;
+        let dir = support::Directory::new()?;
+        dir.write("awair.json", b"{\"host\":\"192.0.2.1\"}")?;
         Ok(Self { dir, daemon: None })
     }
     fn socket(&self) -> PathBuf {
-        self.dir.join("homewire.sock")
+        self.dir.0.join("homewire.sock")
     }
     fn start(&mut self) -> Result<()> {
         self.daemon = Some(
             Command::new(env!("CARGO_BIN_EXE_homewire"))
                 .arg("--awair")
-                .arg(self.dir.join("awair.json"))
+                .arg(self.dir.0.join("awair.json"))
                 .arg("daemon")
                 .arg(self.socket())
                 .stdin(Stdio::null())
@@ -66,7 +62,6 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         self.stop();
-        let _ = fs::remove_dir_all(&self.dir);
     }
 }
 fn list(f: &Fixture) -> Result<Value> {
@@ -139,9 +134,9 @@ fn malformed_and_disconnected_clients_do_not_stop_owner() -> Result<()> {
 #[test]
 fn private_parent_and_non_socket_replacement_are_enforced() -> Result<()> {
     let f = Fixture::new()?;
-    fs::set_permissions(&f.dir, fs::Permissions::from_mode(0o755))?;
+    fs::set_permissions(&f.dir.0, fs::Permissions::from_mode(0o755))?;
     assert!(ipc::Server::bind(&f.socket()).is_err());
-    fs::set_permissions(&f.dir, fs::Permissions::from_mode(0o700))?;
+    fs::set_permissions(&f.dir.0, fs::Permissions::from_mode(0o700))?;
     fs::write(f.socket(), "keep")?;
     assert!(ipc::Server::bind(&f.socket()).is_err());
     assert_eq!(fs::read_to_string(f.socket())?, "keep");
@@ -180,7 +175,7 @@ fn daemon_background_jobs_run_without_an_mcp_client() -> Result<()> {
     let endpoint = std::net::TcpListener::bind("127.0.0.1:0")?;
     let address = endpoint.local_addr()?;
     drop(endpoint);
-    let config = f.dir.join("printers.json");
+    let config = f.dir.0.join("printers.json");
     fs::write(&config,json!({"printers":[{"name":"mock","host":"192.0.2.1","connect":address.to_string()}],"poll_seconds":5,"timeout_seconds":1}).to_string())?;
     fs::set_permissions(&config, fs::Permissions::from_mode(0o600))?;
     let mut child = Command::new(env!("CARGO_BIN_EXE_homewire"))

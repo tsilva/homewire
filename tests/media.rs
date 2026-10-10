@@ -14,7 +14,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-#[path = "support/media.rs"]
+#[path = "support/mod.rs"]
 mod support;
 use aes::Aes128;
 use base64::{Engine, engine::general_purpose::STANDARD};

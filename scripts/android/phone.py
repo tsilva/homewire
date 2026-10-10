@@ -11,6 +11,7 @@ import subprocess
 import tomllib
 import deployment
 import configuration
+import catalog
 
 _LAYOUT = deployment.layout()
 CE_HOMEWIRE = _LAYOUT['ce']
@@ -19,11 +20,7 @@ DE_HOMEWIRE = _LAYOUT['de']
 PREFIX = _LAYOUT['prefix']
 ZCONFIG = _LAYOUT['zeroclaw']
 SERVICE = PREFIX + '/var/service/homewire'
-FILES = ('home.json', 'meaco.json', 'printers.json', 'awair.json', 'lights.json', 'plugs.json',
-         'samsung.json', 'digi.json', 'tv.json', 'digi-cert.pem', 'digi-key.pem',
-         'brother.json','cast.json','dlna.json','alerts.json','history.json',
-         'mobile.json','weather.json','shopping.json','radio.json','speech.json','api.json',
-         'api-cert.pem','api-key.pem')
+FILES = catalog.FILES
 
 
 def q(value):
@@ -127,7 +124,7 @@ def deployment_secrets(value, name, generated, field=(), depth=0):
 def validate_configs(directory):
     directory = Path(directory)
     unified = directory if directory.is_file() else directory / 'home.json'
-    names = ('home.json', 'digi-cert.pem', 'digi-key.pem', 'api-cert.pem', 'api-key.pem') if unified.is_file() else FILES
+    names = ('home.json',) + catalog.CERTIFICATES if unified.is_file() else FILES
     directory = unified.parent if unified.is_file() else directory
     configs = []
     generated = {}
@@ -190,21 +187,7 @@ set --
 if [ -f "$root/config/home.json" ]; then
   set -- --config "$root/config/home.json"
 else
-for pair in 'meaco:config' 'printers:printers' 'awair:awair' 'lights:lights'; do
-  file=${pair%:*}; flag=${pair#*:}
-  [ ! -f "$root/config/$file.json" ] || set -- "$@" "--$flag" "$root/config/$file.json"
-done
-if [ -f "$root/config/tv.json" ]; then
-  set -- "$@" --tv "$root/config/tv.json"
-else
-  for file in plugs samsung digi; do
-    [ ! -f "$root/config/$file.json" ] || set -- "$@" "--$file" "$root/config/$file.json"
-  done
-fi
-for family in brother cast dlna alerts history mobile weather shopping radio speech; do
-  [ ! -f "$root/config/$family.json" ] || set -- "$@" --adapter "$family=$root/config/$family.json"
-done
-[ ! -f "$root/config/api.json" ] || set -- "$@" --api "$root/config/api.json"
+__LEGACY_ARGUMENTS__
 fi
 while IFS= read -r flag; do
   [ -z "$flag" ] || set -- "$@" "$flag"
@@ -212,7 +195,7 @@ done < "$root/service.args"
 exec "$root/current/homewire" "$@" daemon "$root/run/homewire.sock"
 '''
     root = root or HOMEWIRE
-    return script.replace('__ROOT__',q(root)).replace('__SHELL__',PREFIX+'/bin/sh' if root == CE_HOMEWIRE else '/system/bin/sh')
+    return script.replace('__LEGACY_ARGUMENTS__', catalog.legacy_arguments()).replace('__ROOT__',q(root)).replace('__SHELL__',PREFIX+'/bin/sh' if root == CE_HOMEWIRE else '/system/bin/sh')
 
 
 def service_flags(existing, allow_control=None):

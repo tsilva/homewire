@@ -610,3 +610,75 @@ mod tests {
         Ok(())
     }
 }
+
+/// Optional deadline retained by each monitored adapter. Attempts advance before
+/// reads, so failures wait for the next poll rather than spinning or replaying.
+#[derive(Default)]
+pub(crate) struct Background {
+    pub next: Option<std::time::Instant>,
+}
+impl Background {
+    pub fn enable(&mut self, seconds: u64) {
+        self.next = Some(std::time::Instant::now() + std::time::Duration::from_secs(seconds));
+    }
+}
+pub(crate) fn background_poll(
+    device: &mut impl crate::device::Monitored,
+    label: &str,
+) -> Result<()> {
+    let check = device.watch()?;
+    for event in check.events {
+        diagnostic(format_args!("{label} event"), &event)?;
+    }
+    for unavailable in check.unavailable {
+        diagnostic(format_args!("{label} unavailable"), &unavailable)?;
+    }
+    Ok(())
+}
+pub(crate) fn reconcile_monitor(
+    device: &impl crate::device::Monitored,
+    namespace: &str,
+    alerts: &mut crate::alerts::Manager,
+    now: i64,
+) -> Result<()> {
+    let mut failure = None;
+    device.active_faults(&mut |name, faults| {
+        if failure.is_none() {
+            failure = alerts.reconcile(namespace, name, faults, now).err();
+        }
+    });
+    failure.map_or(Ok(()), Err)
+}
+pub fn diagnostic(label: impl std::fmt::Display, value: &impl Serialize) -> Result<()> {
+    use std::io::Write;
+    let mut stderr = std::io::stderr().lock();
+    write!(stderr, "{label}: ")?;
+    crate::mcp::write_message(&mut stderr, value)
+}
+
+// Each monitored adapter keeps its own deadline and uses the same read-only hooks.
+macro_rules! monitored_background {
+    ($namespace:literal, $label:literal) => {
+        fn enable_monitoring(&mut self) -> Result<()> {
+            self.background
+                .enable(crate::device::Monitored::poll_seconds(self));
+            Ok(())
+        }
+        fn next_background(&self) -> Option<std::time::Instant> {
+            self.background.next
+        }
+        fn background_tick(&mut self) -> Result<()> {
+            self.background
+                .enable(crate::device::Monitored::poll_seconds(self));
+            crate::fault::background_poll(self, $label)
+        }
+        fn reconcile_alerts(&self, alerts: &mut crate::alerts::Manager, now: i64) -> Result<()> {
+            if self.background.next.is_some() {
+                crate::fault::reconcile_monitor(self, $namespace, alerts, now)
+            } else {
+                Ok(())
+            }
+        }
+    };
+}
+pub(crate) use monitored_background;

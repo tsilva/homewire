@@ -108,6 +108,7 @@ impl Device for NetworkDevice {
 }
 
 impl Adapter for Manager {
+    crate::fault::monitored_background!("meaco", "Meaco");
     const SUPPORT: crate::entity::Support = crate::entity::Support::READ
         .union(crate::entity::Support::ROUTINES)
         .union(crate::entity::Support::CONFIGURE);
@@ -205,6 +206,7 @@ impl Adapter for Manager {
 }
 
 pub struct Manager {
+    background: crate::fault::Background,
     device: NetworkDevice,
     memory: Memory,
     store: Store,
@@ -260,6 +262,7 @@ impl Manager {
         let memory = store.read()?;
         let monitor = crate::fault::Monitor::from_memory(memory.faults.clone());
         Ok(Self {
+            background: crate::fault::Background::default(),
             device: NetworkDevice {
                 client: Client::new(&config, connect)?,
                 settle_seconds: config.settle_seconds,

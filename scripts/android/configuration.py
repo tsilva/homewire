@@ -8,9 +8,7 @@ import shutil
 import time
 
 LIMIT = 65536
-ADAPTERS = ('meaco', 'printers', 'awair', 'lights', 'plugs', 'samsung', 'digi',
-            'brother', 'cast', 'dlna')
-SERVICES = ('alerts', 'history', 'mobile', 'weather', 'shopping', 'radio', 'speech', 'api')
+from catalog import ADAPTERS, SERVICES
 
 
 def validate(value):
@@ -119,6 +117,10 @@ def migrate(directory, output):
                 raise ValueError('TV child paths must match imported adapter configs')
         value['routines']['tv'] = routine
         imported.append(tv)
+    computer = directory / 'computer-routine.json'
+    if computer.is_file():
+        value['routines']['computer'] = load(computer)
+        imported.append(computer)
     profile = directory / 'deployment.json'
     if profile.is_file():
         import deployment

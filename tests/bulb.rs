@@ -1,3 +1,5 @@
+#[path = "support/mod.rs"]
+mod support;
 #[path = "support/tapo.rs"]
 mod tapo;
 use homewire::{
@@ -13,7 +15,6 @@ use std::{
     io::Write,
     net::{SocketAddr, TcpListener},
     path::PathBuf,
-    sync::atomic::{AtomicUsize, Ordering},
     thread,
     time::Duration,
 };
@@ -197,31 +198,18 @@ fn unknown_faults_remain_unknown_and_wrong_devices_are_rejected() -> Result<()> 
 }
 
 struct PrivateConfig {
-    dir: PathBuf,
+    _directory: support::Directory,
     path: PathBuf,
 }
 impl PrivateConfig {
     fn new(connect: Option<SocketAddr>) -> Result<Self> {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "homewire-bulbs-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir(&dir)?;
-        let path = dir.join("bulbs.json");
-        fs::write(&path,json!({"bulbs":[{"name":"bulb_1","host":"192.0.2.20","device_id":ID,"auth_hash":"00".repeat(32),"connect":connect}],"settle_seconds":0}).to_string())?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
-        }
-        Ok(Self { dir, path })
-    }
-}
-impl Drop for PrivateConfig {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
+        let directory = support::Directory::new()?;
+        let path = directory.0.join("bulbs.json");
+        support::Directory::write_private(&path,json!({"bulbs":[{"name":"bulb_1","host":"192.0.2.20","device_id":ID,"auth_hash":"00".repeat(32),"connect":connect}],"settle_seconds":0}).to_string().as_bytes())?;
+        Ok(Self {
+            _directory: directory,
+            path,
+        })
     }
 }
 #[test]
@@ -279,7 +267,7 @@ fn config_keeps_secrets_private_and_enforces_bounds() -> Result<()> {
 #[test]
 fn overheating_debounces_persists_and_unknown_readings_never_clear_faults() -> Result<()> {
     let file = PrivateConfig::new(None)?;
-    let state = file.dir.join("bulbs.state.json");
+    let state = file._directory.0.join("bulbs.state.json");
     let identity = "192.0.2.20:80:syntheticL430C1";
     let mut m = fault::Monitor::default();
     let hot = vec!["overheated".into()];
@@ -659,7 +647,8 @@ fn l900_fault_monitor_retains_reported_overheating_and_deduplicates() -> Result<
             .faults,
         hot
     );
-    m.monitor.save(&file.dir.join("bulbs.state.json"))?;
+    m.monitor
+        .save(&file._directory.0.join("bulbs.state.json"))?;
     drop(m);
     let mut m = Manager::open(&file.path)?;
     assert_eq!(m.monitor.active_faults()["bulb_1"], hot);

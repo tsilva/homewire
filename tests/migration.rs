@@ -7,7 +7,7 @@ use homewire::{
 };
 use serde_json::json;
 mod support {
-    include!("support/media.rs");
+    include!("support/mod.rs");
 }
 use std::{
     io::{BufRead, BufReader, Read, Write},

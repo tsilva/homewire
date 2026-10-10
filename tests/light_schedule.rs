@@ -6,11 +6,7 @@ use homewire::{
     solar,
 };
 use serde_json::json;
-use std::{
-    fs,
-    path::PathBuf,
-    sync::atomic::{AtomicUsize, Ordering},
-};
+use std::path::PathBuf;
 const POINTS: &[(u16, u8, u16)] = &[
     (360, 10, 2700),
     (480, 80, 5000),
@@ -36,25 +32,15 @@ fn config() -> Config {
         outside_curve: (10, 2700),
     }
 }
-struct Temp(PathBuf);
+#[path = "support/mod.rs"]
+mod support;
+struct Temp(support::Directory);
 impl Temp {
     fn new() -> Self {
-        static N: AtomicUsize = AtomicUsize::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "homewire-light-schedule-{}-{}",
-            std::process::id(),
-            N.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir(&path).expect("valid fixture or expected schedule action");
-        Self(path)
+        Self(support::Directory::new().expect("fixture directory"))
     }
     fn state(&self) -> PathBuf {
-        self.0.join("state.json")
-    }
-}
-impl Drop for Temp {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+        self.0.0.join("state.json")
     }
 }
 struct Fake {
@@ -318,7 +304,7 @@ fn failed_sunset_read_or_write_is_retained_and_not_retried() -> Result<()> {
 fn persistence_failure_blocks_controls_and_same_minute_failure_survives_restart() -> Result<()> {
     let t = Temp::new();
     let now = at("2026-10-07T10:00:00Z");
-    let mut c = Controller::open(config(), &t.0.join("missing/state.json"), "strip1", now)?;
+    let mut c = Controller::open(config(), &t.0.0.join("missing/state.json"), "strip1", now)?;
     let mut d = Fake::new(true);
     assert!(c.tick(now, &mut d).is_err());
     assert_eq!(d.sets, 0);
@@ -432,7 +418,7 @@ fn followers_have_independent_durable_attempts_and_share_local_curve() -> Result
     let mut config = config();
     config.brightness_lights = vec!["lamp_a".into(), "lamp_b".into()];
     let mut a = Controller::open_brightness(config.clone(), "lamp_a", &t.state(), "a", now)?;
-    let b_path = t.0.join("b.state.json");
+    let b_path = t.0.0.join("b.state.json");
     let mut b = Controller::open_brightness(config.clone(), "lamp_b", &b_path, "b", now)?;
     let mut da = Fake::new(true);
     let mut db = Fake::new(true);

@@ -105,7 +105,7 @@ fn main() -> Result<()> {
             .as_array()
             .expect("tools")
             .len(),
-        7
+        9
     );
     assert!(
         standard_allocations < list_allocations,

@@ -54,24 +54,24 @@ For another device, follow its setup guide below. Add only the sections you need
 from [the unified configuration example](examples/home.json); replace all
 credential, address and location placeholders. There is no automatic discovery.
 Keep real settings in ignored `.local/` files and credentials in
-[Infisical references](docs/reference.md#infisical-configuration-references).
-See [configuration and migration](docs/reference.md#unified-configuration) for
+[Infisical references](docs/configuration.md#infisical-configuration-references).
+See [configuration and migration](docs/configuration.md#unified-configuration) for
 schemas, state files and legacy installations.
 
 ## Devices and routines
 
 | Device / setup guide | What you can do |
 | --- | --- |
-| [Meaco Arete Two](docs/reference.md#configuration) | Read status; preview and run configured day, night and off routines |
-| [Brother HL-L2350DW / HP DeskJet 3630](docs/reference.md#printers) | Read status and supplies; monitor confirmed faults and low-supply warnings |
-| [Awair Element](docs/reference.md#awair-element) | Read fresh temperature, humidity, CO₂, TVOC, PM2.5 and score |
-| [Tapo L430C / L900](docs/reference.md#l900-led-strip) | Set power, brightness, colour and white temperature; monitor overheating |
-| [Tapo P100 / P110](docs/reference.md#tapo-p100p110-plugs) | Control relays; read P110 energy and monitor overloads |
-| [Samsung UE40H6200 / DIGI R2A](docs/reference.md#samsung-tv-and-digi-r2a) | Use paired remotes and coordinated shared-outlet TV routines |
-| [Computers](docs/reference.md#computer-shutdown-service) | Wake configured targets; use authenticated shutdown and optional metered outlet cutoff |
+| [Meaco Arete Two](docs/configuration.md#configuration) | Read status; preview and run configured day, night and off routines |
+| [Brother HL-L2350DW / HP DeskJet 3630](docs/devices.md#printers) | Read status and supplies; monitor confirmed faults and low-supply warnings |
+| [Awair Element](docs/devices.md#awair-element) | Read fresh temperature, humidity, CO₂, TVOC, PM2.5 and score |
+| [Tapo L430C / L900](docs/devices.md#l900-led-strip) | Set power, brightness, colour and white temperature; monitor overheating |
+| [Tapo P100 / P110](docs/devices.md#tapo-p100p110-plugs) | Control relays; read P110 energy and monitor overloads |
+| [Samsung UE40H6200 / DIGI R2A](docs/devices.md#samsung-tv-and-digi-r2a) | Use paired remotes and coordinated shared-outlet TV routines |
+| [Computers](docs/devices.md#computer-shutdown-service) | Wake configured targets; use authenticated shutdown and optional metered outlet cutoff |
 
 Controls check identity where supported and verify reported outcomes; uncertain
-results stop execution. Generic [Wake-on-LAN](docs/reference.md#wake-on-lan)
+results stop execution. Generic [Wake-on-LAN](docs/devices.md#wake-on-lan)
 cannot confirm a successful wake, and Samsung shutdown may remain unverified.
 Each adapter guide explains its prerequisites and limits.
 
@@ -84,22 +84,22 @@ target/release/homewire --config .local/home.json serve
 ```
 
 Only configured capabilities appear. Add `--allow-control` to expose write tools.
-[MCP and ZeroClaw setup](docs/reference.md#mcp-and-zeroclaw) covers discovery,
+[MCP and ZeroClaw setup](docs/automation.md#mcp-and-zeroclaw) covers discovery,
 fresh reads, routine previews and execution. For persistent ownership across
-client sessions, use [daemon and bridge](docs/reference.md#persistent-daemon-and-mcp-bridge).
+client sessions, use [daemon and bridge](docs/automation.md#persistent-daemon-and-mcp-bridge).
 
-[Schedules](docs/reference.md#scheduling) and
-[L900 curves / sunset rules](docs/reference.md#l900-scheduling) are opt-in.
+[Schedules](docs/automation.md#scheduling) and
+[L900 curves / sunset rules](docs/devices.md#l900-scheduling) are opt-in.
 **Disable corresponding Home Assistant rules before enabling replacement controls.**
 Keep one configuration path per device; Homewire's locks cannot coordinate with
 manufacturer apps or other controllers. Use a trusted LAN.
 
 ## Further reading
 
-- [CLI usage](docs/reference.md#command-line-usage): status, plans and explicit controls.
-- [Household services](docs/reference.md#household-services): Cast/DLNA playback, alerts, history, weather and shopping.
-- [Android deployment](docs/reference.md#android-deployment): Termux installation, supervision, verification and rollback.
-- [Dashboard and native companion](docs/reference.md#native-android-companion): HTTPS controls, telemetry and notifications.
-- [Implementation and development](docs/reference.md#implementation-and-validation): adapter design, checks and measured memory limits.
+- [CLI usage](docs/configuration.md#command-line-usage): status, plans and explicit controls.
+- [Household services](docs/services.md#household-services): Cast/DLNA playback, alerts, history, weather and shopping.
+- [Android deployment](docs/android.md#android-deployment): Termux installation, supervision, verification and rollback.
+- [Dashboard and native companion](docs/services.md#native-android-companion): HTTPS controls, telemetry and notifications.
+- [Implementation and development](docs/development.md#implementation-and-validation): adapter design, checks and measured memory limits.
 
 [MIT license](LICENSE)

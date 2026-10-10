@@ -5,11 +5,8 @@ use homewire::{
     shopping,
 };
 use serde_json::{Value, json};
-use std::{
-    fs,
-    os::unix::fs::PermissionsExt,
-    sync::atomic::{AtomicUsize, Ordering},
-};
+#[path = "support/mod.rs"]
+mod support;
 
 fn scoped(devices: &mut Devices, method: &str, params: Value) -> Value {
     api::dispatch(
@@ -24,17 +21,8 @@ fn scoped(devices: &mut Devices, method: &str, params: Value) -> Value {
 
 #[test]
 fn agent_scope_denies_mutations_and_api_role_forgery_before_dispatch() {
-    static NEXT: AtomicUsize = AtomicUsize::new(0);
-    let path = std::env::temp_dir().join(format!(
-        "homewire-agent-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir(&path).expect("directory");
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).expect("permissions");
-    let cfg = path.join("shopping.json");
-    fs::write(&cfg, b"{}").expect("config");
-    fs::set_permissions(&cfg, fs::Permissions::from_mode(0o600)).expect("permissions");
+    let directory = support::Directory::new().expect("directory");
+    let cfg = directory.write("shopping.json", b"{}").expect("config");
     let mut devices = Devices {
         shopping: Some(shopping::Manager::open(&cfg).expect("manager")),
         ..Devices::default()
@@ -69,7 +57,6 @@ fn agent_scope_denies_mutations_and_api_role_forgery_before_dispatch() {
         json!([])
     );
     drop(devices);
-    fs::remove_dir_all(path).expect("cleanup");
 }
 
 #[test]

@@ -2,38 +2,17 @@ use homewire::{
     Result,
     config::{Config, Store},
 };
-use std::{
-    fs,
-    path::PathBuf,
-    sync::atomic::{AtomicUsize, Ordering},
-};
+use std::{fs, path::PathBuf};
 
-static NEXT: AtomicUsize = AtomicUsize::new(0);
-struct Temp(PathBuf);
+#[path = "support/mod.rs"]
+mod support;
+struct Temp(support::Directory);
 impl Temp {
     fn new() -> Result<Self> {
-        let path = std::env::temp_dir().join(format!(
-            "homewire-test-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir(&path)?;
-        Ok(Self(path))
+        Ok(Self(support::Directory::new()?))
     }
     fn config(&self) -> Result<PathBuf> {
-        let path = self.0.join("device.json");
-        fs::write(&path, br#"{"device_id":"test-device","host":"192.0.2.1","local_key":"0123456789abcdef","protocol_version":"3.3"}"#)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
-        }
-        Ok(path)
-    }
-}
-impl Drop for Temp {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+        self.0.write("device.json", br#"{"device_id":"test-device","host":"192.0.2.1","local_key":"0123456789abcdef","protocol_version":"3.3"}"#)
     }
 }
 

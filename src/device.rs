@@ -33,6 +33,9 @@ pub trait Adapter: Sized {
     fn options(&mut self, _index: usize) -> Result<Value> {
         Err(error("This adapter has no additional live options"))
     }
+    fn enable_monitoring(&mut self) -> Result<()> {
+        Err(error("This adapter has no fault monitoring"))
+    }
     /// Optional autonomous read job. Deadlines stay with the adapter; no
     /// scheduler registry, cached JSON or polling thread is required.
     fn next_background(&self) -> Option<std::time::Instant> {
@@ -237,6 +240,12 @@ macro_rules! static_adapters {
             }
         }
         impl Devices {
+            pub const CONFIG_FAMILIES: &'static [(&'static str, &'static str)] = &[
+                $((stringify!($field), <$adapter as Adapter>::CONFIG_SECTION),)+
+            ];
+            pub fn configured(&self, family: &str) -> bool {
+                match family { $(stringify!($field) => self.$field.is_some() $(|| self.$owner.is_some())?,)+ _ => false }
+            }
             pub fn config_section(family: &str) -> Option<&'static str> {
                 match family {
                     $(stringify!($field) => Some(<$adapter as Adapter>::CONFIG_SECTION),)+
@@ -252,6 +261,12 @@ macro_rules! static_adapters {
                     _ => return Err(error("Unknown static adapter family")),
                 }
                 Ok(())
+            }
+            pub fn enable_monitoring(&mut self, family: &str) -> Result<()> {
+                match family {
+                    $(stringify!($field) => self.$field().ok_or_else(|| error("Unconfigured monitor adapter"))?.enable_monitoring(),)+
+                    _ => Err(error("Unknown monitor family")),
+                }
             }
             pub fn next_background(&self) -> Option<std::time::Instant> {
                 [$(self.$field.as_ref().and_then(Adapter::next_background),)+].into_iter().flatten().min()

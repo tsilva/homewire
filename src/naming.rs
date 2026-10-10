@@ -48,3 +48,20 @@ pub fn light_output(mut value: Value) -> Value {
     }
     value
 }
+
+pub const CLI_ALIASES: &[(&str, &str)] = &[
+    ("lights", "bulbs"),
+    ("light-status", "bulb-status"),
+    ("light-set", "bulb-set"),
+    ("light-check", "bulb-check"),
+    ("watch-lights", "watch-bulbs"),
+];
+pub fn canonical_cli(name: &str) -> &str {
+    CLI_ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == name)
+        .map_or(name, |(_, canonical)| canonical)
+}
+pub fn canonical_family(name: &str) -> &str {
+    if name == "lights" { "bulbs" } else { name }
+}
