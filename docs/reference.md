@@ -1,8 +1,9 @@
 # Homewire reference
 
 See the [README](../README.md) for installation and first use. This reference
-covers configuration, verified control behavior, agent integration, scheduling,
-printer monitoring, Awair measurements, bulb controls, and implementation limits.
+covers configuration, CLI usage, verified control behavior, agent integration,
+scheduling, device monitoring, household services, deployment and implementation
+limits.
 
 ## Unified configuration
 
@@ -108,6 +109,42 @@ as `meaco.state.json`; `meaco.json.lock` serializes ownership. Use the same conf
 path for all clients of one device. A running server holds the lock; access it
 through MCP instead of starting a concurrent CLI instance. This lock cannot
 coordinate with Home Assistant or the manufacturer's app.
+
+## Command-line usage
+
+Run from the repository root with your private unified configuration prepared.
+Only commands for configured adapters are available:
+
+```sh
+target/release/homewire --help
+target/release/homewire --config .local/home.json status
+target/release/homewire --config .local/home.json plan night
+target/release/homewire --config .local/home.json apply day
+target/release/homewire --config .local/home.json apply night
+target/release/homewire --config .local/home.json apply off
+target/release/homewire --config .local/home.json printer-status brother
+target/release/homewire --config .local/home.json awair-status
+target/release/homewire --config .local/home.json light-status led_strip
+target/release/homewire --config .local/home.json light-set led_strip '{"power":true,"brightness_percent":10}'
+target/release/homewire --config .local/home.json plug-status metered_outlet
+target/release/homewire --config .local/home.json plug-set relay off
+target/release/homewire --config .local/home.json tv-status
+```
+
+`status`, `plan`, and `apply` address Meaco; `plan` queries live state without
+controls. `apply`, `light-set`, and `plug-set` change devices. CLI controls are
+explicit commands; `--allow-control` gates MCP writes. Results are JSON on stdout;
+failures go to stderr with a nonzero exit code. Meaco sleep is a toggle and is
+never automatically resent. Keep the Meaco settling delay at 20 seconds.
+
+Use `watch-printers`, `watch-lights` or `watch-plugs` for continuous fault/recovery
+events. Monitoring retains confirmed faults across restarts; unknown readings
+never prove recovery. [The optional alert ledger](#alerts-history-and-convenience-tools)
+adds HTTPS/Telegram delivery and companion notifications with persisted receipts.
+
+Legacy per-family examples remain below; do not combine their configuration
+flags with a unified `--config`. Use one config path per device across clients;
+access an existing owner through [MCP or bridge](#persistent-daemon-and-mcp-bridge).
 
 ## Device controls
 
@@ -1052,6 +1089,26 @@ implemented yet. The MCP server exits on stdin EOF; its MCP client must keep
 stdin open. Supervise the standalone scheduler when running without an MCP client.
 
 ## Implementation and validation
+
+Run the required Rust checks from the repository root:
+
+```sh
+cargo fmt --check
+cargo test --locked
+cargo clippy --locked --all-targets -- -D warnings
+```
+
+Android deployment changes additionally require:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/android -p 'test_*.py'
+shellcheck scripts/android/build.sh scripts/android/sandbox/build.sh scripts/android/sandbox/build-identity.sh
+```
+
+Sandbox changes also build the native guard and run its negative probe on the
+target. GitHub Actions runs the Rust checks and release build with Rust 1.95.0
+on Linux. Tests use synthetic credentials and simulated devices; they do not
+replace deliberate physical-device acceptance checks.
 
 - `device`: standard adapter/monitoring interfaces, command definitions and one
   compile-time catalog generating concrete storage, discovery and dispatch.
