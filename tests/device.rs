@@ -1,31 +1,17 @@
+#[path = "support/mod.rs"]
+mod support;
 use homewire::{
     Result, awair, bulb,
     device::{Adapter, Devices, Selection},
     meaco, plug, printer,
 };
 use serde_json::{Value, json};
-use std::{
-    collections::BTreeSet,
-    fs,
-    path::PathBuf,
-    sync::atomic::{AtomicUsize, Ordering},
-};
+use std::{collections::BTreeSet, fs, path::PathBuf};
 
-struct Configs(PathBuf);
+struct Configs(support::Directory);
 impl Configs {
     fn new() -> Result<Self> {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let nonce = NEXT.fetch_add(1, Ordering::Relaxed);
-        let path =
-            std::env::temp_dir().join(format!("homewire-catalog-{}-{nonce}", std::process::id()));
-        fs::create_dir(&path)?;
-        // Construct the cleanup guard only after this fixture owns the directory.
-        let root = Self(path);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&root.0, fs::Permissions::from_mode(0o700))?;
-        }
+        let root = Self(support::Directory::new()?);
         for (name, source) in [
             ("meaco", include_str!("../examples/meaco.json")),
             ("bulbs", include_str!("../examples/lights.json")),
@@ -53,29 +39,17 @@ impl Configs {
                     }
                 }
             }
-            let path = root.path(name);
-            fs::write(&path, value.to_string())?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-            }
+            root.0.config(&format!("{name}.json"), &value)?;
         }
         Ok(root)
     }
     fn path(&self, name: &str) -> PathBuf {
-        self.0.join(format!("{name}.json"))
+        self.0.0.join(format!("{name}.json"))
     }
     fn open<A: Adapter>(&self, name: &str) -> Result<A> {
         A::open(&self.path(name))
     }
 }
-impl Drop for Configs {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
 #[test]
 fn catalog_has_unique_commands_and_resolves_each_adapters_own_metadata() {
     let mut names = BTreeSet::new();
@@ -227,5 +201,31 @@ fn missing_presets_expose_only_off_and_never_query_for_unconfigured_runs() -> Re
             .to_string()
             .contains("Unknown configured routine")
     );
+    Ok(())
+}
+
+#[test]
+fn android_inventory_matches_static_runtime_families() -> Result<()> {
+    let rows: Vec<Value> = serde_json::from_str(include_str!("../scripts/android/catalog.json"))?;
+    let mut actual = BTreeSet::new();
+    for row in rows {
+        let name = row["runtime"]
+            .as_str()
+            .or_else(|| row["name"].as_str())
+            .expect("family");
+        let section = row["section"].as_str().expect("section");
+        assert!(
+            actual.insert((name.to_owned(), section.to_owned())),
+            "duplicate family"
+        );
+    }
+    // API is a frontend rather than an Adapter; TV has its own composition schema.
+    let mut expected: BTreeSet<_> = Devices::CONFIG_FAMILIES
+        .iter()
+        .filter(|(name, _)| *name != "tv")
+        .map(|(name, section)| (name.to_string(), section.to_string()))
+        .collect();
+    expected.insert(("api".into(), "services".into()));
+    assert_eq!(actual, expected);
     Ok(())
 }

@@ -1,3 +1,5 @@
+#[path = "support/mod.rs"]
+mod support;
 #[path = "support/tapo.rs"]
 mod tapo;
 use homewire::{
@@ -12,7 +14,6 @@ use std::{
     net::SocketAddr,
     path::PathBuf,
     process::{Command, Stdio},
-    sync::atomic::{AtomicUsize, Ordering},
     time::{Duration, Instant},
 };
 const ID: &str = "syntheticPlug1";
@@ -74,36 +75,22 @@ impl Device for Fake {
     }
 }
 struct Private {
-    dir: PathBuf,
+    _directory: support::Directory,
     path: PathBuf,
 }
 impl Private {
     fn new(model: Model, connect: Option<SocketAddr>) -> Result<Self> {
-        static N: AtomicUsize = AtomicUsize::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "homewire-plug-{}-{}",
-            std::process::id(),
-            N.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir(&dir)?;
-        let path = dir.join("plugs.json");
+        let directory = support::Directory::new()?;
+        let path = directory.0.join("plugs.json");
         let config = json!({"plugs":[{"name":"plug1","model":model,"host":"192.0.2.20","device_id":ID,"auth_hash":"00".repeat(32),"connect":connect}],"settle_seconds":0});
         Self::write(&path, &config)?;
-        Ok(Self { dir, path })
+        Ok(Self {
+            _directory: directory,
+            path,
+        })
     }
     fn write(path: &std::path::Path, value: &Value) -> Result<()> {
-        fs::write(path, value.to_string())?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-        }
-        Ok(())
-    }
-}
-impl Drop for Private {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
+        support::Directory::write_private(path, value.to_string().as_bytes())
     }
 }
 #[test]

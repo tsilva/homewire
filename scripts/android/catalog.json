@@ -1,0 +1,22 @@
+[
+  {"name": "meaco", "section": "adapters"},
+  {"name": "printers", "section": "adapters"},
+  {"name": "awair", "section": "adapters"},
+  {"name": "lights", "section": "adapters", "runtime": "bulbs"},
+  {"name": "plugs", "section": "adapters"},
+  {"name": "samsung", "section": "adapters"},
+  {"name": "digi", "section": "adapters"},
+  {"name": "brother", "section": "adapters"},
+  {"name": "cast", "section": "adapters"},
+  {"name": "dlna", "section": "adapters"},
+  {"name": "wol", "section": "adapters"},
+  {"name": "computer", "section": "adapters"},
+  {"name": "alerts", "section": "services"},
+  {"name": "history", "section": "services"},
+  {"name": "mobile", "section": "services"},
+  {"name": "weather", "section": "services"},
+  {"name": "shopping", "section": "services"},
+  {"name": "radio", "section": "services"},
+  {"name": "speech", "section": "services"},
+  {"name": "api", "section": "services"}
+]

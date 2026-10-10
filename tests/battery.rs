@@ -4,7 +4,7 @@ use std::{
     fs, thread,
     time::{Duration, Instant},
 };
-#[path = "support/media.rs"]
+#[path = "support/mod.rs"]
 #[allow(dead_code)]
 mod support;
 

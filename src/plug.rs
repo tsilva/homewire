@@ -314,6 +314,7 @@ pub fn apply(device: &mut impl Device, power: bool) -> Result<Applied> {
     })
 }
 pub struct Manager {
+    background: crate::fault::Background,
     pub config: Config,
     pub monitor: fault::Monitor,
     store: fault::Store,
@@ -333,6 +334,7 @@ impl Manager {
         let config = Config::from_source(source)?;
         let (store, monitor) = fault::Store::open(path, &config.plugs)?;
         Ok(Self {
+            background: crate::fault::Background::default(),
             config,
             monitor,
             store,
@@ -404,20 +406,7 @@ impl fault::Target for Endpoint {
 }
 
 impl Adapter for Manager {
-    fn authorize_control(
-        &self,
-        command: crate::entity::Command,
-        args: &Value,
-        maintenance: bool,
-    ) -> Result<()> {
-        if matches!(command, crate::entity::Command::Configure)
-            && args["settings"]["protection_w"] == 0
-            && !maintenance
-        {
-            return Err(error("Disabling outlet protection requires --maintenance"));
-        }
-        Ok(())
-    }
+    crate::fault::monitored_background!("plugs", "Plug");
     const SUPPORT: crate::entity::Support =
         crate::entity::Support::SWITCH.union(crate::entity::Support::CONFIGURE);
     fn entities<'a>(&'a self, visit: &mut impl FnMut(crate::entity::Entity<'a>)) {

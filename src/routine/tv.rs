@@ -279,6 +279,16 @@ impl Manager {
     }
 }
 impl Adapter for Manager {
+    fn next_background(&self) -> Option<Instant> {
+        self.equipment.plugs.next_background()
+    }
+    fn background_tick(&mut self) -> Result<()> {
+        self.equipment.plugs.background_tick()
+    }
+    fn reconcile_alerts(&self, alerts: &mut crate::alerts::Manager, now: i64) -> Result<()> {
+        self.equipment.plugs.reconcile_alerts(alerts, now)
+    }
+
     const CONFIG_SECTION: &'static str = "routines";
     const SUPPORT: crate::entity::Support = crate::entity::Support::ROUTINES;
     fn entities<'a>(&'a self, _visit: &mut impl FnMut(crate::entity::Entity<'a>)) {}

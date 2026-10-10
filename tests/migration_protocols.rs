@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 mod support {
-    include!("support/media.rs");
+    include!("support/mod.rs");
 }
 fn request(stream: &mut impl Read) -> Result<(String, Vec<u8>)> {
     let mut r = BufReader::new(stream);

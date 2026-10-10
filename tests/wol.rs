@@ -6,7 +6,7 @@ use homewire::{
 };
 use serde_json::{Value, json};
 use std::{net::UdpSocket, time::Duration};
-#[path = "support/media.rs"]
+#[path = "support/mod.rs"]
 #[allow(dead_code)]
 mod support;
 

@@ -10,7 +10,6 @@ use std::{
     net::TcpListener,
     path::PathBuf,
     process::{Command, Stdio},
-    sync::atomic::{AtomicUsize, Ordering},
     thread,
     time::{Duration, Instant},
 };
@@ -31,27 +30,13 @@ fn decode(value: &Value) -> Result<Status> {
 fn config() -> Config {
     serde_json::from_value(json!({"host":"192.0.2.12"})).expect("config")
 }
-struct PrivateFile(PathBuf);
+#[path = "support/mod.rs"]
+mod support;
+struct PrivateFile(PathBuf, #[allow(dead_code)] support::Directory);
 impl PrivateFile {
     fn new(value: &Value) -> Result<Self> {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "homewire-awair-{}-{}.json",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::write(&path, serde_json::to_vec(value)?)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
-        }
-        Ok(Self(path))
-    }
-}
-impl Drop for PrivateFile {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
+        let directory = support::Directory::new()?;
+        Ok(Self(directory.config("awair.json", value)?, directory))
     }
 }
 

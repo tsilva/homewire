@@ -547,10 +547,7 @@ mod tests {
     use rustls::{RootCertStore, ServerConfig, ServerConnection, server::WebPkiClientVerifier};
     use std::{net::TcpListener, thread};
     mod support {
-        include!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/support/media.rs"
-        ));
+        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/mod.rs"));
     }
     fn server(
         on: bool,

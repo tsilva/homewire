@@ -73,7 +73,8 @@ impl Bundle {
             for (family, value) in entries {
                 if !value.is_object()
                     || (family != "api" || section != "services")
-                        && Devices::config_section(catalog_name(family)) != Some(section)
+                        && Devices::config_section(crate::naming::canonical_family(family))
+                            != Some(section)
                 {
                     return Err(error("Unknown adapter/service family or invalid section"));
                 }
@@ -150,7 +151,7 @@ impl Bundle {
                     &source, connect,
                 )?);
             } else {
-                devices.open_source(catalog_name(family), &source)?;
+                devices.open_source(crate::naming::canonical_family(family), &source)?;
             }
         }
         if connect.is_some() && devices.meaco.is_none() {
@@ -192,9 +193,6 @@ impl Bundle {
     pub fn into_lock(self) -> File {
         self.lock
     }
-}
-fn catalog_name(family: &str) -> &str {
-    if family == "lights" { "bulbs" } else { family }
 }
 fn state_name(family: &str) -> &str {
     if family == "bulbs" { "lights" } else { family }

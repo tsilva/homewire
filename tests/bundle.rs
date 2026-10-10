@@ -6,7 +6,7 @@ use homewire::{
 };
 use serde_json::{Value, json};
 use std::{fs, process::Command};
-#[path = "support/media.rs"]
+#[path = "support/mod.rs"]
 mod support;
 
 fn example(name: &str) -> Result<Value> {
@@ -83,6 +83,14 @@ fn all_static_adapters_open_without_child_files_and_keep_tv_ownership() -> Resul
             .is_some()
     );
     assert!(devices.samsung.is_none() && devices.digi.is_none() && devices.plugs.is_none());
+    assert!(devices.next_background().is_none());
+    devices.enable_monitoring("plugs")?;
+    let deadline = devices
+        .next_background()
+        .expect("TV-owned plug monitor deadline");
+    assert!(deadline > std::time::Instant::now());
+    devices.background_tick(); // Not due: must not contact synthetic endpoints.
+    assert_eq!(devices.next_background(), Some(deadline));
     let list = entity::list(&devices);
     assert!(!list["entities"].as_array().expect("fixture").is_empty());
     for forbidden in ["local_key", "auth_hash", "dashboard_token", "password"] {

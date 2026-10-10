@@ -418,6 +418,7 @@ pub fn apply(device: &mut impl Device, change: &Change) -> Result<Applied> {
 }
 
 pub struct Manager {
+    background: crate::fault::Background,
     pub config: Config,
     pub monitor: fault::Monitor,
     store: fault::Store,
@@ -471,6 +472,7 @@ impl Manager {
             }
         }
         Ok(Self {
+            background: crate::fault::Background::default(),
             config,
             scheduler,
             brightness_schedulers,
@@ -580,6 +582,7 @@ impl fault::Target for Endpoint {
 }
 
 impl Adapter for Manager {
+    crate::fault::monitored_background!("lights", "Light");
     const SUPPORT: crate::entity::Support =
         crate::entity::Support::LIGHT.union(crate::entity::Support::CONFIGURE);
     fn entities<'a>(&'a self, visit: &mut impl FnMut(crate::entity::Entity<'a>)) {

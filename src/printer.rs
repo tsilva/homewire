@@ -311,6 +311,7 @@ impl Monitor {
 }
 
 pub struct Manager {
+    background: crate::fault::Background,
     pub config: Config,
     pub monitor: Monitor,
     store: fault::Store,
@@ -363,6 +364,7 @@ impl Manager {
         }
         let warnings = Monitor::load(&warning_path, &identities)?;
         Ok(Self {
+            background: crate::fault::Background::default(),
             config,
             monitor,
             store,
@@ -481,6 +483,7 @@ impl fault::Target for Endpoint {
 }
 
 impl Adapter for Manager {
+    crate::fault::monitored_background!("printers", "Printer");
     const SUPPORT: crate::entity::Support = crate::entity::Support::READ;
     fn entities<'a>(&'a self, visit: &mut impl FnMut(crate::entity::Entity<'a>)) {
         use crate::{
@@ -584,7 +587,7 @@ impl crate::device::Monitored for Manager {
 }
 
 #[cfg(test)]
-#[path = "../tests/support/media.rs"]
+#[path = "../tests/support/mod.rs"]
 #[allow(dead_code)]
 mod test_support;
 

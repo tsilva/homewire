@@ -10,7 +10,7 @@ use std::{
     process::{Command, Stdio},
     thread,
 };
-#[path = "support/media.rs"]
+#[path = "support/mod.rs"]
 mod support;
 
 fn lights(temp: &support::Directory) -> Result<bulb::Manager> {

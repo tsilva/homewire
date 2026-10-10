@@ -1,6 +1,6 @@
 use homewire::{Result, bundle::Bundle, entity, routine};
 use serde_json::{Value, json};
-#[path = "support/media.rs"]
+#[path = "support/mod.rs"]
 #[allow(dead_code)]
 mod support;
 

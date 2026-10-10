@@ -1,0 +1,744 @@
+# Device guides
+
+[Reference index](reference.md) · [First use](../README.md)
+
+## Printers
+
+The printer adapter sends only IPP `Get-Printer-Attributes` over local HTTP. It
+reports idle/printing/stopped state, reasons, job acceptance/count, and ink/toner
+levels when provided. No printing, cancellation, power control, discovery,
+authenticated IPP or TLS is implemented in the IPP adapter. A separate
+`brother` adapter provides read-only SNMP diagnostics.
+
+Printer power is controlled through configured smart outlets with `switch_set`,
+for example `{"entity":"switch.printer_outlet","power":false}`. This verifies
+the outlet relay, not a graceful printer shutdown. No printer shutdown or wake
+command precedes the outlet operation.
+
+Each `printer.NAME` also exposes `sensor.NAME_state`,
+`sensor.NAME_queued_jobs` (jobs), `sensor.NAME_accepting_jobs` and
+`sensor.NAME_fault_active`. Read them together with `entity_status` to share one
+fresh IPP query per printer. Missing job readings remain `null`; `fault_active`
+is `null` when hardware fault status is unknown, rather than reporting healthy.
+The printer snapshot retains detailed fault reasons and individual supplies.
+
+```sh
+target/release/homewire --printers .local/printers.json printers
+target/release/homewire --printers .local/printers.json printer-status brother
+target/release/homewire --printers .local/printers.json printer-status hp
+target/release/homewire --printers .local/printers.json printer-check
+target/release/homewire --printers .local/printers.json watch-printers
+```
+
+Copy `examples/printers.json` to an ignored file, replace the example addresses,
+and use `chmod 600`. The schema has top-level `printers` (1–8 endpoints),
+`timeout_seconds` (8; range 1–30), and `poll_seconds` (30; range 5–300).
+Each endpoint requires `name` (unique, 1–32 letters/digits/hyphens/underscores)
+and literal-IP `host`; optional `port` defaults to 631 and `path` to `/ipp/print`.
+Optional `connect` (`IP:PORT`) overrides just the TCP connection for tunnels.
+Optional `supply_warning_percent` defaults to 15 (range 0–100); set it to `null`
+to disable percentage warnings for that printer.
+Use a separate config file for simulated monitoring. Unknown fields are rejected.
+The supported unauthenticated IPP endpoints require no credentials.
+
+Fault classification uses reported IPP reasons: paper,
+jam, ink/toner, covers/trays, fuser and other specified supply/hardware reasons,
+plus unknown reasons explicitly ending in `-error`. Idle/printing and routine
+sleep/pause/offline reasons do not become fault alerts. Missing data, failed
+queries, unclassified reasons, or stopped without a specific fault cannot prove
+recovery. Percentages alone never generate faults. Negative or out-of-range
+supply levels remain unknown; raw values are retained.
+
+Low-supply warnings are separate from hardware faults. `printer-check` and the
+legacy `printer_check` tool include `supply_events` and `active_supply_warnings`
+alongside the existing hardware fields. A warning confirms a reported supply
+percentage at or below the configured threshold; recovery confirms a percentage
+above it. `supply_warning` / `supply_recovered` events identify the printer and
+zero-based supply index, with `warnings` and `previous_warnings`. Missing supplies,
+unknown percentages and failed queries cannot clear a retained warning.
+
+`watch-printers` emits JSON hardware fault/recovery and supply warning/recovery
+events on stdout; connection diagnostics go to stderr. A changed alert must
+appear in observations at least
+3 seconds apart; recovery needs clear observations at least 30 seconds apart.
+Unknown readings interrupt confirmation. With 30-second polling, confirmation
+normally takes one more poll. Monitoring is opt-in; querying IPP can wake a
+sleeping printer.
+
+Confirmed transitions are atomically saved before output in
+`printers.state.json` for hardware faults and `printers.supply-state.json` for
+percentage warnings; `printers.json.lock` excludes concurrent owners using the
+same config. Repeated faults are suppressed across reconnects/restarts. Changes
+to name, host, port or path invalidate saved assumptions for that printer.
+The one-shot `printer-check` reports live status and retained faults; candidates
+live in the running process, so separate CLI invocations do not form a continuous
+monitor. This is a local event source; the optional alerts ledger and native
+companion provide notification delivery and acknowledgements. `active_faults`
+returns retained confirmed
+faults even if a consumer missed an event.
+
+For desktop testing through an SSH host that can reach the printers, keep TCP
+forwards open and use `connect` overrides in a separate private test config.
+For example, forward local port 62350 to the Brother's port 631, then set its
+`connect` to `127.0.0.1:62350`. The printer URI still uses its real LAN host/path.
+
+## Awair Element
+
+This adapter sends only `GET /air-data/latest` to the Element's local HTTP API.
+Enable that API in the Awair app if needed; no account token is required at
+runtime. The device refreshes its measurements approximately every 10 seconds.
+See [Awair's local API documentation](https://support.getawair.com/hc/en-us/articles/360049985053-Awair-2nd-Edition-Local-API-Feature).
+
+Copy `examples/awair.json` to an ignored file and use `chmod 600`. Required
+`host` is a literal LAN IP. Optional fields are `port` (80; nonzero),
+`timeout_seconds` (8; range 1–30), `max_age_seconds` (120; range 10–3600), and
+`connect` (`IP:PORT`, nonzero port; overrides the TCP destination for testing).
+Unknown config fields and files larger than 8 KiB are rejected.
+
+```sh
+target/release/homewire --awair .local/awair.json awair-status
+# One MCP process for all three adapters:
+target/release/homewire --config .local/meaco.json --printers .local/printers.json --awair .local/awair.json serve
+```
+
+| JSON field | Measurement/unit |
+| --- | --- |
+| `temperature_c` | Temperature, °C |
+| `humidity_percent` | Relative humidity, % |
+| `co2_ppm` | Measured CO₂, ppm |
+| `tvoc_ppb` | Total volatile organic compounds, ppb |
+| `pm25_ug_m3` | Measured PM2.5, µg/m³ |
+| `awair_score` | Device's score, 0–100 |
+
+`measured_at` is the device timestamp normalized to UTC; `observed_at` is the
+host's UTC time after the response. `age_seconds` is signed, exposing small
+clock skew. Readings older than `max_age_seconds`, or more than 30 seconds in
+the future, fail. Keep both clocks accurate. Missing/null measurements, invalid
+timestamps, negative pollutants, humidity outside 0–100%, and scores outside
+0–100 fail rather than becoming zero. Estimated CO₂/PM10 and calibration fields
+are ignored. No cached reading is substituted after a failed request.
+
+Standard MCP exposes these measurements through `entity_status`. The legacy
+`awair_status` tool (`serve --legacy-tools`) takes no arguments and reads on demand. There is no persistent
+socket, background polling thread, cloud access, display control, threshold
+alerting or sensor-triggered Meaco automation. Existing Meaco schedules do not
+depend on this module.
+
+## Tapo L430C bulbs
+
+The shared light adapter uses KLAP v2 over local HTTP. It supports named L430C bulbs, power,
+brightness, colour via hue/saturation, white temperature, and reported
+overheating. Typed settings also expose presets, stored effects, transitions and
+auto-update settings. Pairing, discovery, Bluetooth, cloud access, firmware
+installation and other Tapo device types are not implemented.
+The configured device ID and model must match a live reading before controls.
+
+Copy `examples/bulbs.json` to an ignored private file and use `chmod 600`.
+Top-level fields are `bulbs` (1–8 endpoints), `timeout_seconds` (8; range 1–30),
+`settle_seconds` (2; range 0–10, strictly less than timeout), and `poll_seconds`
+(30; range 5–300). Each bulb needs a unique `name` (1–32 letters, digits,
+hyphens or underscores), literal-IP `host`, unique `device_id` (1–64 letters
+or digits), and `auth_hash` (64 hexadecimal digits). Optional `model` defaults
+to `L430C`; only `L430C` and `L900` are accepted. Optional `port` defaults
+to 80; `connect` (`IP:PORT`, nonzero port) overrides just TCP for tunnels.
+Unknown config fields and files over 8 KiB are rejected.
+
+The secret hash is the KLAP v2 digest
+`SHA256(SHA1(username_utf8) || SHA1(password_utf8))`, encoded as hexadecimal.
+Username/password are case-sensitive. For an existing Home Assistant KLAP v2
+entry, `credentials_hash` is Base64 of this same 32-byte digest: decode it and
+encode those bytes as hex. Treat the hash as a credential. Homewire stores no
+account password and never contacts the Tapo cloud.
+Protocol reference: [python-kasa's KLAP implementation](https://github.com/python-kasa/python-kasa/blob/master/kasa/transports/klaptransport.py).
+
+```sh
+target/release/homewire --bulbs .local/bulbs.json bulbs
+target/release/homewire --bulbs .local/bulbs.json bulb-status bulb_1
+target/release/homewire --bulbs .local/bulbs.json bulb-set bulb_1 '{"power":false}'
+target/release/homewire --bulbs .local/bulbs.json bulb-set bulb_1 '{"power":true,"brightness_percent":10}'
+target/release/homewire --bulbs .local/bulbs.json bulb-set bulb_1 '{"hue":210,"saturation_percent":70}'
+target/release/homewire --bulbs .local/bulbs.json bulb-set bulb_1 '{"color_temperature_k":2700}'
+target/release/homewire --bulbs .local/bulbs.json bulb-check
+target/release/homewire --bulbs .local/bulbs.json watch-bulbs
+```
+
+Settings are absolute: `power` is boolean, `brightness_percent` is 1–100,
+`hue` is 0–360 and must be paired with `saturation_percent` (0–100), and
+`color_temperature_k` is 2500–6500, also checked against the bulb's live range.
+Colour and white temperature cannot appear in the same change. Colour sets
+the device's white-temperature field to zero. Brightness/colour changes do not
+implicitly turn an off bulb on; include `power:true` when desired.
+
+The runner reads status first, skips already-matching settings, sends at most
+one write, waits the settling delay and verifies every requested field with
+fresh status. Failed/rejected writes, missing reads or mismatches stop without
+retrying. If overheating is true or unknown, only a power-off change is allowed.
+Dynamic effects may prevent a fixed setting from verifying.
+
+KLAP uses a random seed, validates the handshake proof and response signatures,
+and rejects invalid padding or frames over 16 KiB plus encryption overhead.
+Each operation gets a fresh short-lived session, with one total timeout covering
+authentication, requests and the settling delay. No per-bulb worker is needed.
+HTTP framing is bounded by the shared transport. These bulbs label their binary
+responses `text/html`; KLAP authentication and decoding validate the payload.
+
+`overheated` can be true, false, or null (unknown). Only reported true generates
+a fault; unavailable or missing readings do not prove recovery. The shared
+fault monitor requires matching observations at least 3 seconds apart for a
+fault and 30 seconds apart for recovery. Confirmed transitions are saved before
+output in `bulbs.state.json`; `bulbs.json.lock` excludes concurrent Homewire
+owners using that config path. Endpoint/identity changes invalidate saved faults.
+Candidates are held in the running process, so use `watch-bulbs`, automatic MCP
+monitoring or repeated `bulb_check` calls in one server. `active_faults` returns
+retained faults. Optional alert delivery is handled separately by the alerts ledger.
+The ownership lock cannot coordinate with Home Assistant or the Tapo app.
+
+## L900 LED strip
+
+The L900 reuses the bulb adapter's KLAP v2 transport, verified controls,
+ownership lock and overheating monitor. It adds no dependencies or worker
+threads. Use `examples/lights.json` with `--lights PATH`; its top-level `lights`
+array follows the bulb endpoint schema. A strip endpoint must explicitly set
+`"model":"L900"`. Bulb endpoints can use `"model":"L430C"` or omit it.
+Live model/device identity must match before controls. The L900 has a separate
+2500–9000 K allowed range, also constrained by its live reported range; L430C
+controls remain limited to their live range within 2500–6500 K.
+
+```sh
+target/release/homewire --lights .local/lights.json lights
+target/release/homewire --lights .local/lights.json light-status led_strip
+target/release/homewire --lights .local/lights.json light-set led_strip '{"power":false}'
+target/release/homewire --lights .local/lights.json light-set led_strip '{"power":true,"brightness_percent":10}'
+target/release/homewire --lights .local/lights.json light-set led_strip '{"hue":210,"saturation_percent":70}'
+target/release/homewire --lights .local/lights.json light-set led_strip '{"color_temperature_k":7000}'
+target/release/homewire --lights .local/lights.json light-check
+target/release/homewire --lights .local/lights.json watch-lights
+```
+
+The shared KLAP transport retries an HTTP 400/403-rejected authentication
+handshake once before application requests, within the original deadline.
+
+Settings and fault confirmation follow the bulb rules. If a status or verification
+read gets HTTP 403 after a valid handshake, Homewire refreshes the session and
+retries that read once within the original total timeout. This handles observed
+session invalidation while another client is present. It never retries a control
+command, including one rejected with HTTP 403. A second read failure remains an
+explicit error; a failed verification reports an uncertain outcome.
+ `light-status` also
+reports `model` and `effect_active`: true if an effect/music mode is active,
+false if both are confirmed off, or null if unknown. L900 fixed brightness,
+colour and white-temperature changes fail before controls if effects are
+active/unknown, and fail verification if an effect becomes active/unknown during
+the change. Disable effects/music mode in the Tapo app first. Power-only changes
+can preserve the existing effect. Use typed settings for presets and restoring or
+disabling the stored effect; arbitrary effects/music programming is not implemented.
+
+`--lights` and `--bulbs` select the same manager and are mutually exclusive.
+Either config accepts `lights` or legacy `bulbs`, but cannot contain both.
+Use one config path for all clients of each light; separate overlapping configs
+cannot share an ownership lock. With `--lights PATH serve --legacy-tools`, MCP advertises `light_list`,
+`light_status`, `light_check`, and (with `--allow-control`) `light_apply`.
+Status/apply arguments use `light` instead of `bulb`; responses use `light` and
+`lights`. Existing `--bulbs`, `bulb-*`, `watch-bulbs` and MCP `bulb_*` calls remain
+supported. Only one tool naming scheme is advertised, avoiding duplicate tools.
+
+State paths follow the config name: `lights.state.json` and `lights.json.lock`
+for `lights.json`. The expected L900 model forms part of the retained fault
+identity. `light_check` reports retained `active_faults`, live statuses, unavailable
+readings and debounced events. Optional alerts/companion adapters deliver
+reported overheating notifications independently of the light protocol.
+
+## L900 scheduling
+
+The optional `automation` object selects one configured L900 and supplies its
+local timezone and location. Optional `brightness_lights` names up to seven
+additional configured L430C/L900 lights that follow the same brightness curve:
+
+```json
+"automation": {
+  "light": "led_strip",
+  "brightness_lights": ["lamp_a", "lamp_b"],
+  "timezone": "Etc/UTC",
+  "latitude": 0.0,
+  "longitude": 0.0,
+  "curve": [[360, 20, 3000], [1080, 80, 5000]],
+  "outside_curve": [20, 2700]
+}
+```
+
+Replace the sample timezone and zero coordinates with your desired timezone and
+location in the private config. Omit `brightness_lights` or use an empty list
+when no followers are wanted. All targets must exist and be distinct. The tracked
+lights template omits `automation`.
+A valid IANA timezone, latitude within ±89°, longitude within ±180° and
+`poll_seconds` of 5–30 are required. Omit `automation` to disable its configuration.
+Having it configured does **not** enable controls: `light-plan` previews, while
+`light-schedule` explicitly runs the rules. MCP uses `serve --allow-control
+--light-schedule`; the scheduler starts only after the client's initialized
+notification. It shares the existing event loop and config ownership lock.
+
+The persistent Android daemon enables the same rules with `--light-schedule` in
+its saved `service.args`, alongside `--allow-control`. Preserve other saved flags;
+`--schedule` selects Meaco, so it does not substitute for the light flag. Validate
+staged private schemas using `config-check` without server flags or `--api`, then
+preview the staged light config using `light-plan` before cutover. API settings are
+checked when the actual daemon starts. Rollback across a schema change requires
+the matching old configs as well as the old executable; preserve attempt state.
+
+Disable any competing light-curve and sunset automations in your existing
+automation system before starting native scheduling. Use the single shared
+lights config, rather than running separate bulb and strip processes.
+
+`curve` is required: 2–16 strictly increasing `[minute_of_day, brightness_percent,
+white_temperature_k]` points, minutes 0–1439, brightness 1–100%, temperature
+2500–9000 K. `outside_curve` explicitly supplies `[brightness, temperature]`
+before the first point and from the final point onward. Interpolation includes
+local seconds and rounds ties to even. There is no compiled household curve.
+At startup, on observed off→on transitions, and on each new local minute, it
+adjusts an on strip if its settings differ. It never turns on an off strip for
+curve adjustment.
+External power-on detection is polled rather than pushed; the default interval
+is 30 seconds. Changes are absolute and verified, with the usual settle delay;
+no transition/fade duration is sent. Effects/music must be confirmed off.
+
+Brightness followers use the same local-time interpolation and outside brightness,
+while preserving their white temperature, hue, saturation and power state. They
+never turn on at sunset. Each follower has independent identity-bound attempt
+state in `lights.schedule.NAME.state.json`; existing primary-light state remains
+in `lights.schedule.state.json`. Failure on one light does not prevent the other
+targets from being assessed, and uncertain writes are not replayed in that minute,
+including after restart. Disable competing brightness automations for each added
+target before enabling it in the native owner. Targets are processed serially
+without extra threads or retained device-state snapshots.
+
+Sunset uses local-date NOAA/Meeus solar equations with 90.833° zenith and two
+iterations, without network calls or new runtime dependencies. It is an
+approximation (NOAA describes roughly one-minute accuracy below ±72° latitude),
+so this is not second-exact parity with HA's Astral calculation. A date with no
+sunset has no sunset action. The process must observe a crossing within 60
+seconds; startup after sunset does not catch up. At sunset it requests power-on
+and the current curve settings together.
+
+`lights.schedule.state.json` retains the device identity, last sunset attempt
+date and last curve write minute. State is bounded, private and atomically
+saved **before** querying a due sunset or issuing settings. Sunset query/write
+failures do not replay that date, and curve attempts cannot repeat in the same
+UTC minute, including after restart. Each subsequent minute is a fresh curve
+assessment against live state; it does not blindly retransmit a failed command.
+Persistence failures block controls. Connection/handshake failures before a
+sunset attempt is recorded can be checked again inside the 60-second window;
+no device write has occurred at that stage. Scheduler errors are logged to
+stderr so MCP protocol output remains valid. Device identity changes discard
+stale schedule memory. The reported-overheating monitor is independent of the
+scheduler; use the alerts/companion adapters for notification delivery.
+
+The sunset equations are documented by
+[NOAA](https://gml.noaa.gov/grad/solcalc/calcdetails.html).
+
+## Tapo P100/P110 plugs
+
+The plug adapter shares the KLAP v2 HTTP transport, bounded messages and
+read-only session refresh with the light adapter. No dependencies, background
+threads, interpreter runtimes or extra servers are added. These configured P100
+and P110 devices use HTTP port 80 and KLAP login version 2. Other models,
+AES/login variants, discovery and pairing are not supported by this adapter.
+
+Copy `examples/plugs.json` into a private config and replace the sample values.
+The top-level `plugs` array contains 1–8 endpoints with:
+
+- `name`: unique 1–32 ASCII letters, digits, hyphens or underscores.
+- `model`: required `P100` or `P110`.
+- `host`: the plug's IP; `port` defaults to 80.
+- `device_id`: the exact reported identity, 1–64 alphanumeric characters.
+- `auth_hash`: private 64-digit hexadecimal KLAP v2 hash, equivalent to decoded
+  Home Assistant `credentials_hash`; do not use an account password here.
+- `connect`: optional `IP:PORT` test/tunnel destination, preserving the actual
+  Host header, expected model and device identity.
+
+The file must have no group/other permissions (use `chmod 600`). Maximum size is
+8 KiB. `timeout_seconds` defaults to 8 (1–30), `settle_seconds` to 2 (0–10, less
+than timeout) and `poll_seconds` to 30 (5–300). The timeout covers the whole
+handshake/read/write/settle/verification operation for each endpoint. Only
+configured names can be accessed; tool arguments cannot change hosts or keys.
+
+CLI commands are `plugs`, `plug-status NAME`, `plug-set NAME on|off`,
+`plug-check`, and `watch-plugs`, all selected with `--plugs PATH`.
+Legacy MCP (`serve --legacy-tools`) exposes `plug_list`, `plug_status {"plug":"metered_outlet"}`, and `plug_check`.
+`serve --legacy-tools --allow-control` additionally advertises
+`plug_apply {"plug":"relay","power":true}`. No settings/toggle strings or
+extra arguments are accepted. Tools can share one process with all other
+adapters. `serve --watch-plugs` polls automatically after MCP initialization
+and sends diagnostics/events to stderr. Standalone `watch-plugs` emits events
+on stdout. Monitoring never sends relay controls or outbound notifications.
+
+`plug_status` reads fresh device information. P110 status additionally reads
+`get_energy_usage` and `get_emeter_data` in the same bounded operation and
+returns nullable `energy` fields: `power_w`, `voltage_v`, `current_a`,
+`today_kwh`, `month_kwh` and `total_kwh`. Raw milliwatts/millivolts/milliamps
+convert by 1000. Device milli-watt-hour counters convert to kWh by 1,000,000
+and are preferred over coarser Wh counters (divide by 1000). Total is the
+device's reported energy counter, whose reset/scope depends on firmware;
+The plug adapter does not accumulate history or infer measurements. Optional
+`history` records selected numeric entities in bounded disk rings. Missing fields
+remain null; a reported zero stays zero; malformed, negative or wholly absent
+measurements fail explicitly. Values are sequential reads rather than an
+atomic metering snapshot. P100 energy is null because these devices provide
+no metering. Auto-off output describes the active timer and raw remaining
+seconds, not whether the saved auto-off feature is enabled.
+
+`plug_apply` reads and verifies the configured model/identity, skips a matching
+relay state, then sends one `set_device_info {"device_on":BOOL}` command,
+waits for settling and verifies fresh relay state. A rejected/unverified
+command is never replayed. A handshake rejected with HTTP 400/403 can be attempted again once before any
+application request is sent, using the same total deadline. Only status/metering
+reads rejected with HTTP 403 can refresh the session and repeat that read once within the original timeout.
+P110 power-on requires a confirmed `normal` protection status, and verification
+must still show normal. Reported `overloaded`, missing or unrecognized status
+blocks changing power to on; power-off remains available. P100 has no reported
+overload feature, so `overloaded` is null. Relay commands preserve protection,
+auto-off, LED and firmware settings. Explicit typed settings can change the
+advertised configuration; firmware installation and factory reset are unavailable.
+
+`plug-check` reads only device information, without energy queries, and returns
+statuses, unavailable readings, `active_faults` and debounced events. P110
+`power_protection_status` maps `overloaded` to an `overloaded` fault and `normal`
+to a known clear reading. Unknown/missing/unavailable readings never prove
+recovery. The shared monitor confirms faults after 3 seconds and recovery
+after 30 seconds; both require another confirming poll, so the default 30-second
+poll cadence can delay alerts beyond those debounce durations. These are
+reported device faults, independent of watts/amps or connection availability.
+State is bounded, atomically saved before emitting, and retained across
+restarts in `plugs.state.json`. Device/model changes discard stale state.
+`plugs.json.lock` excludes another process using the same config path;
+separate overlapping configs and HA/Tapo clients cannot share that lock.
+
+The example contains a P100 relay, a P110 metered outlet and a P110 TV outlet.
+Choose your own names, endpoints and credentials; it is not a household inventory.
+The relay adapter does not coordinate media-device shutdown. Use the explicit TV
+workflow when sharing outlet power with media devices, and validate the sequence
+before transferring ownership from another automation system.
+
+Protocol semantics follow python-kasa's
+[energy module](https://github.com/python-kasa/python-kasa/blob/master/kasa/smart/modules/energy.py)
+and [power-protection module](https://github.com/python-kasa/python-kasa/blob/master/kasa/smart/modules/powerprotection.py).
+
+## Samsung TV and DIGI R2A
+
+The Samsung adapter targets the **UE40H6200** with encrypted Socket.IO on port
+8000, using an existing PIN pairing token/session. It verifies `modelName` and
+`device.id` from a fresh HTTP `/api/v2/` response on port 8001 before remote
+controls. H/J-series pairing is distinct from the legacy port-55000 protocol.
+Other Samsung models/protocols are not implemented.
+
+Samsung configuration (`examples/samsung.json`):
+
+- `host`: literal LAN IP; `port` defaults to 8000; `info_port` defaults to 8001.
+- `device_id`: the exact `device.id` from `/api/v2/`, not the UPnP UDN or MAC.
+- `mac`: six hexadecimal octets; `wake_address`: UDP destination, normally the
+  device LAN's broadcast address with port 9. WOL must originate on a network
+  that can reach that destination; TCP SSH forwards do not forward WOL.
+- `token`: the 32-hex-character AES-128 pairing token from the existing Samsung
+  HA config entry; `session_id`: its unsigned numeric pairing session identifier.
+- `off_key`: `KEY_POWEROFF` by default; `KEY_POWER` is an explicit compatibility
+  alternative. It is sent only after a fresh on reading, never as a blind toggle.
+  The actual H6200 off-key behavior still needs a deliberate live shutdown test.
+- `timeout_seconds`: 1–30, default 8; `verify_seconds`: 1–60, default 20.
+- Optional `connect` and `info_connect`: `IP:PORT` TCP destinations for tests or
+  tunnels. The original configured host remains the HTTP/WebSocket authority.
+
+`samsung-status` / `samsung_status` takes no arguments. If `PowerState` is present,
+its on/standby/off value is used. Otherwise a verified identity plus an active
+companion channel yields `power: true` with explicit evidence. Connection failures
+are errors, not off readings. The channel join exchanges no remote key.
+
+`samsung-set on|off` / `samsung_apply {"power":BOOL}` wakes with one magic packet
+and polls within the verification interval, or sends one encrypted shutdown key.
+Controls use fresh state; already-correct states skip writes. A shutdown attempt
+is saved before sending and prevents another shutdown/key for 120 seconds,
+including after restart. Remote/channel failure after sending cannot prove physical
+off: the response then reports `verified: false`. Check `verified` before assuming
+an outcome. This adapter does not send the old HA fallback of two power keys.
+
+`samsung-key KEY` / `samsung_key {"key":"hdmi"}` accepts `home` (Samsung menu),
+`back`, `up`, `down`, `left`, `right`, `enter`, `hdmi`, `volume_up`, `volume_down`,
+`mute`, `play`, `pause`. Keys are sent once over a bounded masked WebSocket with
+AES-128 ECB/PKCS#7 command payloads. Generic power keys are not exposed. These
+navigation/media keys return `sent: true, verified: false`; that is transport
+completion rather than proof of a resulting screen, source or volume.
+
+The DIGI adapter targets **ZTE DIGI R2A**, using paired Android TV Remote v2 on
+TLS port 6466. Its config (`examples/digi.json`) contains:
+
+- `host`: literal IP; `port` defaults to 6466; optional `connect` for TCP tunneling.
+- `client_cert`, `client_key`: private PEM paths, resolved relative to the config.
+  Reuse HA's `.storage/androidtv_remote_cert.pem` and `androidtv_remote_key.pem`.
+  Both must be private (`chmod 600`) and at most 8 KiB. No keys are generated or
+  pairing prompts initiated during normal commands.
+- `server_cert_sha256`: 64 hex characters, SHA-256 of the server's leaf DER
+  certificate obtained from the paired device over a trusted connection.
+  The certificate is pinned and TLS handshake signatures are verified. There is
+  no accept-all verifier or silent trust-on-first-use. Certificate changes require
+  explicit configuration update after identity verification.
+- `timeout_seconds`: 1–30, default 8; `verify_seconds`: 1–60, default 20.
+
+One way to obtain the pin during setup, on a trusted LAN, is:
+
+```sh
+openssl s_client -connect DIGI_IP:6466 -cert .local/digi-cert.pem -key .local/digi-key.pem </dev/null 2>/dev/null | openssl x509 -outform DER | openssl dgst -sha256
+```
+
+The adapter verifies the pinned certificate plus live model/vendor, negotiates
+ping/key/power plus supported app-link/text features, and waits for a `remote_start` power reading. An
+absent proto3 `started` field means false only inside a present `remote_start`;
+identity/connection alone never defaults to off. Messages are limited to 8 KiB,
+128 fields and 128 frames per state wait, with a socket deadline. Unknown valid
+fields are skipped; malformed/truncated/overflowing fields fail.
+
+`digi-status` / `digi_status` takes no arguments. `digi-set on|off` /
+`digi_apply {"power":BOOL}` sends absolute `KEYCODE_WAKEUP` (224) or `KEYCODE_SLEEP`
+(223) once, then verifies a fresh reported state on that same TLS session. Already
+correct settings send no key. Errors/disconnects after controls are not reconnected
+or replayed. `digi-key KEY` / `digi_key {"key":"home"}` supports `home`, `back`,
+`up`, `down`, `left`, `right`, `enter`, `volume_up`, `volume_down`, `mute`,
+`play_pause`, `play`, `pause`, `channel_up`, `channel_down`. It sends one short key
+and returns an unverified delivery result. `entity_configure` supports HTTP(S)
+`app_link` launch and `text` (up to 512 bytes) in a live focused input field.
+Requests are sent once and remain unverified. TV voice streaming and ADB are
+not implemented. Host-only `scripts/android/pair_digi.py` performs PIN pairing
+without HA; existing credentials remain the normal runtime path.
+
+Both managers hold exclusive config locks. Config/credential parser errors omit
+secret values; credentials are not tool arguments or listed by MCP. They build
+TLS/session state on demand and discard it after each operation. There are no
+persistent connections, background threads, session caches or polling tasks. The
+shared synchronous deadline socket now serves HTTP, Samsung WebSocket and DIGI
+TLS. Rustls uses only its Ring provider, std and TLS 1.2/1.3; no async runtime,
+OpenSSL runtime linkage, full protobuf runtime or interpreter is required.
+
+Simulated-device tests exercise encrypted Samsung keys/WOL, shutdown intent
+persistence, DIGI mutual TLS/pin rejection, wake/sleep verification, malformed
+frames and workflow failure ordering. Validate physical shutdown and the complete
+power sequence against the firmware and wiring in each installation.
+
+### Shared TV outlet workflow
+
+`examples/tv.json` references `samsung`, `digi`, and `plugs` config paths (relative
+to its own directory), plus `plug` (normally `tv`) and the required
+`shutdown_policy: "fixed_delay"`, plus required
+`timings: {"startup_seconds": 5, "shutdown_seconds": 5, "ready_seconds": 120}`.
+Startup/shutdown delays must be 1–60 seconds and readiness 1–120 seconds; the
+example values are explicit settings, not implicit defaults. This remains a
+statically compiled Samsung + Android TV + outlet workflow. `--tv PATH` opens/locks those managers and the
+workflow config. Do not also load the same underlying configs separately into
+that process; another config owner fails at startup. The catalog borrows those
+child managers for their normal Samsung, DIGI and plug tools; `--tv` can also be
+used with `plugs`, `samsung-status`, `digi-status`, and `serve --watch-plugs`. There
+are no duplicated instances, reference-counted handles or wrapper transports.
+Use standard MCP `routine_run` (`tv_on` / `tv_off`), CLI `tv-set`, or legacy
+`tv_apply` for coordinated power. Direct child power requires explicit
+`--maintenance`; navigation keys and reads remain available.
+Other unrelated adapters
+can still share its MCP process.
+
+`tv-status` / `tv_status` returns the outlet and both media readings, with explicit
+errors for unavailable devices. `tv-set on|off` / `tv_apply {"power":BOOL}` runs
+serialized deterministic steps:
+
+1. **On:** verify the outlet; switch on if needed and wait `startup_seconds`. Request
+   one Samsung wake and verify on, then wait up to `ready_seconds` for DIGI to become
+   readable. Read attempts can finish within their own configured deadline after
+   the boot wait expires. Apply/verify DIGI wake. Errors leave the restored outlet on.
+2. **Off:** skip if the outlet is already off. Apply/verify DIGI sleep first; unknown
+   DIGI state aborts. Request Samsung shutdown once, wait `shutdown_seconds`, then switch
+   off and verify the shared outlet. Any earlier failure leaves the outlet on.
+
+The fixed-delay shutdown policy follows the existing outlet cutoff intent; it
+explicitly allows cutoff without proof of physical Samsung off. This is stricter
+than HA about DIGI sleep, executes sequentially rather than in parallel, and sends
+one WOL packet rather than HA's six attempts. Successful responses describe the
+workflow completion, not Samsung physical-off confirmation.
+
+An attempt is durably saved before any step. A failed/interrupted attempt blocks
+workflow replay for 180 seconds across restart; success clears it. Individual
+Samsung shutdown protection still applies. No failed controls are rolled back,
+automatically retried, or caught up. Long workflows occupy the single request
+thread, so clients need sufficient timeouts; queued requests execute afterwards.
+There is no listener for HA service events. Keep both HA TV rules disabled only
+when deliberately cutting over ownership to explicit Homewire/agent commands.
+
+Protocol references: [Samsung encrypted remote](https://github.com/xchwarze/samsung-tv-ws-api/tree/master/samsungtvws/encrypted),
+[HA Samsung bridge](https://github.com/home-assistant/core/blob/dev/homeassistant/components/samsungtv/bridge.py),
+[Android TV remote protocol](https://github.com/tronikos/androidtvremote2/blob/main/src/androidtvremote2/remotemessage.proto).
+
+## Computer shutdown service
+
+This optional Linux service uses Ed25519 signatures on fixed 162-byte UDP
+frames in both directions. It accepts status/validation and orderly shutdown,
+with no shell, SSH login, reboot, file access or arbitrary command interface.
+Fresh random challenges expire after 10 seconds, bind the client nonce, device
+identity and peer address, and are consumed before controls. There are at most
+eight pending challenges; malformed or unauthenticated traffic is discarded
+without per-packet logs. The native server has one thread and blocks while idle.
+The client has a total 1–10-second request deadline (default 3) and sends each
+protocol phase once. An uncertain shutdown is never automatically retried.
+
+`adapters.computer` follows [computer.json](../examples/computer.json): one named
+computer, a literal UDP `address`, pinned `server_public_key`, private
+`signing_key`, unicast nonzero `mac`, and explicit `wake_address`. The name is
+1–24 ASCII letters/digits/underscores/hyphens and must match the server name.
+Public keys and signing seeds are 64 hex characters. Store the client signing
+seed in Infisical using a `${HOMEWIRE_SECRET_...}` reference. Runtime deployment
+resolves it into protected backend storage; Betty never needs the key itself.
+As with other device credentials, compromise of that backend can expose the key.
+A stolen authorization key grants shutdown requests, not a general login.
+The separate computer identity key authenticates responses and cannot authorize
+shutdown. Keep its seed root-only and deliver it to the unprivileged service
+through systemd `LoadCredential`.
+
+Build both native executables with `cargo build --release --locked` on the
+computer. Generate the client seed into a protected temporary file outside the
+repository with `homewire-power keygen PATH`, which prints only the public key.
+Store the seed in Infisical, delete the temporary file, and put its public key
+in a private copy of [computer-server.json](../examples/computer-server.json).
+Set `listen` to the computer's LAN address; the default example uses UDP 39817.
+Install with root privileges:
+
+```sh
+sudo sh scripts/computer/install.sh target/release/homewire-power SHA256 SERVER_JSON
+```
+
+Supply the binary's exact SHA-256. The installer verifies it, creates a dedicated
+non-login account, keeps versioned binaries, generates the root-only response
+identity once, and prints its public key for pinning. Existing identity and
+authorization configurations are preserved; a different configuration requires
+explicit rotation. The listener is enabled at boot with systemd hardening.
+Polkit grants that account only starting the fixed, root-owned
+`homewire-poweroff.service`, whose sole action is orderly OS poweroff.
+The installer does not run that action. Restrict LAN exposure with the target's
+firewall as appropriate; neither an obscure port nor source IP replaces signatures.
+
+Run `homewire-power status CLIENT_JSON` for authenticated running/pending status
+and `homewire-power validate CLIENT_JSON` for a challenge/signature round trip
+without shutdown. Validation does not execute the OS action. Unreachable is
+unknown, never confirmed off. `homewire-power shutdown CLIENT_JSON` is the
+deliberate administrative control; its acknowledgement proves only that the
+fixed OS action was queued. The server rejects another shutdown until restart.
+
+For coordinated power, add:
+
+```json
+"routines": {
+  "computer": {
+    "plug": "metered_outlet",
+    "startup_seconds": 5,
+    "ready_seconds": 120,
+    "shutdown_policy": "metered_standby",
+    "shutdown_verification": {
+      "standby_power_w": 1.0,
+      "stable_seconds": 30,
+      "timeout_seconds": 180,
+      "poll_seconds": 2
+    }
+  }
+}
+```
+
+Startup delay is 1–60 seconds; readiness is 1–120 seconds. `computer_on` verifies
+the outlet, turns it on if needed, waits for standby power, sends one WoL packet
+if the authenticated service is not already running, and verifies readiness.
+Enable persistent WoL on the host NIC separately; wake after outlet power loss
+also depends on firmware support. `computer_off` reads the P110 relay and meter,
+requires auto-off to be confirmed inactive, and requires running consumption
+more than 10 W above the configured standby threshold before sending one signed
+orderly shutdown request. After authenticated acceptance, it waits for both the
+service to become unreachable and consumption to stay at/below the calibrated
+threshold continuously for the configured interval, with at least three fresh
+samples. Any reachable service or higher consumption restarts that interval.
+Only then does it persist the cutoff attempt, turn off the outlet and verify
+its relay. Missing/invalid consumption, unknown/active auto-off, authentication
+or protocol errors, device errors and timeouts abort without cutting power.
+Transport unavailability alone never authorizes cutoff.
+
+Use [computer-routine.json](../examples/computer-routine.json) as a schema example,
+not as a universal threshold. Measure actual orderly-shutdown standby consumption
+with the monitor/charger off or disconnected, account for observed variation and
+a small margin, and verify an entire off/on cycle before enabling the policy.
+Thresholds are 0.05–5 W, stability 10–60 seconds, polling 1–5 seconds and timeout
+30–300 seconds, at least 20 seconds longer than stability. Choose timeouts that
+fit the caller's timeout including adapter reads; the standard bridge waits 300
+seconds. Shared monitors and chargers can keep consumption above the threshold,
+in which case the outlet safely stays on. Recalibrate after hardware/firmware
+changes. Never raise the threshold merely to make a running monitor/charger pass.
+
+Results report `shutdown_verified:true` under the explicit `metered_standby`
+evidence policy, its measured maximum standby draw, elapsed stable interval,
+sample count and verified outlet state. They retain `physical_off_verified:false`:
+this is corroborated electrical/network evidence, not an independent hardware
+power-state sensor. Neither an acknowledgement nor disappearance alone proves
+physical shutdown. To disable cutoff, use `shutdown_policy:"leave_on"` and omit
+`shutdown_verification`; that policy requests shutdown and keeps the outlet on.
+
+Standard `routine_list`, `routine_plan`, `routine_run`, `entity_status` and
+`wake_list` discover this adapter without family-specific MCP tools. Plans do
+not query devices. Direct computer wake/shutdown, outlet power and outlet auto-off
+changes require explicit `--maintenance` while the routine owns them. Workflow
+attempts are persisted before controls and replay is blocked for 180 seconds
+after an uncertain result, including across backend restart. Accepted shutdowns
+also persist their acceptance time and a fingerprint binding both devices and
+credentials. For up to 10 minutes, an explicit `computer_off` call may resume
+verification after timeout/restart without resending shutdown. Changing a
+calibrated threshold does not change that equipment fingerprint. Changed devices
+or credentials, expired acceptance and unresolved attempts fail explicitly.
+Acceptance is consumed and the attempt timestamp refreshed before relay cutoff,
+so an uncertain cutoff cannot be replayed as a resumed verification. Errors leave
+outlet power unchanged after any completed startup step; no implicit rollback occurs.
+
+Disable with `sudo systemctl disable --now homewire-power.service`. Remove its
+Polkit rule to revoke the OS privilege. For binary rollback, select the preserved
+`/opt/homewire-power/previous` version and restart only the listener; retain keys
+and authorization config. A phone rollback must restore its matching config and
+binary, preserving all monitor, schedule, alert and device-attempt state.
+
+## Wake-on-LAN
+
+The Samsung adapter already uses Wake-on-LAN and automatically contributes
+`samsung.samsung` to `wake_list`, including when owned by the TV routine.
+`wake_on_lan {"device":"samsung.samsung"}` follows the same identity checks and
+verified wake path as `media_power` with `power:true`. TV-owned wake requires
+explicit `--maintenance`; normally use `routine_run {"routine":"tv_on"}` so
+outlet startup and the other media device remain coordinated.
+
+Configure other known wake targets in `adapters.wol` in the unified configuration:
+
+```json
+{
+  "devices": [
+    {"name":"workstation","mac":"02:00:00:00:00:01","wake_address":"192.0.2.255:9"}
+  ]
+}
+```
+
+The separate-file equivalent is `--adapter wol=.local/wol.json`; see
+[examples/wol.json](../examples/wol.json). Keep real inventories and addresses in
+private configuration. The adapter accepts 1–8 devices with unique names of
+1–24 ASCII letters, digits, underscores or hyphens, nonzero unicast MACs, and
+an explicit UDP destination with a nonzero port. A subnet broadcast destination
+is typical. Duplicate MACs, including aliases of Samsung targets, are rejected.
+Configuration is locked across processes; use daemon/bridge for multiple clients.
+
+`wake_list {}` returns device IDs, whether wake can be verified, and whether TV
+ownership requires maintenance. It performs no network requests and exposes no
+MACs or destinations. `wake_on_lan {"device":"wol.workstation"}` selects only
+configured IDs, accepts no caller-supplied MAC/address, and sends one 102-byte
+magic packet without retries. Generic results contain `sent:true`,
+`verified:false` and `evidence:"magic_packet_sent_once"`. No reachability probe,
+power state, shutdown capability or successful wake is inferred from the send.
+Hardware must support and enable network wake, retain standby power, and be
+reachable by the configured LAN destination; an unpowered outlet must be restored
+through its owning routine first.
+
+Both tools are implemented in Homewire's Rust MCP interface and work through
+`serve`, daemon/bridge and the authenticated API MCP transport. Controls require
+`--allow-control`. Deploying a new binary and granting these tools in a private
+agent allowlist are separate operator actions; existing ZeroClaw grants
+are not expanded automatically. Runtime restrictions still apply.
