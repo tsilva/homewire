@@ -52,6 +52,7 @@ pub mod dlna;
 mod playback;
 
 pub mod brother;
+pub mod computer;
 pub mod convenience;
 
 pub mod setup;

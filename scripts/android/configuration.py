@@ -29,7 +29,7 @@ def validate(value):
         if section in ('adapters', 'services'):
             misplaced = set(entries) & set(SERVICES if section == 'adapters' else ADAPTERS)
         else:
-            misplaced = set(entries) - set(('meaco', 'tv') if section == 'routines' else ('meaco', 'lights'))
+            misplaced = set(entries) - set(('meaco', 'tv', 'computer') if section == 'routines' else ('meaco', 'lights'))
         if misplaced:
             raise ValueError('Misplaced family or unknown routine/automation')
     if 'deployment' in value and not isinstance(value['deployment'], dict):
@@ -43,6 +43,8 @@ def validate(value):
                 raise ValueError('Orphaned or duplicate routine/automation')
     if 'tv' in value.get('routines', {}) and not {'samsung', 'digi', 'plugs'} <= set(adapters):
         raise ValueError('TV requires Samsung, DIGI and plugs')
+    if 'computer' in value.get('routines', {}) and not {'computer', 'plugs'} <= set(adapters):
+        raise ValueError('Computer routine requires computer and plugs')
     return value
 
 

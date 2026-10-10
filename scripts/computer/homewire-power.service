@@ -1,0 +1,35 @@
+[Unit]
+Description=Homewire authenticated shutdown-only listener
+After=network-online.target polkit.service
+Wants=network-online.target
+
+[Service]
+User=homewire-power
+Group=homewire-power
+ExecStart=/opt/homewire-power/current/homewire-power serve /run/credentials/homewire-power.service/server.json
+LoadCredential=server.json:/etc/homewire-power/server.json
+LoadCredential=identity.key:/etc/homewire-power/identity.key
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+UMask=0077
+TasksMax=8
+MemoryMax=32M
+
+[Install]
+WantedBy=multi-user.target

@@ -175,6 +175,9 @@ impl Manager {
     pub(crate) fn plugs(&mut self) -> &mut plug::Manager {
         &mut self.equipment.plugs
     }
+    pub(crate) fn plugs_ref(&self) -> &plug::Manager {
+        &self.equipment.plugs
+    }
 
     pub fn open(path: &Path) -> Result<Self> {
         Self::from_source(&crate::config::Source::file(path))

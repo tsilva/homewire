@@ -84,6 +84,7 @@ by each installation through private configuration.
 | [DIGI R2A](docs/reference.md#samsung-tv-and-digi-r2a) | `adapters.digi`, [digi.json](examples/digi.json) | Paired mutual TLS, verified wake/sleep and remote keys |
 | [Shared TV outlet](docs/reference.md#shared-tv-outlet-workflow) | `routines.tv`, [tv.json](examples/tv.json) | Ordered outlet, Samsung and DIGI power routines |
 | [Wake-on-LAN targets](docs/reference.md#wake-on-lan) | `adapters.wol`, [wol.json](examples/wol.json) | One-shot wake packets for explicitly configured devices; successful wake remains unverified |
+| [Computer shutdown service](docs/reference.md#computer-shutdown-service) | `adapters.computer`, [computer.json](examples/computer.json), `routines.computer` | Signed shutdown without SSH; outlet-first WoL and authenticated readiness |
 
 Printer power uses the configured smart outlets through `switch_set`; no printer
 shutdown command is sent. Printer state, queued jobs, job acceptance and hardware
@@ -198,7 +199,8 @@ only tools for configured capabilities appear.
 
 For example, `entity_status` takes `{"entities":["humidifier.meaco"]}` and
 `routine_plan` takes `{"routine":"meaco_night"}`. Available routines are
-`meaco_day`, `meaco_night`, `meaco_off`, `tv_on` and `tv_off`, depending on config.
+`meaco_day`, `meaco_night`, `meaco_off`, `tv_on`, `tv_off`, `computer_on` and
+`computer_off`, depending on config.
 Meaco plans read live state; TV plans describe conditional steps without querying
 devices. Add `serve --legacy-tools` for the original adapter-specific tool names.
 See [tool arguments and ZeroClaw setup](docs/reference.md#mcp-and-zeroclaw).
@@ -210,6 +212,17 @@ Wake-on-LAN targets. `wake_on_lan` takes `{"device":"wol.workstation"}` and
 requires `--allow-control`. Generic targets send once and return `verified:false`;
 packet delivery does not prove that the device woke. See
 [Wake-on-LAN configuration](docs/reference.md#wake-on-lan).
+
+The optional native `homewire-power` service accepts authenticated, single-use
+shutdown requests and read-only validation. It exposes no shell or arbitrary
+commands. Keep its client signing key in Infisical; the computer receives only
+the public authorization key and its separate response-signing identity key.
+`computer_on` turns on the configured outlet before WoL and verifies the running
+service. `computer_off` requests orderly shutdown once, verifies sustained
+calibrated standby consumption and service unavailability, then switches the
+outlet off. Automatic cutoff requires the explicit `metered_standby` policy;
+`leave_on` remains available when standby consumption has not been measured.
+See [setup, credential boundaries and cutoff policy](docs/reference.md#computer-shutdown-service).
 
 `--tv` owns its referenced Samsung, DIGI and plug configs; omit separate
 `--samsung`, `--digi` and `--plugs` flags when using it. Use `tv-set on|off` or

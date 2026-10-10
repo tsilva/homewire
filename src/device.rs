@@ -208,6 +208,7 @@ macro_rules! static_adapters {
         #[derive(Default)]
         pub struct Devices {
             $(pub $field: Option<$adapter>,)+
+            pub computer_routine: Option<crate::routine::computer::Manager>,
             /// Explicit override for direct controls owned by a routine.
             pub maintenance: bool,
         }
@@ -286,6 +287,7 @@ macro_rules! static_adapters {
             }
             pub fn validate(&self) -> Result<()> {
                 self.validate_ownership()?;
+                if let Some(routine) = &self.computer_routine { routine.validate(self)?; }
                 crate::wol::validate_targets(self)?;
                 let mut ambiguous = false;
                 self.entities(&mut |entity| {
@@ -303,11 +305,17 @@ macro_rules! static_adapters {
                 Selection { $($field: self.$field.is_some() $(|| self.$owner.is_some())?,)+ }
             }
             pub fn entities<'a>(&'a self, visit: &mut impl FnMut(crate::entity::Entity<'a>)) {
+                let mut owned = |mut entity: crate::entity::Entity<'a>| {
+                    if self.computer_owns_power(entity.device) && entity.domain != crate::entity::Domain::Sensor {
+                        entity.owner = Some("computer_on/computer_off");
+                    }
+                    visit(entity);
+                };
                 $(if let Some(adapter) = self.$field.as_ref() {
-                    adapter.entities(visit);
+                    adapter.entities(&mut owned);
                 })+
                 if let Some(tv) = &self.tv {
-                    tv.child_entities(visit);
+                    tv.child_entities(&mut owned);
                 }
             }
             pub(crate) fn wake_targets<'a>(&'a self, visit: &mut impl FnMut(crate::wol::Target<'a>)) {
@@ -317,6 +325,9 @@ macro_rules! static_adapters {
                 if let Some(tv) = &self.tv { tv.child_wake_targets(visit); }
             }
             pub(crate) fn wake_device(&mut self, device: crate::entity::Device) -> Result<Value> {
+                if !self.maintenance && self.computer_owns_power(device) {
+                    return Err(error("Power is owned by the computer routine; use routine_run or explicit --maintenance"));
+                }
                 if !self.maintenance && self.tv.as_ref().is_some_and(|tv|tv.owns_power(device)) {
                     return Err(error("Power is owned by the TV routine; use routine_run or explicit --maintenance"));
                 }
@@ -333,6 +344,11 @@ macro_rules! static_adapters {
                 match device.family {$(Family::$variant=>self.$field().ok_or_else(||error("Unconfigured device"))?.options(device.index),)+}
             }
             pub(crate) fn control_device(&mut self, device: crate::entity::Device, command: crate::entity::Command, args: &Value) -> Result<Value> {
+                if !self.maintenance && self.computer_owns_power(device)
+                    && (matches!(command, crate::entity::Command::Power)
+                        || matches!(command,crate::entity::Command::Configure) && args["settings"].as_object().is_some_and(|o|o.contains_key("auto_off")||o.contains_key("auto_off_minutes"))) {
+                    return Err(error("Computer routine owns power and outlet auto-off; use routine_run or explicit --maintenance"));
+                }
                 if matches!(command, crate::entity::Command::Power)
                     && !self.maintenance && self.tv.as_ref().is_some_and(|tv|tv.owns_power(device)) {
                     return Err(error("Power is owned by the TV routine; use routine_run or explicit --maintenance"));
@@ -355,6 +371,9 @@ macro_rules! static_adapters {
             /// Permission policy belongs to the caller (e.g. MCP control gate).
             pub fn call(&mut self, name: &str, args: &Value) -> Result<Value> {
                 self.validate_ownership()?;
+                if !self.maintenance && self.computer_routine.as_ref().is_some_and(|r|r.owns_command(name,args)) {
+                    return Err(error("Power is owned by the computer routine; use routine_run or explicit --maintenance"));
+                }
                 if !self.maintenance && self.tv.as_ref().is_some_and(|tv|tv.owns_command(name,args)) {
                     return Err(error("Power is owned by the TV routine; use routine_run or explicit --maintenance"));
                 }
@@ -369,6 +388,7 @@ macro_rules! static_adapters {
     };
 }
 static_adapters! {
+    computer/Computer: crate::computer::Manager,
     wol/Wol: crate::wol::Manager,
     radio/Radio: crate::convenience::Radio,
     speech/Speech: crate::convenience::Speech,
@@ -388,4 +408,17 @@ static_adapters! {
     samsung/Samsung: crate::samsung::Manager => tv.samsung,
     digi/Digi: crate::androidtv::Manager => tv.digi,
     tv/Tv: crate::tv::Manager,
+}
+
+impl Devices {
+    pub(crate) fn plugs_ref(&self) -> Option<&crate::plug::Manager> {
+        self.plugs
+            .as_ref()
+            .or_else(|| self.tv.as_ref().map(|tv| tv.plugs_ref()))
+    }
+    pub(crate) fn computer_owns_power(&self, device: crate::entity::Device) -> bool {
+        self.computer_routine
+            .as_ref()
+            .is_some_and(|r| r.owns_power(self, device))
+    }
 }

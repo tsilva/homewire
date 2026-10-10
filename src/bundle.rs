@@ -83,7 +83,7 @@ impl Bundle {
             return Err(error("Configure lights once"));
         }
         for (family, value) in &document.routines {
-            if !value.is_object() || !matches!(family.as_str(), "meaco" | "tv") {
+            if !value.is_object() || !matches!(family.as_str(), "meaco" | "tv" | "computer") {
                 return Err(error("Unknown routine or invalid section"));
             }
         }
@@ -171,6 +171,11 @@ impl Bundle {
                     .plugs
                     .take()
                     .ok_or_else(|| error("TV requires plugs configuration"))?,
+            )?);
+        }
+        if let Some(value) = self.document.routines.get("computer") {
+            devices.computer_routine = Some(crate::routine::computer::Manager::open(
+                &Source::section(&self.path, "computer-routine", value),
             )?);
         }
         devices.validate()?;

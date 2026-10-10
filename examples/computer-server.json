@@ -1,0 +1,6 @@
+{
+  "name": "workstation",
+  "listen": "192.0.2.50:39817",
+  "client_public_key": "REPLACE_WITH_CLIENT_PUBLIC_KEY_64_HEX",
+  "identity_key_file": "/run/credentials/homewire-power.service/identity.key"
+}
