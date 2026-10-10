@@ -21,7 +21,7 @@ ZCONFIG = _LAYOUT['zeroclaw']
 SERVICE = PREFIX + '/var/service/homewire'
 FILES = ('home.json', 'meaco.json', 'printers.json', 'awair.json', 'lights.json', 'plugs.json',
          'samsung.json', 'digi.json', 'tv.json', 'digi-cert.pem', 'digi-key.pem',
-         'router.json','brother.json','cast.json','dlna.json','alerts.json','history.json',
+         'brother.json','cast.json','dlna.json','alerts.json','history.json',
          'mobile.json','weather.json','shopping.json','radio.json','speech.json','api.json',
          'api-cert.pem','api-key.pem')
 
@@ -201,7 +201,7 @@ else
     [ ! -f "$root/config/$file.json" ] || set -- "$@" "--$file" "$root/config/$file.json"
   done
 fi
-for family in router brother cast dlna alerts history mobile weather shopping radio speech; do
+for family in brother cast dlna alerts history mobile weather shopping radio speech; do
   [ ! -f "$root/config/$family.json" ] || set -- "$@" --adapter "$family=$root/config/$family.json"
 done
 [ ! -f "$root/config/api.json" ] || set -- "$@" --api "$root/config/api.json"

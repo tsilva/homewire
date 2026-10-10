@@ -163,6 +163,9 @@ impl Manager {
         self.equipment.digi.entities(&mut owned);
         self.equipment.plugs.entities(&mut owned);
     }
+    pub(crate) fn child_wake_targets<'a>(&'a self, visit: &mut impl FnMut(crate::wol::Target<'a>)) {
+        self.equipment.samsung.wake_targets(visit);
+    }
     pub(crate) fn samsung(&mut self) -> &mut samsung::Manager {
         &mut self.equipment.samsung
     }

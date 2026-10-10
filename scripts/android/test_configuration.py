@@ -20,6 +20,7 @@ class ConfigurationTests(unittest.TestCase):
             configuration.write(root / 'meaco.json', meaco)
             configuration.write(root / 'lights.json', {'lights': [], 'automation': {'light': 'strip'}})
             configuration.write(root / 'shopping.json', {})
+            configuration.write(root / 'router.json', {'password': '${HOMEWIRE_SECRET_UNUSED}'})
             configuration.write(root / 'deployment.json', fixture())
             state = root / 'meaco.state.json'
             state.write_bytes(b'unchanged-state')
@@ -29,6 +30,9 @@ class ConfigurationTests(unittest.TestCase):
             self.assertEqual(value['routines']['meaco'], meaco['presets'])
             self.assertEqual(value['automations']['meaco'], meaco['schedule'])
             self.assertNotIn('presets', value['adapters']['meaco'])
+            self.assertNotIn('router', value['adapters'])
+            self.assertTrue((root / 'router.json').is_file())
+            self.assertFalse((backup / 'router.json').exists())
             self.assertEqual(value['automations']['lights'], {'light': 'strip'})
             self.assertEqual(state.read_bytes(), b'unchanged-state')
             self.assertFalse((root / 'meaco.json').exists())

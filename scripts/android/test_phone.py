@@ -28,6 +28,20 @@ class FakePhone:
 
 
 class DeploymentChecks(unittest.TestCase):
+    def test_removed_router_credentials_are_not_resolved_or_transferred(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            router = root / 'router.json'
+            original = '{"password":"${HOMEWIRE_SECRET_UNUSED}"}'
+            router.write_text(original)
+            router.chmod(0o600)
+            (root / 'shopping.json').write_text('{}')
+            (root / 'shopping.json').chmod(0o600)
+            with patch.dict('os.environ', {}, clear=True):
+                configs = dict(phone.validate_configs(root))
+            self.assertEqual(set(configs), {'shopping.json'})
+            self.assertEqual(router.read_text(), original)
+
     def test_deployment_resolves_nested_secrets_without_host_writes(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

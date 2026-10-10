@@ -240,11 +240,33 @@ fn samsung_wake_magic_packet_and_identity_guard() -> Result<()> {
         power.store(true, Ordering::Relaxed);
         Ok(())
     });
-    let mut manager = samsung::Manager::open(&path)?;
-    assert_eq!(manager.apply(true)?["verified"], true);
+    let mut devices = Devices {
+        samsung: Some(samsung::Manager::open(&path)?),
+        ..Devices::default()
+    };
+    let reply = mcp::handle_entities(json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"wake_on_lan","arguments":{"device":"samsung.samsung"}}}), &mut devices, true).expect("reply");
+    assert_eq!(
+        reply["result"]["structuredContent"]["result"]["verified"],
+        true
+    );
     worker.join().expect("wake")?;
     server.wrong.store(true, Ordering::Relaxed);
-    assert!(manager.apply(false).is_err());
+    assert!(
+        homewire::entity::call(
+            &mut devices,
+            "wake_on_lan",
+            &json!({"device":"samsung.samsung"})
+        )
+        .is_err()
+    );
+    assert!(
+        devices
+            .samsung
+            .as_mut()
+            .expect("manager")
+            .apply(false)
+            .is_err()
+    );
     assert!(server.keys.lock().expect("keys").is_empty());
     Ok(())
 }

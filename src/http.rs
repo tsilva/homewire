@@ -50,7 +50,6 @@ pub(crate) struct Request<'a> {
 pub(crate) struct Response {
     pub body: Vec<u8>,
     pub session_cookie: Option<String>,
-    pub cookies: String,
 }
 pub(crate) fn send(
     address: SocketAddr,
@@ -122,7 +121,6 @@ pub(crate) fn read_response(
 ) -> Result<Response> {
     let limit = limit.min(MAX_BODY);
     let mut session_cookie = None;
-    let mut cookies = String::new();
     let mut budget = MAX_HEADERS;
     let mut length = None;
     let mut chunked = false;
@@ -142,7 +140,6 @@ pub(crate) fn read_response(
         chunked = false;
         content_type = None;
         session_cookie = None;
-        cookies.clear();
         loop {
             let header = line(reader, &mut budget)?;
             if header.is_empty() {
@@ -152,23 +149,6 @@ pub(crate) fn read_response(
                 .split_once(':')
                 .ok_or_else(|| error("Invalid device HTTP header"))?;
             let value = value.trim();
-            if name.eq_ignore_ascii_case("set-cookie") {
-                let pair = value.split(';').next().unwrap_or_default();
-                if let Some((key, val)) = pair.split_once('=') {
-                    if !key
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
-                        || val.bytes().any(|b| b < 33 || b == 127)
-                        || cookies.len() + pair.len() > 2048
-                    {
-                        return Err(error("Invalid HTTP cookie"));
-                    }
-                    if !cookies.is_empty() {
-                        cookies.push_str("; ");
-                    }
-                    cookies.push_str(pair);
-                }
-            }
             if name.eq_ignore_ascii_case("content-length") {
                 if length.is_some() {
                     return Err(error("Duplicate device HTTP content length"));
@@ -238,7 +218,6 @@ pub(crate) fn read_response(
                 return Ok(Response {
                     body,
                     session_cookie,
-                    cookies,
                 });
             }
             if size > limit - body.len() {
@@ -266,7 +245,6 @@ pub(crate) fn read_response(
     Ok(Response {
         body,
         session_cookie,
-        cookies,
     })
 }
 

@@ -83,12 +83,26 @@ by each installation through private configuration.
 | [Samsung UE40H6200](docs/reference.md#samsung-tv-and-digi-r2a) | `adapters.samsung`, [samsung.json](examples/samsung.json) | Existing encrypted pairing, wake, shutdown request and remote keys |
 | [DIGI R2A](docs/reference.md#samsung-tv-and-digi-r2a) | `adapters.digi`, [digi.json](examples/digi.json) | Paired mutual TLS, verified wake/sleep and remote keys |
 | [Shared TV outlet](docs/reference.md#shared-tv-outlet-workflow) | `routines.tv`, [tv.json](examples/tv.json) | Ordered outlet, Samsung and DIGI power routines |
+| [Wake-on-LAN targets](docs/reference.md#wake-on-lan) | `adapters.wol`, [wol.json](examples/wol.json) | One-shot wake packets for explicitly configured devices; successful wake remains unverified |
+
+Printer power uses the configured smart outlets through `switch_set`; no printer
+shutdown command is sent. Printer state, queued jobs, job acceptance and hardware
+fault status have individual read-only entities. Monitoring reports paper/jam,
+cover and supply faults, plus separate confirmed low ink/toner warnings and
+recovery. Missing readings never clear retained alerts. See
+[printer monitoring](docs/reference.md#printers).
 
 Enable Awair's local API in its app. L900 fixed brightness/colour settings
 require effects and music mode to be off. P110 overload guards block changing
 power to on while protection status is active or unknown. Samsung shutdown may
 return `verified: false`; its API does not always report physical power state.
 See the reference for each adapter's verification limits.
+
+Router administration and router-based presence tracking have been removed.
+Remove `adapters.router` from existing unified configurations before starting
+this version; unsupported adapter sections fail configuration validation.
+Android installs no longer import, copy or launch legacy `router.json` files.
+Companion location and person entities remain available through `mobile`.
 
 ## Household services
 
@@ -98,7 +112,6 @@ the unified file:
 
 | Family | Support |
 | --- | --- |
-| `router` | Archer AXE75 status, client/presence tracking, Wi-Fi, DHCP and OpenVPN/PPTP settings |
 | `brother` | Read-only SNMP page, duplex, toner and drum diagnostics |
 | `cast`, `dlna` | Pinned Cast v2 and identity-checked DLNA playback, volume, mute and seek |
 | `mobile` | Companion battery/location and person entities, preserving uncertain states |
@@ -153,6 +166,12 @@ recovery sends a resolved message. Failed sends remain pending, and saved delive
 receipts suppress unchanged repeats across normal restarts. See
 [alert delivery configuration](docs/reference.md#alerts-history-and-convenience-tools).
 
+Companion battery reports can also feed those channels. Explicitly configure
+`services.mobile.battery_monitor` with the paired devices to monitor. Defaults
+warn below 15% and recover at 20%; missing or stale reports never clear a warning.
+Add the exact `battery.NAME` key to filtered delivery channels. See
+[companion battery monitoring](docs/reference.md#companion-battery-monitoring).
+
 ## MCP and ZeroClaw
 
 Expose configured devices through one local stdio server:
@@ -174,6 +193,7 @@ only tools for configured capabilities appear.
 | `radio_search`, `tts_media` | Find stations / create speech media URLs |
 | `light_set`, `switch_set` | Apply absolute light settings and outlet power |
 | `media_power`, `remote_key` | Control media power and send remote keys |
+| `wake_list`, `wake_on_lan` | Discover configured wake targets / request Wake-on-LAN |
 | `routine_list`, `routine_plan`, `routine_run` | Discover, preview and execute household routines |
 
 For example, `entity_status` takes `{"entities":["humidifier.meaco"]}` and
@@ -182,6 +202,14 @@ For example, `entity_status` takes `{"entities":["humidifier.meaco"]}` and
 Meaco plans read live state; TV plans describe conditional steps without querying
 devices. Add `serve --legacy-tools` for the original adapter-specific tool names.
 See [tool arguments and ZeroClaw setup](docs/reference.md#mcp-and-zeroclaw).
+
+Samsung is automatically available as `samsung.samsung` in `wake_list`; waking
+it retains identity checks, on-state verification and TV ownership guards.
+Add `adapters.wol` using [wol.json](examples/wol.json) to name up to eight other
+Wake-on-LAN targets. `wake_on_lan` takes `{"device":"wol.workstation"}` and
+requires `--allow-control`. Generic targets send once and return `verified:false`;
+packet delivery does not prove that the device woke. See
+[Wake-on-LAN configuration](docs/reference.md#wake-on-lan).
 
 `--tv` owns its referenced Samsung, DIGI and plug configs; omit separate
 `--samsung`, `--digi` and `--plugs` flags when using it. Use `tv-set on|off` or

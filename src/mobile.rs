@@ -1,7 +1,7 @@
 //! Native companion telemetry. Ingestion is private API-only, never an MCP tool.
 use crate::{
     Result, config,
-    device::{Adapter, Tool},
+    device::{Adapter, Monitored, Tool},
     entity::{Capabilities, Domain, Entity, Support},
     error,
 };
@@ -24,6 +24,8 @@ pub struct Config {
     pub max_age_seconds: i64,
     #[serde(default)]
     pub persons: Vec<Person>,
+    #[serde(default)]
+    pub battery_monitor: Option<crate::battery::Config>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -61,6 +63,7 @@ pub struct Manager {
     state: BTreeMap<String, Report>,
     path: PathBuf,
     _lock: File,
+    battery_monitor: Option<crate::battery::Monitor>,
 }
 impl Manager {
     pub fn open(path: &Path) -> Result<Self> {
@@ -68,7 +71,7 @@ impl Manager {
     }
     pub fn from_source(source: &crate::config::Source<'_>) -> Result<Self> {
         let path = source.path();
-        let config: Config = source.decode()?;
+        let mut config: Config = source.decode()?;
         if config.devices.is_empty()
             || config.devices.len() > 8
             || !config::valid_unique_labels(config.devices.iter().map(String::as_str), 32, b"-_")
@@ -102,11 +105,17 @@ impl Manager {
         {
             return Err(error("Invalid companion state"));
         }
+        let battery_monitor = config
+            .battery_monitor
+            .take()
+            .map(|monitor| crate::battery::Monitor::open(path, monitor, &config.devices))
+            .transpose()?;
         Ok(Self {
             config,
             state,
             path: state_path,
             _lock: config::lock_configuration(path)?,
+            battery_monitor,
         })
     }
     pub fn report(&mut self, name: &str, value: &Value, now: i64) -> Result<Value> {
@@ -123,6 +132,9 @@ impl Manager {
         next.insert(name.into(), report);
         config::save_private_bounded(&self.path, &next, 16384)?;
         self.state = next;
+        if let Some(monitor) = &mut self.battery_monitor {
+            monitor.report_received(name);
+        }
         Ok(json!({"accepted":true,"received_at":now}))
     }
     fn status(&self, index: usize, now: i64) -> Result<Value> {
@@ -184,6 +196,23 @@ fn distance_m(a: f64, b: f64, c: f64, d: f64) -> f64 {
     6371000.0 * 2.0 * x.sqrt().atan2((1.0 - x).max(0.0).sqrt())
 }
 impl Adapter for Manager {
+    fn next_background(&self) -> Option<std::time::Instant> {
+        self.battery_monitor
+            .as_ref()
+            .map(crate::battery::Monitor::next_poll)
+    }
+    fn background_tick(&mut self) -> Result<()> {
+        if let Some(monitor) = self.battery_monitor.as_mut() {
+            monitor.background_tick(&self.state, self.config.max_age_seconds)?;
+        }
+        Ok(())
+    }
+    fn reconcile_alerts(&self, alerts: &mut crate::alerts::Manager, now: i64) -> Result<()> {
+        if let Some(monitor) = &self.battery_monitor {
+            monitor.reconcile_alerts(alerts, now)?;
+        }
+        Ok(())
+    }
     const CONFIG_SECTION: &'static str = "services";
     const TOOLS: &'static [Tool] = &[];
     const SUPPORT: Support = Support::READ;
@@ -228,5 +257,29 @@ impl Adapter for Manager {
     }
     fn read_device(&mut self, index: usize) -> Result<Value> {
         self.status(index, chrono::Utc::now().timestamp())
+    }
+}
+impl Monitored for Manager {
+    type Unavailable = crate::battery::Unavailable;
+    type Event = crate::fault::Event;
+    fn poll_seconds(&self) -> u64 {
+        self.battery_monitor
+            .as_ref()
+            .map_or(60, crate::battery::Monitor::poll_seconds)
+    }
+    fn watch(&mut self) -> Result<crate::fault::Watch<Self::Unavailable>> {
+        self.battery_monitor
+            .as_mut()
+            .ok_or_else(|| error("Battery monitoring is not configured"))?
+            .watch(
+                &self.state,
+                self.config.max_age_seconds,
+                chrono::Utc::now().timestamp(),
+            )
+    }
+    fn active_faults(&self, visit: &mut impl FnMut(&str, &[String])) {
+        if let Some(monitor) = &self.battery_monitor {
+            monitor.active_faults(visit);
+        }
     }
 }

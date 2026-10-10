@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     fs::File,
-    net::{IpAddr, SocketAddr, UdpSocket},
+    net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -237,19 +237,7 @@ impl Manager {
             return Err(error("Samsung state unavailable; control blocked"));
         }
         if power {
-            let mac = mac_bytes(&self.config.mac)?;
-            let mut packet = [0xff; 102];
-            for block in packet[6..].chunks_exact_mut(6) {
-                block.copy_from_slice(&mac);
-            }
-            let bind = if self.config.wake_address.is_ipv4() {
-                "0.0.0.0:0"
-            } else {
-                "[::]:0"
-            };
-            let socket = UdpSocket::bind(bind)?;
-            socket.set_broadcast(true)?;
-            socket.send_to(&packet, self.config.wake_address)?;
+            crate::wol::send(mac_bytes(&self.config.mac)?, self.config.wake_address)?;
             let until = Instant::now() + Duration::from_secs(self.config.verify_seconds);
             while Instant::now() < until {
                 if let Ok(status) = self.status_until(
@@ -331,7 +319,7 @@ fn network_error(e: &(dyn std::error::Error + 'static)) -> bool {
     })
 }
 fn mac_bytes(text: &str) -> Result<[u8; 6]> {
-    media::hex::<6>(&text.replace(':', ""))
+    crate::wol::mac_bytes(text)
 }
 fn encrypted_command(token: &str, session: u32, key: &str) -> Result<String> {
     let mut bytes = serde_json::to_vec(
@@ -392,7 +380,27 @@ const KEY: Input = Input::Field {
     shape_error: "Expected only key",
 };
 impl Adapter for Manager {
-    const SUPPORT: crate::entity::Support = crate::entity::Support::MEDIA;
+    const SUPPORT: crate::entity::Support =
+        crate::entity::Support::MEDIA.union(crate::entity::Support::WAKE);
+    fn wake_targets<'a>(&'a self, visit: &mut impl FnMut(crate::wol::Target<'a>)) {
+        if let Ok(mac) = mac_bytes(&self.config.mac) {
+            visit(crate::wol::Target {
+                device: crate::entity::Device {
+                    family: crate::device::Family::Samsung,
+                    index: 0,
+                },
+                name: "samsung",
+                mac,
+                verified: true,
+            });
+        }
+    }
+    fn wake_device(&mut self, index: usize) -> Result<Value> {
+        if index != 0 {
+            return Err(error("Unknown Samsung device"));
+        }
+        self.apply(true)
+    }
     fn entities<'a>(&'a self, visit: &mut impl FnMut(crate::entity::Entity<'a>)) {
         use crate::{
             device::Family,

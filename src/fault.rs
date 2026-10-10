@@ -42,6 +42,8 @@ pub struct Event {
 // Borrow single reported faults without constructing a temporary Vec/String.
 pub(crate) enum Faults<'a> {
     Unknown,
+    /// No new sample yet; preserve confirmation but do not advance it.
+    NoSample,
     Clear,
     One(&'a str),
     Many(&'a [String]),
@@ -111,6 +113,9 @@ impl Monitor {
         faults: Faults<'_>,
         now: u64,
     ) -> Option<Transition> {
+        if matches!(faults, Faults::NoSample) {
+            return None;
+        }
         if matches!(faults, Faults::Unknown) {
             self.candidates.remove(name);
             return None;
@@ -230,6 +235,11 @@ pub(crate) trait Target {
     fn identity(&self) -> String;
     fn read(&self, timeout: Duration) -> Result<Self::Status>;
     fn faults(status: &Self::Status) -> Faults<'_>;
+    /// Threshold warnings can use published state for hysteresis without
+    /// retaining a second device snapshot or bypassing confirmation/persistence.
+    fn monitored_faults<'a>(&self, status: &'a Self::Status, _published: &[String]) -> Faults<'a> {
+        Self::faults(status)
+    }
     fn unavailable(&self, error: String) -> Self::Unavailable;
 }
 
@@ -292,7 +302,14 @@ impl Store {
         let mut transitions = Vec::new();
         for target in targets {
             let result = target.read(timeout);
-            let faults = result.as_ref().map_or(Faults::Unknown, T::faults);
+            let published = monitor
+                .memory
+                .devices
+                .get(target.name())
+                .map_or(&[][..], |saved| saved.faults.as_slice());
+            let faults = result.as_ref().map_or(Faults::Unknown, |status| {
+                target.monitored_faults(status, published)
+            });
             if let Some(transition) = monitor.prepare(
                 target.name(),
                 || target.identity(),
@@ -334,6 +351,55 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn repeated_telemetry_cannot_confirm_a_transition() {
+        let mut monitor = Monitor::default();
+        assert!(
+            monitor
+                .prepare("phone", || "phone".into(), Faults::One("low_battery"), 0)
+                .is_none()
+        );
+        assert!(
+            monitor
+                .prepare("phone", || "phone".into(), Faults::NoSample, 100)
+                .is_none()
+        );
+        let low = monitor
+            .prepare("phone", || "phone".into(), Faults::One("low_battery"), 101)
+            .expect("new low report");
+        low.publish(&mut monitor.memory);
+        monitor.candidates.clear();
+        assert!(
+            monitor
+                .prepare("phone", || "phone".into(), Faults::Clear, 102)
+                .is_none()
+        );
+        assert!(
+            monitor
+                .prepare("phone", || "phone".into(), Faults::NoSample, 140)
+                .is_none()
+        );
+        assert!(
+            monitor
+                .prepare("phone", || "phone".into(), Faults::Unknown, 141)
+                .is_none()
+        );
+        assert!(
+            monitor
+                .prepare("phone", || "phone".into(), Faults::Clear, 142)
+                .is_none()
+        );
+        assert!(
+            monitor
+                .prepare("phone", || "phone".into(), Faults::Clear, 171)
+                .is_none()
+        );
+        assert!(
+            monitor
+                .prepare("phone", || "phone".into(), Faults::Clear, 172)
+                .is_some()
+        );
+    }
     use std::{
         cell::Cell,
         fs,

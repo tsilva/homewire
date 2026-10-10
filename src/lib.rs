@@ -1,5 +1,6 @@
 pub mod alerts;
 pub mod awair;
+pub mod battery;
 pub mod bulb;
 pub mod config;
 pub mod device;
@@ -17,7 +18,6 @@ pub mod meaco;
 pub mod naming;
 pub mod plug;
 pub mod printer;
-pub mod router;
 pub mod routine;
 pub mod schedule;
 pub mod settings;
@@ -57,3 +57,4 @@ pub mod convenience;
 pub mod setup;
 
 pub mod bundle;
+pub mod wol;

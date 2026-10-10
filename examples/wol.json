@@ -1,0 +1,9 @@
+{
+  "devices": [
+    {
+      "name": "workstation",
+      "mac": "02:00:00:00:00:01",
+      "wake_address": "192.0.2.255:9"
+    }
+  ]
+}

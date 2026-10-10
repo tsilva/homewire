@@ -139,6 +139,7 @@ pub struct Status {
     pub queued_jobs: Option<u32>,
     pub supplies: Vec<Supply>,
     pub faults_known: bool,
+    pub fault_active: Option<bool>,
     pub faults: Vec<String>,
 }
 impl Status {
@@ -203,6 +204,7 @@ impl Status {
                 .and_then(|n| u32::try_from(n).ok()),
             supplies,
             faults_known,
+            fault_active: faults_known.then_some(!faults.is_empty()),
             faults,
         })
     }
@@ -316,7 +318,29 @@ pub struct Manager {
     warning_path: std::path::PathBuf,
     started: std::time::Instant,
 }
-pub type Check = fault::Check<Status, Unavailable, Event>;
+#[derive(Serialize)]
+pub struct Check {
+    pub events: Vec<Event>,
+    pub statuses: Vec<Status>,
+    pub unavailable: Vec<Unavailable>,
+    pub active_faults: std::collections::BTreeMap<String, Vec<String>>,
+    pub supply_events: Vec<SupplyEvent>,
+    pub active_supply_warnings: std::collections::BTreeMap<String, Vec<String>>,
+}
+#[derive(Serialize)]
+pub struct SupplyEvent {
+    pub printer: String,
+    pub supply: usize,
+    pub event: &'static str,
+    pub warnings: Vec<String>,
+    pub previous_warnings: Vec<String>,
+}
+#[derive(Serialize)]
+#[serde(untagged)]
+pub enum WatchEvent {
+    Fault(Event),
+    Supply(SupplyEvent),
+}
 #[derive(Serialize)]
 pub struct Unavailable {
     pub printer: String,
@@ -357,18 +381,39 @@ impl Manager {
         printer.read(Duration::from_secs(self.config.timeout_seconds))
     }
     pub fn check(&mut self) -> Result<Check> {
-        self.store.check(
+        let check = self.store.check(
             &mut self.monitor,
             &self.config.printers,
             Duration::from_secs(self.config.timeout_seconds),
-        )
+        )?;
+        let supply_events =
+            self.observe_supplies(&check.statuses, self.started.elapsed().as_secs())?;
+        Ok(Check {
+            events: check.events,
+            statuses: check.statuses,
+            unavailable: check.unavailable,
+            active_faults: check.active_faults,
+            supply_events,
+            active_supply_warnings: self.warnings.active_faults(),
+        })
     }
-    pub fn watch(&mut self) -> Result<fault::Watch<Unavailable, Event>> {
+    pub fn watch(&mut self) -> Result<fault::Watch<Unavailable, WatchEvent>> {
         let check = self.check()?;
+        Ok(fault::Watch {
+            events: check
+                .events
+                .into_iter()
+                .map(WatchEvent::Fault)
+                .chain(check.supply_events.into_iter().map(WatchEvent::Supply))
+                .collect(),
+            unavailable: check.unavailable,
+        })
+    }
+    fn observe_supplies(&mut self, statuses: &[Status], now: u64) -> Result<Vec<SupplyEvent>> {
         let mut warnings = self.warnings.clone();
-        let mut changed = false;
+        let mut events = Vec::new();
         for p in &self.config.printers {
-            let status = check.statuses.iter().find(|s| s.printer == p.name);
+            let status = statuses.iter().find(|s| s.printer == p.name);
             for i in 0..16 {
                 let key = format!("{}_supply_{i}", p.name);
                 let observation = status
@@ -382,24 +427,28 @@ impl Manager {
                             vec![]
                         }
                     });
-                changed |= warnings
-                    .observe_faults(
-                        &key,
-                        &p.identity(),
-                        observation.as_deref(),
-                        self.started.elapsed().as_secs(),
-                    )
-                    .is_some();
+                if let Some(event) =
+                    warnings.observe_faults(&key, &p.identity(), observation.as_deref(), now)
+                {
+                    events.push(SupplyEvent {
+                        printer: p.name.clone(),
+                        supply: i,
+                        event: if event.faults.is_empty() {
+                            "supply_recovered"
+                        } else {
+                            "supply_warning"
+                        },
+                        warnings: event.faults,
+                        previous_warnings: event.previous_faults,
+                    });
+                }
             }
         }
-        if changed {
+        if !events.is_empty() {
             warnings.save(&self.warning_path)?;
         }
         self.warnings = warnings;
-        Ok(fault::Watch {
-            events: check.events,
-            unavailable: check.unavailable,
-        })
+        Ok(events)
     }
 }
 
@@ -439,14 +488,25 @@ impl Adapter for Manager {
             entity::{Capabilities, Domain, Entity},
         };
         for (index, endpoint) in self.config.printers.iter().enumerate() {
-            visit(Entity::new(
+            let base = Entity::new(
                 Family::Printers,
                 index,
                 Domain::Printer,
                 &endpoint.name,
                 "unknown",
                 Capabilities::Read,
-            ));
+            );
+            visit(base);
+            for (suffix, field, unit) in [
+                ("_state", "state", None),
+                ("_queued_jobs", "queued_jobs", Some("jobs")),
+                ("_accepting_jobs", "accepting_jobs", None),
+                ("_fault_active", "fault_active", None),
+            ] {
+                let mut sensor = base.sensor(suffix, field, unit.unwrap_or(""));
+                sensor.unit = unit;
+                visit(sensor);
+            }
         }
     }
     fn read_device(&mut self, index: usize) -> Result<Value> {
@@ -468,7 +528,7 @@ impl Adapter for Manager {
         },
         Tool {
             name: "printer_check",
-            description: "Poll all printers and return debounced fault/recovery events plus retained faults. Unavailable readings never clear faults. Use repeatedly in this server for monitoring.",
+            description: "Poll all printers and return debounced hardware fault and separate low-supply warning/recovery events plus retained alerts. Unavailable readings never clear alerts. Use repeatedly in this server for monitoring.",
             input: Input::Empty,
             hints: Hints::CHECK,
         },
@@ -514,11 +574,150 @@ impl crate::device::Monitored for Manager {
     }
 
     type Unavailable = Unavailable;
-    type Event = Event;
+    type Event = WatchEvent;
     fn poll_seconds(&self) -> u64 {
         self.config.poll_seconds
     }
     fn watch(&mut self) -> Result<fault::Watch<Self::Unavailable, Self::Event>> {
         Manager::watch(self)
+    }
+}
+
+#[cfg(test)]
+#[path = "../tests/support/media.rs"]
+#[allow(dead_code)]
+mod test_support;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temporary() -> Result<test_support::Directory> {
+        let path = std::env::temp_dir().join(format!(
+            "homewire-printer-unit-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        ));
+        std::fs::create_dir(&path)?;
+        Ok(test_support::Directory(path))
+    }
+
+    fn open_manager(temp: &test_support::Directory) -> Result<Manager> {
+        Manager::open(&temp.config(
+            "printers.json",
+            &json!({"printers":[{"name":"printer","host":"192.0.2.1"}]}),
+        )?)
+    }
+    fn supply(level: Option<i32>) -> Result<Status> {
+        let mut attributes = json!({"printer-state":[3],"printer-state-reasons":["none"]});
+        if let Some(level) = level {
+            attributes["marker-levels"] = json!([level]);
+        }
+        Status::from_attributes("printer", &serde_json::from_value(attributes)?)
+    }
+
+    #[test]
+    fn unknown_or_missing_supplies_interrupt_recovery_without_clearing_warnings() -> Result<()> {
+        let temp = temporary()?;
+        let mut manager = open_manager(&temp)?;
+        let low = supply(Some(15))?;
+        let full = supply(Some(80))?;
+        assert_eq!(low.fault_active, Some(false));
+        assert!(
+            manager
+                .observe_supplies(std::slice::from_ref(&low), 0)?
+                .is_empty()
+        );
+        let events = manager.observe_supplies(&[low], 3)?;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event, "supply_warning");
+        assert!(
+            manager
+                .observe_supplies(std::slice::from_ref(&full), 10)?
+                .is_empty()
+        );
+        assert!(
+            manager
+                .observe_supplies(&[supply(Some(-2))?], 39)?
+                .is_empty()
+        );
+        assert_eq!(manager.warnings.active_faults().len(), 1);
+        assert!(
+            manager
+                .observe_supplies(std::slice::from_ref(&full), 40)?
+                .is_empty()
+        );
+        assert!(manager.observe_supplies(&[supply(None)?], 69)?.is_empty());
+        assert!(
+            manager
+                .observe_supplies(std::slice::from_ref(&full), 70)?
+                .is_empty()
+        );
+        assert!(manager.observe_supplies(&[], 99)?.is_empty());
+        assert!(
+            manager
+                .observe_supplies(std::slice::from_ref(&full), 100)?
+                .is_empty()
+        );
+        assert!(
+            manager
+                .observe_supplies(std::slice::from_ref(&full), 129)?
+                .is_empty()
+        );
+        let events = manager.observe_supplies(std::slice::from_ref(&full), 130)?;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event, "supply_recovered");
+        assert!(events[0].warnings.is_empty());
+        assert_eq!(
+            events[0].previous_warnings,
+            vec!["low_supply_at_or_below_15_percent"]
+        );
+        assert!(manager.warnings.active_faults().is_empty());
+        let json = serde_json::to_value(WatchEvent::Supply(
+            events.into_iter().next().expect("event"),
+        ))?;
+        assert_eq!(json["printer"], "printer");
+        assert_eq!(json["supply"], 0);
+        assert!(
+            !json
+                .as_object()
+                .expect("supply event")
+                .contains_key("faults")
+        );
+        drop(manager);
+        let mut restored = open_manager(&temp)?;
+        assert!(restored.observe_supplies(&[full], 0)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn supply_persistence_failure_does_not_publish_or_lose_confirmed_transition() -> Result<()> {
+        let temp = temporary()?;
+        let mut manager = open_manager(&temp)?;
+        let low = supply(Some(5))?;
+        assert!(
+            manager
+                .observe_supplies(std::slice::from_ref(&low), 0)?
+                .is_empty()
+        );
+        std::fs::create_dir(&manager.warning_path)?;
+        assert!(
+            manager
+                .observe_supplies(std::slice::from_ref(&low), 3)
+                .is_err()
+        );
+        assert!(manager.warnings.active_faults().is_empty());
+        std::fs::remove_dir(&manager.warning_path)?;
+        assert_eq!(
+            manager
+                .observe_supplies(std::slice::from_ref(&low), 4)?
+                .len(),
+            1
+        );
+        assert_eq!(manager.warnings.active_faults().len(), 1);
+        assert!(manager.observe_supplies(&[low], 5)?.is_empty());
+        Ok(())
     }
 }

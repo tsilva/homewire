@@ -9,6 +9,9 @@ use std::{
     net::{IpAddr, Ipv4Addr, TcpListener},
     time::Duration,
 };
+#[path = "support/media.rs"]
+#[allow(dead_code)]
+mod support;
 
 fn endpoint() -> Endpoint {
     Endpoint {
@@ -270,6 +273,84 @@ fn supplies_do_not_create_faults_without_reported_reasons() -> Result<()> {
 }
 
 #[test]
+fn printer_sensor_batch_shares_one_query_and_preserves_unknown_readings() -> Result<()> {
+    use homewire::{device::Devices, entity, printer::Manager};
+    let temp = support::Directory::new()?;
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let config = temp.config(
+        "printers.json",
+        &json!({"printers":[{"name":"printer","host":"192.0.2.1","connect":listener.local_addr()?}],"timeout_seconds":1}),
+    )?;
+    let mut devices = Devices {
+        printers: Some(Manager::open(&config)?),
+        ..Devices::default()
+    };
+    devices.validate()?;
+    let discovery = entity::list(&devices);
+    assert_eq!(discovery["entities"].as_array().expect("entities").len(), 5);
+    assert!(!discovery.to_string().contains("192.0.2.1"));
+    let worker = std::thread::spawn(move || -> Result<()> {
+        for state in [3_i32, 5] {
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(3)))?;
+            let mut reader = BufReader::new(socket.try_clone()?);
+            let mut size = 0;
+            loop {
+                let mut line = String::new();
+                assert_ne!(reader.read_line(&mut line)?, 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.strip_prefix("Content-Length: ") {
+                    size = value.trim().parse::<usize>()?;
+                }
+            }
+            let mut request = vec![0; size];
+            reader.read_exact(&mut request)?;
+            assert_eq!(&request[..4], &[1, 1, 0, 11]);
+            let mut body = vec![1, 1, 0, 0, 0, 0, 0, 1, 4];
+            attribute(&mut body, 0x23, "printer-state", &state.to_be_bytes());
+            attribute(&mut body, 0x44, "printer-state-reasons", b"none");
+            if state == 3 {
+                attribute(&mut body, 0x21, "queued-job-count", &2_i32.to_be_bytes());
+                attribute(&mut body, 0x22, "printer-is-accepting-jobs", &[1]);
+            }
+            body.push(3);
+            socket.write_all(
+                format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).as_bytes(),
+            )?;
+            socket.write_all(&body)?;
+        }
+        listener.set_nonblocking(true)?;
+        assert_eq!(
+            listener.accept().expect_err("exactly two queries").kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        Ok(())
+    });
+    for (state, jobs, acceptance, fault) in [
+        ("idle", json!(2), json!(true), json!(false)),
+        ("stopped", json!(null), json!(null), json!(null)),
+    ] {
+        let reply = entity::call(
+            &mut devices,
+            "entity_status",
+            &json!({"entities":["printer.printer","sensor.printer_state","sensor.printer_queued_jobs","sensor.printer_accepting_jobs","sensor.printer_fault_active"]}),
+        )?;
+        let states = reply["states"].as_array().expect("states");
+        assert!(states.iter().all(|s| s["available"] == true));
+        assert_eq!(states[0]["state"]["state"], state);
+        assert_eq!(states[1]["state"], state);
+        assert_eq!(states[2]["state"], jobs);
+        assert_eq!(states[3]["state"], acceptance);
+        assert_eq!(states[4]["state"], fault);
+        assert_eq!(states[0]["observed_at"], states[4]["observed_at"]);
+    }
+    worker.join().expect("printer mock")?;
+    Ok(())
+}
+
+#[test]
 fn monitoring_persists_before_emitting_and_restart_does_not_repeat_a_fault() -> Result<()> {
     use homewire::printer::Manager;
     use std::fs;
@@ -317,6 +398,7 @@ fn monitoring_persists_before_emitting_and_restart_does_not_repeat_a_fault() -> 
             let mut body = vec![1, 1, 0, 0, 0, 0, 0, 1, 4];
             attribute(&mut body, 0x23, "printer-state", &3_i32.to_be_bytes());
             attribute(&mut body, 0x44, "printer-state-reasons", b"cover-open");
+            attribute(&mut body, 0x21, "marker-levels", &10_i32.to_be_bytes());
             body.push(3);
             socket.write_all(
                 format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).as_bytes(),
@@ -331,13 +413,26 @@ fn monitoring_persists_before_emitting_and_restart_does_not_repeat_a_fault() -> 
     std::thread::sleep(Duration::from_secs(3));
     let check = manager.check()?;
     assert_eq!(check.events.len(), 1);
+    assert_eq!(check.supply_events.len(), 1);
+    assert_eq!(check.supply_events[0].printer, "brother");
+    assert_eq!(check.supply_events[0].supply, 0);
+    assert_eq!(check.supply_events[0].event, "supply_warning");
+    assert_eq!(check.active_supply_warnings.len(), 1);
     let persisted: Memory =
         serde_json::from_slice(&fs::read(config_path.with_extension("state.json"))?)?;
     assert_eq!(persisted.devices["brother"].faults, vec!["cover-open"]);
+    let saved_warnings: Memory =
+        serde_json::from_slice(&fs::read(config_path.with_extension("supply-state.json"))?)?;
+    assert_eq!(
+        saved_warnings.devices["brother_supply_0"].faults,
+        vec!["low_supply_at_or_below_15_percent"]
+    );
     drop(manager);
     let mut restarted = Manager::open(&config_path)?;
     let check = restarted.check()?;
     assert!(check.events.is_empty());
+    assert!(check.supply_events.is_empty());
+    assert_eq!(check.active_supply_warnings.len(), 1);
     assert_eq!(check.active_faults["brother"], vec!["cover-open"]);
     drop(restarted);
     worker.join().expect("worker")?;

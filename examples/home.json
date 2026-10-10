@@ -109,20 +109,6 @@
       "timeout_seconds": 8,
       "verify_seconds": 20
     },
-    "router": {
-      "name": "router",
-      "url": "http://192.0.2.1",
-      "password": "REPLACE_WITH_LOCAL_ADMIN_PASSWORD",
-      "poll_seconds": 60,
-      "absence_seconds": 180,
-      "trackers": [
-        {
-          "name": "lan_phone",
-          "mac": "02:00:00:00:00:01",
-          "person": true
-        }
-      ]
-    },
     "brother": {
       "name": "printer_diagnostics",
       "host": "192.0.2.50",

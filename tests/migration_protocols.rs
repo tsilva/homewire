@@ -1,4 +1,4 @@
-use homewire::{Result, api, cast, device::Adapter, dlna, entity::Command, router};
+use homewire::{Result, api, cast, device::Adapter, dlna, entity::Command};
 use serde_json::{Value, json};
 use std::{
     io::{BufRead, BufReader, Read, Write},
@@ -35,7 +35,7 @@ fn request(stream: &mut impl Read) -> Result<(String, Vec<u8>)> {
 fn response(stream: &mut impl Write, body: &[u8]) -> Result<()> {
     write!(
         stream,
-        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nSet-Cookie: sysauth=test-cookie; Path=/\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     )?;
     stream.write_all(body)?;
@@ -197,70 +197,6 @@ fn dlna_verifies_identity_before_soap_and_parses_readback() -> Result<()> {
         m.control_device(0, Command::Playback, &json!({"command":{"action":"stop"}}))
             .is_err()
     );
-    worker.join().expect("server")?;
-    Ok(())
-}
-#[test]
-fn router_rsa_login_client_presence_and_logout_without_controls() -> Result<()> {
-    use rsa::{Pkcs1v15Encrypt, RsaPrivateKey, traits::PublicKeyParts};
-    let t = support::Directory::new()?;
-    let key = RsaPrivateKey::new(&mut rand_core::OsRng, 2048)?;
-    let listener = TcpListener::bind("127.0.0.1:0")?;
-    let url = format!("http://{}", listener.local_addr()?);
-    let worker = thread::spawn(move || -> Result<()> {
-        for _ in 0..9 {
-            let (mut s, _) = listener.accept()?;
-            let (path, body) = request(&mut s)?;
-            let data = if path.contains("form=keys") {
-                // Live V1_11 firmware rejects operation repeated in the body.
-                assert!(body.is_empty());
-                json!({"password":[format!("{:0512x}",key.n()),format!("{:x}",key.e())]})
-            } else if path.contains("form=login") {
-                let b = String::from_utf8(body)?;
-                let hex = b
-                    .split("password=")
-                    .nth(1)
-                    .expect("password")
-                    .split('&')
-                    .next()
-                    .expect("cipher");
-                let bytes = (0..hex.len())
-                    .step_by(2)
-                    .map(|i| u8::from_str_radix(&hex[i..i + 2], 16))
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                assert_eq!(key.decrypt(Pkcs1v15Encrypt, &bytes)?, b"synthetic-pass");
-                json!({"stok":"teststok"})
-            } else {
-                let args: Value = serde_json::from_slice(&body)?;
-                assert!(path.contains("teststok"));
-                if path.contains("firmware") {
-                    json!({"model":"Archer AXE75","firmware_version":"test"})
-                } else if path.contains("status") {
-                    assert_eq!(args["operation"], "read");
-                    json!({"access_devices_wired":[],"access_devices_wireless_host":[{"macaddr":"00-11-22-33-44-55","ipaddr":"192.0.2.2","hostname":"Pixel"}],"access_devices_wireless_guest":[],"access_devices_wireless_iot":[],"cpu_usage":0.25,"mem_usage":0.5})
-                } else if path.contains("vpnconn") {
-                    json!([])
-                } else if path.contains("logout") {
-                    assert_eq!(args["operation"], "write");
-                    json!({})
-                } else {
-                    assert_eq!(args["operation"], "read");
-                    json!({"enabled":"off"})
-                }
-            };
-            response(
-                &mut s,
-                &serde_json::to_vec(&json!({"success":true,"data":data}))?,
-            )?;
-        }
-        Ok(())
-    });
-    let path=t.config("router.json",&json!({"name":"home","url":url,"password":"synthetic-pass","trackers":[{"name":"pixel","mac":"00:11:22:33:44:55","person":true}]}))?;
-    let mut r = router::Manager::open(&path)?;
-    let s = r.read_device(0)?;
-    assert_eq!(s["nobody_home"], false);
-    assert_eq!(s["total_clients"], 1);
-    assert_eq!(s["cpu_percent"], 25.0);
     worker.join().expect("server")?;
     Ok(())
 }

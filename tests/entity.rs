@@ -1,6 +1,6 @@
 use homewire::{
     Result, awair, bulb,
-    device::{Devices, Selection},
+    device::{Adapter, Devices, Selection},
     entity, mcp, tv,
 };
 use serde_json::{Value, json};
@@ -208,6 +208,7 @@ fn tv_routine_owns_only_its_power_controls_in_standard_and_legacy_interfaces() -
     devices.validate()?;
     for (tool, args) in [
         ("switch_set", json!({"entity":"switch.tv","power":false})),
+        ("wake_on_lan", json!({"device":"samsung.samsung"})),
         (
             "media_power",
             json!({"entity":"media_player.samsung","power":false}),
@@ -239,6 +240,23 @@ fn tv_routine_owns_only_its_power_controls_in_standard_and_legacy_interfaces() -
     }
     let list = entity::list(&devices);
     let entities = list["entities"].as_array().expect("entities");
+    let wakes = entity::call(&mut devices, "wake_list", &json!({}))?;
+    assert_eq!(wakes["devices"][0]["device"], "samsung.samsung");
+    assert_eq!(wakes["devices"][0]["maintenance_required"], true);
+    let alias = temp.config(
+        "wol.json",
+        &json!({"devices":[{"name":"alias","mac":samsung["mac"],"wake_address":"127.0.0.1:9"}]}),
+    )?;
+    devices.wol = Some(homewire::wol::Manager::open(&alias)?);
+    assert!(
+        devices
+            .validate()
+            .expect_err("alias bypass")
+            .to_string()
+            .contains("Duplicate wake identity")
+    );
+    assert!(entity::call(&mut devices, "wake_on_lan", &json!({"device":"wol.alias"})).is_err());
+    devices.wol = None;
     assert!(
         entities
             .iter()

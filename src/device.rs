@@ -21,6 +21,11 @@ pub trait Adapter: Sized {
     fn execute(&mut self, name: &str, arguments: &Value) -> Result<Value>;
     /// Borrowed entity descriptors; no retained registry or device I/O.
     fn entities<'a>(&'a self, visit: &mut impl FnMut(crate::entity::Entity<'a>));
+    /// Borrowed, configured wake endpoints; no network discovery or retained registry.
+    fn wake_targets<'a>(&'a self, _visit: &mut impl FnMut(crate::wol::Target<'a>)) {}
+    fn wake_device(&mut self, _index: usize) -> Result<Value> {
+        Err(error("This device does not support Wake-on-LAN"))
+    }
     /// One fresh physical-device snapshot, shared across requested entities.
     fn read_device(&mut self, _index: usize) -> Result<Value> {
         Err(error("This adapter has no readable physical device"))
@@ -34,6 +39,11 @@ pub trait Adapter: Sized {
         None
     }
     fn background_tick(&mut self) -> Result<()> {
+        Ok(())
+    }
+    /// Publish retained autonomous monitor state through the shared alert ledger.
+    /// Reconciliation also runs after failed reads; unknown state cannot clear it.
+    fn reconcile_alerts(&self, _alerts: &mut crate::alerts::Manager, _now: i64) -> Result<()> {
         Ok(())
     }
     fn authorize_control(
@@ -249,6 +259,14 @@ macro_rules! static_adapters {
                 let now=std::time::Instant::now();
                 $(if let Some(adapter)=self.$field.as_mut() && adapter.next_background().is_some_and(|due| due<=now)
                     && let Err(e)=adapter.background_tick() { eprintln!("{} background read failed: {e}", stringify!($field)); })+
+                if let Some(mut alerts) = self.alerts.take() {
+                    let now = chrono::Utc::now().timestamp();
+                    $(if let Some(adapter) = self.$field.as_ref()
+                        && let Err(e) = adapter.reconcile_alerts(&mut alerts, now) {
+                        eprintln!("{} alert reconciliation failed: {e}", stringify!($field));
+                    })+
+                    self.alerts = Some(alerts);
+                }
             }
             pub fn open_adapter(&mut self, family: &str, path: &Path) -> Result<()> {
                 match family {
@@ -268,6 +286,7 @@ macro_rules! static_adapters {
             }
             pub fn validate(&self) -> Result<()> {
                 self.validate_ownership()?;
+                crate::wol::validate_targets(self)?;
                 let mut ambiguous = false;
                 self.entities(&mut |entity| {
                     let mut matches = 0;
@@ -289,6 +308,20 @@ macro_rules! static_adapters {
                 })+
                 if let Some(tv) = &self.tv {
                     tv.child_entities(visit);
+                }
+            }
+            pub(crate) fn wake_targets<'a>(&'a self, visit: &mut impl FnMut(crate::wol::Target<'a>)) {
+                $(if let Some(adapter) = self.$field.as_ref() {
+                    adapter.wake_targets(visit);
+                })+
+                if let Some(tv) = &self.tv { tv.child_wake_targets(visit); }
+            }
+            pub(crate) fn wake_device(&mut self, device: crate::entity::Device) -> Result<Value> {
+                if !self.maintenance && self.tv.as_ref().is_some_and(|tv|tv.owns_power(device)) {
+                    return Err(error("Power is owned by the TV routine; use routine_run or explicit --maintenance"));
+                }
+                match device.family {
+                    $(Family::$variant => self.$field().ok_or_else(||error("Unconfigured device"))?.wake_device(device.index),)+
                 }
             }
             pub(crate) fn read_device(&mut self, device: crate::entity::Device) -> Result<Value> {
@@ -336,6 +369,7 @@ macro_rules! static_adapters {
     };
 }
 static_adapters! {
+    wol/Wol: crate::wol::Manager,
     radio/Radio: crate::convenience::Radio,
     speech/Speech: crate::convenience::Speech,
     brother/Brother: crate::brother::Manager,
@@ -346,7 +380,6 @@ static_adapters! {
     weather/Weather: crate::weather::Config,
     history/History: crate::history::Manager,
     alerts/Alerts: crate::alerts::Manager,
-    router/Router: crate::router::Manager,
     meaco/Meaco: crate::meaco::Manager,
     bulbs/Bulbs: crate::bulb::Manager,
     plugs/Plugs: crate::plug::Manager => tv.plugs,

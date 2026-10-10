@@ -9,7 +9,7 @@ import time
 
 LIMIT = 65536
 ADAPTERS = ('meaco', 'printers', 'awair', 'lights', 'plugs', 'samsung', 'digi',
-            'router', 'brother', 'cast', 'dlna')
+            'brother', 'cast', 'dlna')
 SERVICES = ('alerts', 'history', 'mobile', 'weather', 'shopping', 'radio', 'speech', 'api')
 
 

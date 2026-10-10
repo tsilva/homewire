@@ -22,6 +22,7 @@ impl Support {
     pub const ROUTINES: Self = Self(16);
     pub const CONFIGURE: Self = Self(32);
     pub const PLAYBACK: Self = Self(1 | 64);
+    pub const WAKE: Self = Self(128);
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
     }
@@ -40,7 +41,6 @@ pub struct Device {
 pub enum Domain {
     Person,
     Weather,
-    Router,
     DeviceTracker,
     Light,
     Switch,
@@ -54,7 +54,6 @@ impl Domain {
         match self {
             Self::Person => "person",
             Self::Weather => "weather",
-            Self::Router => "router",
             Self::DeviceTracker => "device_tracker",
             Self::Light => "light",
             Self::Switch => "switch",
@@ -492,6 +491,7 @@ pub fn tools(selection: Selection) -> impl Iterator<Item = &'static Tool> + Clon
     .into_iter()
     .flatten()
     .chain(crate::routine::tools(selection))
+    .chain(crate::wol::tools(selection))
     .chain(selection.public_tools())
 }
 pub fn call(devices: &mut Devices, name: &str, args: &Value) -> Result<Value> {
@@ -504,6 +504,7 @@ pub fn call(devices: &mut Devices, name: &str, args: &Value) -> Result<Value> {
     let result = match name {
         "entity_list" => Ok(discover(devices, args)),
         "entity_status" => status(devices, args),
+        "wake_list" | "wake_on_lan" => crate::wol::call(devices, name, args),
         "entity_options" => {
             let device = resolve(
                 devices,
@@ -530,12 +531,14 @@ pub fn call(devices: &mut Devices, name: &str, args: &Value) -> Result<Value> {
                 | "media_play"
                 | "media_command"
                 | "routine_run"
+                | "wake_on_lan"
         )
         && let Some(alerts) = devices.alerts.as_mut()
     {
         let target = args["entity"]
             .as_str()
             .or(args["routine"].as_str())
+            .or(args["device"].as_str())
             .unwrap_or(name);
         let key = format!(
             "control.{}",

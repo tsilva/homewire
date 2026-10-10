@@ -13,7 +13,7 @@ families. The file is bounded to 64 KiB and requires `version: 1`.
 
 | Section | Contents |
 | --- | --- |
-| `adapters` | `meaco`, `printers`, `awair`, `lights`, `plugs`, `samsung`, `digi`, `router`, `brother`, `cast`, `dlna`; objects use the existing adapter schemas below |
+| `adapters` | `meaco`, `printers`, `awair`, `lights`, `plugs`, `samsung`, `digi`, `brother`, `cast`, `dlna`, `wol`; objects use the existing adapter schemas below |
 | `routines.meaco` | Day/night presets, previously `meaco.json`'s `presets` |
 | `routines.tv` | `plug`, `shutdown_policy`, `timings`; its children are the configured Samsung, DIGI and plugs adapters, without file references |
 | `automations.meaco` | `timezone`, `day`, `night`, previously Meaco `schedule` |
@@ -38,6 +38,12 @@ canonical filenames such as `meaco.state.json`, `lights.state.json` and
 `tv.state.json`, including `FAMILY.json.lock`, beside the unified file. The root
 also has an exclusive `home.json.lock`. Keep one config directory per
 installation and use the daemon bridge for additional clients.
+
+Router login, status, client-based presence and administrative controls are no
+longer supported. Remove `adapters.router` from older unified files; the runtime
+rejects that section as an unknown adapter. Android migration and installation
+ignore legacy `router.json` files and leave existing private files untouched.
+Remove obsolete router credential references from your active configuration.
 
 ```sh
 infisical run --env=prod -- target/release/homewire --config .local/home.json config-check
@@ -150,6 +156,18 @@ levels when provided. No printing, cancellation, power control, discovery,
 authenticated IPP or TLS is implemented in the IPP adapter. A separate
 `brother` adapter provides read-only SNMP diagnostics.
 
+Printer power is controlled through configured smart outlets with `switch_set`,
+for example `{"entity":"switch.printer_outlet","power":false}`. This verifies
+the outlet relay, not a graceful printer shutdown. No printer shutdown or wake
+command precedes the outlet operation.
+
+Each `printer.NAME` also exposes `sensor.NAME_state`,
+`sensor.NAME_queued_jobs` (jobs), `sensor.NAME_accepting_jobs` and
+`sensor.NAME_fault_active`. Read them together with `entity_status` to share one
+fresh IPP query per printer. Missing job readings remain `null`; `fault_active`
+is `null` when hardware fault status is unknown, rather than reporting healthy.
+The printer snapshot retains detailed fault reasons and individual supplies.
+
 ```sh
 target/release/homewire --printers .local/printers.json printers
 target/release/homewire --printers .local/printers.json printer-status brother
@@ -164,6 +182,8 @@ and use `chmod 600`. The schema has top-level `printers` (1–8 endpoints),
 Each endpoint requires `name` (unique, 1–32 letters/digits/hyphens/underscores)
 and literal-IP `host`; optional `port` defaults to 631 and `path` to `/ipp/print`.
 Optional `connect` (`IP:PORT`) overrides just the TCP connection for tunnels.
+Optional `supply_warning_percent` defaults to 15 (range 0–100); set it to `null`
+to disable percentage warnings for that printer.
 Use a separate config file for simulated monitoring. Unknown fields are rejected.
 The supported unauthenticated IPP endpoints require no credentials.
 
@@ -175,15 +195,25 @@ queries, unclassified reasons, or stopped without a specific fault cannot prove
 recovery. Percentages alone never generate faults. Negative or out-of-range
 supply levels remain unknown; raw values are retained.
 
-`watch-printers` emits JSON fault/recovery events on stdout; connection
-diagnostics go to stderr. A changed fault must appear in observations at least
+Low-supply warnings are separate from hardware faults. `printer-check` and the
+legacy `printer_check` tool include `supply_events` and `active_supply_warnings`
+alongside the existing hardware fields. A warning confirms a reported supply
+percentage at or below the configured threshold; recovery confirms a percentage
+above it. `supply_warning` / `supply_recovered` events identify the printer and
+zero-based supply index, with `warnings` and `previous_warnings`. Missing supplies,
+unknown percentages and failed queries cannot clear a retained warning.
+
+`watch-printers` emits JSON hardware fault/recovery and supply warning/recovery
+events on stdout; connection diagnostics go to stderr. A changed alert must
+appear in observations at least
 3 seconds apart; recovery needs clear observations at least 30 seconds apart.
 Unknown readings interrupt confirmation. With 30-second polling, confirmation
 normally takes one more poll. Monitoring is opt-in; querying IPP can wake a
 sleeping printer.
 
 Confirmed transitions are atomically saved before output in
-`printers.state.json`; `printers.json.lock` excludes concurrent owners using the
+`printers.state.json` for hardware faults and `printers.supply-state.json` for
+percentage warnings; `printers.json.lock` excludes concurrent owners using the
 same config. Repeated faults are suppressed across reconnects/restarts. Changes
 to name, host, port or path invalidate saved assumptions for that printer.
 The one-shot `printer-check` reports live status and retained faults; candidates
@@ -672,6 +702,50 @@ Protocol references: [Samsung encrypted remote](https://github.com/xchwarze/sams
 [HA Samsung bridge](https://github.com/home-assistant/core/blob/dev/homeassistant/components/samsungtv/bridge.py),
 [Android TV remote protocol](https://github.com/tronikos/androidtvremote2/blob/main/src/androidtvremote2/remotemessage.proto).
 
+## Wake-on-LAN
+
+The Samsung adapter already uses Wake-on-LAN and automatically contributes
+`samsung.samsung` to `wake_list`, including when owned by the TV routine.
+`wake_on_lan {"device":"samsung.samsung"}` follows the same identity checks and
+verified wake path as `media_power` with `power:true`. TV-owned wake requires
+explicit `--maintenance`; normally use `routine_run {"routine":"tv_on"}` so
+outlet startup and the other media device remain coordinated.
+
+Configure other known wake targets in `adapters.wol` in the unified configuration:
+
+```json
+{
+  "devices": [
+    {"name":"workstation","mac":"02:00:00:00:00:01","wake_address":"192.0.2.255:9"}
+  ]
+}
+```
+
+The separate-file equivalent is `--adapter wol=.local/wol.json`; see
+[examples/wol.json](../examples/wol.json). Keep real inventories and addresses in
+private configuration. The adapter accepts 1–8 devices with unique names of
+1–24 ASCII letters, digits, underscores or hyphens, nonzero unicast MACs, and
+an explicit UDP destination with a nonzero port. A subnet broadcast destination
+is typical. Duplicate MACs, including aliases of Samsung targets, are rejected.
+Configuration is locked across processes; use daemon/bridge for multiple clients.
+
+`wake_list {}` returns device IDs, whether wake can be verified, and whether TV
+ownership requires maintenance. It performs no network requests and exposes no
+MACs or destinations. `wake_on_lan {"device":"wol.workstation"}` selects only
+configured IDs, accepts no caller-supplied MAC/address, and sends one 102-byte
+magic packet without retries. Generic results contain `sent:true`,
+`verified:false` and `evidence:"magic_packet_sent_once"`. No reachability probe,
+power state, shutdown capability or successful wake is inferred from the send.
+Hardware must support and enable network wake, retain standby power, and be
+reachable by the configured LAN destination; an unpowered outlet must be restored
+through its owning routine first.
+
+Both tools are implemented in Homewire's Rust MCP interface and work through
+`serve`, daemon/bridge and the authenticated API MCP transport. Controls require
+`--allow-control`. Deploying a new binary and granting these tools in a private
+agent allowlist are separate operator actions; existing ZeroClaw grants
+are not expanded automatically. Runtime restrictions still apply.
+
 ## MCP and ZeroClaw
 
 Start a local stdio MCP server:
@@ -700,6 +774,8 @@ routing branches.
 | `light_set` | `{"entity":"light.led_strip","settings":{"power":true,"brightness_percent":30}}` | Lights + control flag |
 | `switch_set` | `{"entity":"switch.tv","power":false}` | Plugs + control flag; TV outlet requires maintenance |
 | `media_power` | `{"entity":"media_player.digi","power":true}` | Media + control flag; routine-owned power requires maintenance |
+| `wake_list` | `{}` | Configured Samsung or generic WoL targets; no network I/O |
+| `wake_on_lan` | `{"device":"wol.workstation"}` | Known wake targets + control flag; TV ownership requires maintenance |
 | `remote_key` | `{"entity":"media_player.samsung","key":"hdmi"}` | Media + control flag |
 | `routine_list` | `{}` | Configured Meaco/TV routines |
 | `routine_plan` | `{"routine":"meaco_night"}` | Configured routines; no controls |
@@ -1345,7 +1421,6 @@ SOAP XML, SNMP packets, disk state and queries have explicit bounds.
 
 | Config example / family | Required fields and defaults |
 | --- | --- |
-| `examples/router.json` / `router` | `name`, HTTP(S) origin `url`, local admin `password`; up to 64 `trackers` with name/MAC/optional `person`; timeout 8 s, polling 60 s (15–900), absence 180 s (30–3600) |
 | `examples/brother.json` / `brother` | `name`, literal-IP `host`; community `public`, timeout 3 s; optional test `connect` |
 | `examples/cast.json` / `cast` | `name`, literal-IP `host`, `server_cert_sha256`; port 8009, timeout 8 s; optional test `connect` |
 | `examples/dlna.json` / `dlna` | `name`, `description_url`, exact `udn`; timeout 8 s; service endpoints must stay on the description origin |
@@ -1356,16 +1431,6 @@ SOAP XML, SNMP packets, disk state and queries have explicit bounds.
 | `examples/shopping.json` / `shopping` | Empty object; durable household list |
 | `examples/radio.json` / `radio` | Optional HTTPS server origin, default `https://de1.api.radio-browser.info`; timeout 8 s |
 | `examples/speech.json` / `speech` | Optional language, default `en`; Google Translate public speech URLs |
-
-The Archer AXE75 adapter implements the V1_11 RSA-only login variant, verifies
-live model before control, and reads status afresh. Continuous healthy absence
-must last the configured delay; missing lists, failed requests and restarts never
-establish absence. Person-designated router trackers drive `nobody_home` (null
-while uncertain). No device-state cache is substituted for a failed request.
-Main/guest/IoT Wi-Fi use 2g/5g/6g settings; DHCP and OpenVPN/PPTP are supported.
-Reboot, main Wi-Fi disable and DHCP disable require `--maintenance`. IPsec is not
-advertised by this adapter. Validate administrative network access, identity and
-firmware support from the deployment target before relying on router presence.
 
 Brother SNMP sends only GET, verifies HL-L2350DW identity, and exposes page,
 duplex, drum count/life, remaining drum pages and toner percentage. It complements
@@ -1402,6 +1467,50 @@ changes applied; no blind replay or fake transaction rollback occurs.
   configuration are not implemented. Apply preset/effect requests separately.
 - DIGI: HTTP(S) `app_link` or `text` up to 512 bytes, one action per request.
   Text requires negotiated IME support and live counters from a focused field.
+
+### Companion battery monitoring
+
+The existing mobile adapter can optionally monitor battery measurements from
+its authenticated Android companions. Add `battery_monitor` to `services.mobile`
+(or the legacy mobile config):
+
+```json
+"battery_monitor": {
+  "devices": ["phone"],
+  "low_percent": 15,
+  "recovery_percent": 20,
+  "poll_seconds": 60
+}
+```
+
+`devices` is a nonempty subset of the configured paired devices, at most 8 unique
+names. The percentage and interval fields default to the values shown. Require
+`1 <= low_percent < recovery_percent <= 100`; polling supports 15–3600 seconds.
+Omitting `battery_monitor` disables the job. It owns its deadline in the existing
+serve/daemon event loop, uses existing companion telemetry, and adds no thread,
+resident process, platform permission or device-state cache.
+
+The first check runs at startup, then every `poll_seconds`; an accepted report
+from a monitored device also brings its check deadline forward. A fresh percentage
+strictly below `low_percent` starts confirmation. Another received report at least
+3 seconds later confirms the warning. An active warning stays active until
+fresh reports at or above `recovery_percent` confirm recovery for 30 seconds.
+Repeated checks of the same stored report cannot confirm either transition.
+Missing, future-dated or stale reports cancel pending confirmation and never
+establish recovery; `max_age_seconds` defines freshness. Charging does not
+suppress a low warning; its state remains available through the existing sensor.
+
+The shared monitor persists confirmed state separately in
+`mobile.battery.state.json`; the optional alert ledger reconciles it under
+`battery.NAME`. Low and recovered messages stay constant within an episode, so
+percentage changes and normal restarts do not resend an unchanged warning.
+Configure `services.alerts` for outbound delivery and add `battery.NAME` to a
+channel's exact `keys` allowlist if one exists. The existing ledger handles
+retries, per-channel receipts and resolved messages. Delivery remains at least
+once: a crash between remote acceptance and local receipt persistence can still
+duplicate a message. Host suspension, stopped companion reporting or lack of
+network can delay detection/delivery. Examples use synthetic names; target
+settings and deployment logs stay private.
 
 ### Alerts, history and convenience tools
 
@@ -1673,7 +1782,7 @@ and not a statement about any installation. Measure the target workload yourself
 Updates and ZeroClaw configuration still require Android unlock.
 
 Before replacing another controller, validate exclusive scheduler ownership,
-a full TV cycle, companion notifications/recovery, router and Cast controls, actual timed runs, power/network
+a full TV cycle, companion notifications/recovery, Cast controls, actual timed runs, power/network
 recovery and sustained operation with the previous controller stopped. Back up
 the phone's device config, state/history, media certificates and APK signing key outside the phone. Existing
 Samsung pairing is still imported/backed up; fresh H-series pairing has no native

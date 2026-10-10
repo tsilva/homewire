@@ -17,13 +17,12 @@ fn example(name: &str) -> Result<Value> {
 fn fixture() -> Result<Value> {
     let mut value = json!({"version":1,"adapters":{},"services":{},"routines":{},"automations":{}});
     for name in [
-        "meaco", "lights", "plugs", "printers", "awair", "samsung", "digi", "router", "brother",
-        "cast", "dlna",
+        "meaco", "lights", "plugs", "printers", "awair", "samsung", "digi", "brother", "cast",
+        "dlna",
     ] {
         value["adapters"][name] = example(name)?;
     }
     value["adapters"]["meaco"]["local_key"] = json!("0123456789abcdef");
-    value["adapters"]["router"]["trackers"][0]["name"] = json!("lan_phone");
     value["adapters"]["samsung"]["token"] = json!("00".repeat(16));
     for (family, list) in [("lights", "lights"), ("plugs", "plugs")] {
         for device in value["adapters"][family][list]
@@ -151,6 +150,7 @@ fn invalid_root_or_duplicate_settings_fail_before_io() -> Result<()> {
         json!({"version":2}),
         json!({"version":1,"extra":{}}),
         json!({"version":1,"adapters":{"unsupported":{}}}),
+        json!({"version":1,"adapters":{"router":{}}}),
         json!({"version":1,"services":{"meaco":{}}}),
         json!({"version":1,"adapters":{"api":{}}}),
         json!({"version":1,"automations":{"meaco":{}}}),
