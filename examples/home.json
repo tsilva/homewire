@@ -109,6 +109,13 @@
       "timeout_seconds": 8,
       "verify_seconds": 20
     },
+    "tcl": {
+      "host": "192.0.2.40",
+      "model": "Smart TV",
+      "server_cert_sha256": "REPLACE_WITH_64_HEX_DIGITS",
+      "client_cert": "tcl-cert.pem",
+      "client_key": "env:HOMEWIRE_SECRET_TCL_PRIVATE_KEY"
+    },
     "brother": {
       "name": "printer_diagnostics",
       "host": "192.0.2.50",

@@ -495,7 +495,21 @@ fn run() -> Result<()> {
             thread::sleep(app.wait_duration());
         },
         "daemon" => {
-            let server = homewire::ipc::Server::bind(std::path::Path::new(positional[1]))?;
+            let server = homewire::ipc::Server::bind_with_protocol(
+                std::path::Path::new(positional[1]),
+                move |request| {
+                    if request["method"] == "homewire/api" {
+                        return homewire::api::dispatch_protocol(selection, request, control);
+                    }
+                    let no_device_call =
+                        |_: &str, _: &Value| Err(error("Device calls belong to the owner"));
+                    if legacy_tools {
+                        mcp::handle_selected(request, selection, options, no_device_call)
+                    } else {
+                        mcp::handle_capabilities(request, selection, control, no_device_call)
+                    }
+                },
+            )?;
             let background = app.has_background();
             let _api = api_settings
                 .map(|settings| {
@@ -525,19 +539,34 @@ fn run() -> Result<()> {
                         .map_err(|_| error("IPC listener stopped"))?
                 };
                 let mut stream = stream;
-                if let Err(e) = homewire::ipc::exchange(&mut stream, |request| {
-                    if request["method"] == "homewire/api" {
-                        return homewire::api::dispatch(&mut app.devices, request, control);
+                // Drain a bounded admitted batch before running another full poll.
+                // Busy devices must not force every queued call behind a fresh tick;
+                // the bound still gives scheduled work a turn under client load.
+                for served in 0..homewire::ipc::DEVICE_QUEUE_CAPACITY {
+                    if let Err(e) = stream.exchange(|request| {
+                        if request["method"] == "homewire/api" {
+                            return homewire::api::dispatch(&mut app.devices, request, control);
+                        }
+                        if legacy_tools {
+                            mcp::handle_selected(request, selection, options, |name, args| {
+                                app.devices.call(name, args)
+                            })
+                        } else {
+                            mcp::handle_entities(request, &mut app.devices, control)
+                        }
+                    }) {
+                        eprintln!("IPC request failed (no retry): {e}");
                     }
-                    if legacy_tools {
-                        mcp::handle_selected(request, selection, options, |name, args| {
-                            app.devices.call(name, args)
-                        })
-                    } else {
-                        mcp::handle_entities(request, &mut app.devices, control)
+                    if served + 1 == homewire::ipc::DEVICE_QUEUE_CAPACITY {
+                        break;
                     }
-                }) {
-                    eprintln!("IPC request failed (no retry): {e}");
+                    stream = match server.incoming.try_recv() {
+                        Ok(next) => next,
+                        Err(mpsc::TryRecvError::Empty) => break,
+                        Err(mpsc::TryRecvError::Disconnected) => {
+                            return Err(error("IPC listener stopped"));
+                        }
+                    };
                 }
             }
         }

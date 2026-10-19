@@ -75,7 +75,7 @@ def exact(stream, size):
     return bytes(data)
 
 
-def receive(stream, expected):
+def frame(stream):
     size = 0
     for shift in range(0, 35, 7):
         b = exact(stream, 1)[0]
@@ -86,7 +86,11 @@ def receive(stream, expected):
         raise ValueError('Invalid frame length')
     if not 1 <= size <= 8192:
         raise ValueError('Pairing frame exceeds bound')
-    fields = decode(exact(stream, size))
+    return decode(exact(stream, size))
+
+
+def receive(stream, expected):
+    fields = frame(stream)
     if fields.get(2) != 200 or expected not in fields:
         raise ValueError('Pairing request rejected or unexpected response')
     return fields
@@ -121,10 +125,19 @@ def secret(client, server, code):
     return digest
 
 
-def pair(host, directory):
+def validate_identity(model, manufacturer, device, expected_model):
+    if model != (expected_model if device == 'tcl' else 'DIGI R2A') or manufacturer != ('TCL' if device == 'tcl' else 'ZTE'):
+        raise ValueError('Live Android TV model/vendor differs from requested identity')
+
+
+def pair(host, directory, device='digi', model=None):
     ipaddress.ip_address(host)
+    if device not in ('digi', 'tcl') or (device == 'tcl' and (
+            not isinstance(model, str) or not model.strip() or len(model.encode()) > 128
+            or any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in model))):
+        raise ValueError('TCL pairing requires --model matching its exact live identity')
     directory.mkdir(mode=0o700, parents=True, exist_ok=False)
-    cert, key = directory / 'digi-cert.pem', directory / 'digi-key.pem'
+    cert, key = directory / (device + '-cert.pem'), directory / (device + '-key.pem')
     subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
                     '-keyout', str(key), '-out', str(cert), '-days', '3650',
                     '-subj', '/CN=Homewire'], check=True, capture_output=True)
@@ -145,7 +158,7 @@ def pair(host, directory):
             receive(stream, 20)
             send(stream, 30, nested(1, encoding) + integer(2, 1))
             receive(stream, 31)
-            code = getpass.getpass('Enter the six-character PIN displayed on DIGI: ')
+            code = getpass.getpass('Enter the six-character PIN displayed on the TV: ')
             send(stream, 40, nested(1, secret(client, server, code)))
             receive(stream, 41)
     with socket.create_connection((host, 6466), timeout=10) as tcp:
@@ -153,18 +166,25 @@ def pair(host, directory):
             remote = stream.getpeercert(binary_form=True)
             if public_numbers(remote) != public_numbers(server):
                 raise ValueError('Remote and pairing servers have different identities')
+            message = frame(stream)
+            info = decode(decode(message.get(1, b'')).get(2, b''))
+            validate_identity(info.get(1, b'').decode(), info.get(2, b'').decode(), device, model)
     config = {'host': host, 'server_cert_sha256': hashlib.sha256(remote).hexdigest(),
               'client_cert': cert.name, 'client_key': key.name}
-    fd = os.open(directory / 'digi.json', os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    if device == 'tcl':
+        config['model'] = model
+    fd = os.open(directory / (device + '.json'), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     with os.fdopen(fd, 'w') as output:
         json.dump(config, output, indent=2)
         output.write('\n')
-    print('Paired and saved private DIGI configuration. Validate digi-status before deployment.')
+    print('Paired and saved private ' + device + ' configuration. Validate live entity_status before deployment.')
 
 
 if __name__ == '__main__':
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--host', required=True)
+    ap.add_argument('--device', choices=('digi', 'tcl'), default='digi')
+    ap.add_argument('--model', help='Exact TCL model reported by Android TV Remote')
     ap.add_argument('--output-directory', type=Path, required=True)
     args = ap.parse_args()
-    pair(args.host, args.output_directory)
+    pair(args.host, args.output_directory, args.device, args.model)

@@ -422,6 +422,7 @@ static_adapters! {
     printers/Printers: crate::printer::Manager,
     samsung/Samsung: crate::samsung::Manager => tv.samsung,
     digi/Digi: crate::androidtv::Manager => tv.digi,
+    tcl/Tcl: crate::androidtv::TclManager,
     tv/Tv: crate::tv::Manager,
 }
 

@@ -68,14 +68,26 @@ schemas, state files and legacy installations.
 | [Tapo L430C / L900](docs/devices.md#l900-led-strip) | Set power, brightness, colour and white temperature; monitor overheating |
 | [Tapo P100 / P110](docs/devices.md#tapo-p100p110-plugs) | Control relays; read P110 energy and monitor overloads |
 | [Samsung UE40H6200 / DIGI R2A](docs/devices.md#samsung-tv-and-digi-r2a) | Use paired remotes and coordinated shared-outlet TV routines |
+| [TCL Android / Google TV](docs/devices.md#tcl-android--google-tv) | Read power; use paired remote keys, guarded shutdown, verified wake, app links and text |
 | [Computers](docs/devices.md#computer-shutdown-service) | Wake configured targets; use authenticated shutdown and optional metered outlet cutoff |
 
 Controls check identity where supported and verify reported outcomes; uncertain
 results stop execution. Generic [Wake-on-LAN](docs/devices.md#wake-on-lan)
 cannot confirm a successful wake, and Samsung shutdown may remain unverified.
 Each adapter guide explains its prerequisites and limits.
+Paired Android TV remote keys service incoming messages for up to 500 ms after
+sending and close TLS cleanly; delivery still does not confirm a screen change.
+
+Android TV app links and focused-field text have separate `media_launch` and
+`media_text` grants. Agents can open titles or type into search without receiving
+general device-settings access. App delivery does not confirm movie playback.
 
 ## Agents and automation
+
+The Meaco is exposed as `dehumidifier.meaco`; humidity and tank sensors retain
+their `sensor.meaco_*` IDs. The previous `humidifier.meaco` ID remains accepted
+for existing clients. After re-pairing, [refresh its local key](docs/configuration.md#configuration)
+before retrying status or controls.
 
 Start a read-only MCP server for your client:
 
@@ -87,6 +99,11 @@ Only configured capabilities appear. Add `--allow-control` to expose write tools
 [MCP and ZeroClaw setup](docs/automation.md#mcp-and-zeroclaw) covers discovery,
 fresh reads, routine previews and execution. For persistent ownership across
 client sessions, use [daemon and bridge](docs/automation.md#persistent-daemon-and-mcp-bridge).
+Daemon pings, initialization and tool discovery remain responsive during device
+polling. Device work stays serialized; a full queue rejects new work explicitly.
+Isolated Android agents keep Telegram read-only by default. Operators can grant
+specific controls with [`deployment.agent.telegram_control_tools`](docs/android.md#zeroclaw-isolation);
+printer outlet power uses `switch_set`.
 
 [Schedules](docs/automation.md#scheduling) and
 [L900 curves / sunset rules](docs/devices.md#l900-scheduling) are opt-in.

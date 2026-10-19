@@ -12,7 +12,7 @@ pub const MAX_TARGETS: usize = 32;
 
 /// Static category support; new adapters reuse category tools without MCP edits.
 #[derive(Clone, Copy)]
-pub struct Support(u8);
+pub struct Support(u16);
 impl Support {
     pub const NONE: Self = Self(0);
     pub const READ: Self = Self(1);
@@ -23,6 +23,7 @@ impl Support {
     pub const CONFIGURE: Self = Self(32);
     pub const PLAYBACK: Self = Self(1 | 64);
     pub const WAKE: Self = Self(128);
+    pub const APP_INPUT: Self = Self(256);
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
     }
@@ -46,7 +47,7 @@ pub enum Domain {
     Switch,
     Sensor,
     Printer,
-    Humidifier,
+    Dehumidifier,
     MediaPlayer,
 }
 impl Domain {
@@ -59,7 +60,7 @@ impl Domain {
             Self::Switch => "switch",
             Self::Sensor => "sensor",
             Self::Printer => "printer",
-            Self::Humidifier => "humidifier",
+            Self::Dehumidifier => "dehumidifier",
             Self::MediaPlayer => "media_player",
         }
     }
@@ -72,6 +73,8 @@ pub enum Command {
     Configure,
     Play,
     Playback,
+    Launch,
+    Text,
 }
 #[derive(Clone, Copy)]
 pub enum Capabilities {
@@ -149,6 +152,12 @@ impl<'a> Entity<'a> {
     }
     fn matches(self, id: &str) -> bool {
         id.strip_prefix(self.domain.as_str())
+            // Preserve existing clients while discovery uses the correct category.
+            .or_else(|| {
+                (self.domain == Domain::Dehumidifier)
+                    .then(|| id.strip_prefix("humidifier"))
+                    .flatten()
+            })
             .and_then(|s| s.strip_prefix('.'))
             .is_some_and(|s| s.strip_prefix(self.name) == Some(self.suffix))
     }
@@ -263,6 +272,16 @@ fn control(devices: &mut Devices, tool: &str, args: &Value) -> Result<Value> {
         }
         ("media_play", Domain::MediaPlayer, Capabilities::Playback) => Command::Play,
         ("media_command", Domain::MediaPlayer, Capabilities::Playback) => Command::Playback,
+        ("media_launch", Domain::MediaPlayer, Capabilities::Media { .. })
+            if entity.settings.iter().any(|s| s.name == "app_link") =>
+        {
+            Command::Launch
+        }
+        ("media_text", Domain::MediaPlayer, Capabilities::Media { .. })
+            if entity.settings.iter().any(|s| s.name == "text") =>
+        {
+            Command::Text
+        }
         ("light_set", Domain::Light, Capabilities::Light { .. }) => Command::Light,
         ("switch_set", Domain::Switch, Capabilities::Power) => Command::Power,
         ("media_power", Domain::MediaPlayer, Capabilities::Media { .. }) => Command::Power,
@@ -458,6 +477,50 @@ const PLAY: Tool = Tool {
     },
     hints: Hints::CONTROL,
 };
+const LAUNCH: Tool = Tool {
+    name: "media_launch",
+    description: "Send one app/title link to a media remote. Accepts HTTP(S) app links and documented Stremio page links. Delivery does not prove playback; never replay automatically. Read entity_options for live support/current app.",
+    input: Input::Named {
+        key: "entity",
+        extra: Some(Field {
+            name: "url",
+            schema: || json!({"type":"string","minLength":1,"maxLength":2048}),
+            valid: |v| {
+                v.as_str().is_some_and(|s| {
+                    !s.is_empty() && s.len() <= 2048 && !s.chars().any(char::is_control)
+                })
+            },
+            error: "Expected an app link of at most 2048 bytes",
+        }),
+        error: "Expected media entity and url",
+    },
+    hints: Hints {
+        idempotent: false,
+        ..Hints::CONTROL
+    },
+};
+const TEXT: Tool = Tool {
+    name: "media_text",
+    description: "Send text once to the media remote's currently focused input field. Navigate to search first. Delivery is unverified; never replay automatically. Does not grant device settings access.",
+    input: Input::Named {
+        key: "entity",
+        extra: Some(Field {
+            name: "text",
+            schema: || json!({"type":"string","minLength":1,"maxLength":512}),
+            valid: |v| {
+                v.as_str().is_some_and(|s| {
+                    !s.is_empty() && s.len() <= 512 && !s.chars().any(char::is_control)
+                })
+            },
+            error: "Expected focused-field text of at most 512 bytes",
+        }),
+        error: "Expected media entity and text",
+    },
+    hints: Hints {
+        idempotent: false,
+        ..Hints::CONTROL
+    },
+};
 const PLAYBACK: Tool = Tool {
     name: "media_command",
     description: "Apply play/pause/stop/seek, absolute volume or mute to a playback entity. Discover its capabilities first.",
@@ -485,6 +548,8 @@ pub fn tools(selection: Selection) -> impl Iterator<Item = &'static Tool> + Clon
         support.contains(Support::SWITCH).then_some(&SWITCH),
         support.contains(Support::MEDIA).then_some(&MEDIA),
         support.contains(Support::MEDIA).then_some(&REMOTE),
+        support.contains(Support::APP_INPUT).then_some(&LAUNCH),
+        support.contains(Support::APP_INPUT).then_some(&TEXT),
         support.contains(Support::CONFIGURE).then_some(&CONFIGURE),
         support.contains(Support::CONFIGURE).then_some(&OPTIONS),
     ]
@@ -516,7 +581,9 @@ pub fn call(devices: &mut Devices, name: &str, args: &Value) -> Result<Value> {
             devices.options(device)
         }
         "light_set" | "switch_set" | "media_power" | "remote_key" | "entity_configure"
-        | "media_play" | "media_command" => control(devices, name, args),
+        | "media_play" | "media_command" | "media_launch" | "media_text" => {
+            control(devices, name, args)
+        }
         name if name.starts_with("routine_") => crate::routine::call(devices, name, args),
         _ => devices.call(name, args),
     };
@@ -530,6 +597,8 @@ pub fn call(devices: &mut Devices, name: &str, args: &Value) -> Result<Value> {
                 | "entity_configure"
                 | "media_play"
                 | "media_command"
+                | "media_launch"
+                | "media_text"
                 | "routine_run"
                 | "wake_on_lan"
         )

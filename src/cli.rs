@@ -150,7 +150,7 @@ const OPTIONS_HELP: &str = "\nServer flags: --allow-control --legacy-tools --mai
 pub fn config_family(option: &str) -> Option<&str> {
     let family = option.strip_prefix("--")?;
     [
-        "printers", "awair", "lights", "bulbs", "plugs", "samsung", "digi", "tv",
+        "printers", "awair", "lights", "bulbs", "plugs", "samsung", "digi", "tcl", "tv",
     ]
     .contains(&family)
     .then(|| naming::canonical_family(family))

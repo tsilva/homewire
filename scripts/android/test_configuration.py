@@ -41,6 +41,26 @@ class ConfigurationTests(unittest.TestCase):
             self.assertEqual(backup.stat().st_mode & 0o777, 0o700)
             with self.assertRaises(ValueError): configuration.migrate(root, output)
 
+    def test_tcl_key_projection_and_certificate_stay_private(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            value = {'version': 1, 'adapters': {'tcl': {
+                'host': '127.0.0.1', 'model': 'Smart TV',
+                'client_cert': 'tcl-cert.pem',
+                'client_key': 'env:HOMEWIRE_SECRET_TCL_KEY'}}}
+            path = root / 'home.json'
+            configuration.write(path, value)
+            cert = root / 'tcl-cert.pem'
+            cert.write_text('synthetic certificate')
+            cert.chmod(0o600)
+            key = '-----BEGIN PRIVATE KEY-----\nsynthetic\n-----END PRIVATE KEY-----\n'
+            with patch.dict('os.environ', {'HOMEWIRE_SECRET_TCL_KEY': key}, clear=True):
+                files = dict(phone.validate_configs(path))
+            self.assertEqual(set(files), {'home.json', 'tcl-cert.pem', 'tcl-key.pem'})
+            self.assertEqual(json.loads(files['home.json'])['adapters']['tcl']['client_key'], 'tcl-key.pem')
+            self.assertEqual(files['tcl-key.pem'], key.encode())
+            self.assertFalse((root / 'tcl-key.pem').exists())
+
     def test_projection_excludes_host_profile_and_materializes_only_target_keys(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

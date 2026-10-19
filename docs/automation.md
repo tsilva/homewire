@@ -23,7 +23,7 @@ routing branches.
 | --- | --- | --- |
 | `entity_list` | Optional `domain`, `device`, `offset`, `limit`, `details` | Paginated discovery; no network I/O |
 | `entity_options` | `{"entity":"light.bulb_1"}` | Live choices where implemented |
-| `entity_configure` | `{"entity":"humidifier.meaco","settings":{"target_humidity":55}}` | Advertised typed settings + control flag |
+| `entity_configure` | `{"entity":"dehumidifier.meaco","settings":{"target_humidity":55}}` | Advertised typed settings + control flag |
 | `media_play` | `{"entity":"media_player.cast_player","media":{"url":"https://example.org/music.mp3","content_type":"audio/mpeg"}}` | Cast/DLNA + control flag |
 | `media_command` | `{"entity":"media_player.dlna_player","command":{"action":"volume","percent":20}}` | Playback + control flag |
 | `entity_status` | `{"entities":["light.bulb_1","sensor.awair_co2"]}` | Fresh batched reads |
@@ -38,7 +38,9 @@ routing branches.
 | `routine_run` | `{"routine":"tv_on"}` | Configured routines + control flag |
 
 IDs use `<domain>.<configured-label>` for lights, switches and printers. Singleton
-IDs are `humidifier.meaco`, `media_player.samsung`, and `media_player.digi`.
+IDs are `dehumidifier.meaco`, `media_player.samsung`, and `media_player.digi`.
+The previous `humidifier.meaco` ID remains accepted as a compatibility alias;
+discovery advertises the Meaco as a dehumidifier.
 Awair contributes six sensor entities: `sensor.awair_temperature`,
 `awair_humidity`, `awair_co2`, `awair_tvoc`, `awair_pm25`, `awair_score` (each with
 `sensor.` prefix). P110 adds `<label>_power`, `_voltage`, `_current`,
@@ -190,14 +192,30 @@ Android uses Bionic `flock` directly because Rust 1.95's `File::try_lock` return
 unsupported there. Desktop uses the standard-library lock. Other lock errors
 retain their real cause rather than pretending another instance owns the config.
 
-The daemon has one 128 KiB accept thread and one device/job thread. Accepted
-connections use a one-entry queue; one additional accepted stream can wait in
-the accept thread, and the OS bounds the listen backlog. Requests remain limited
-to 64 KiB; private replies are limited to 1 MiB. Request framing and reply writes
-have five-second socket timeouts; the bridge waits up to 300 seconds for a reply.
-Read timeout applies per socket read, so a same-user client sending fragments can
-delay the serialized owner. Only trusted same-user clients should use this socket.
-Device operations and schedules remain serialized; slow operations can delay jobs.
+The daemon has one 512 KiB accept thread and one device/job thread. The existing
+accept thread validates frames and answers initialization, ping and tool discovery
+without waiting for device polling. Scoped agent MCP metadata uses the same path,
+with its configured tool allowlist and control permissions preserved. This confirms
+protocol responsiveness; it does not prove that a physical device is reachable or
+that an in-flight device operation has finished.
+
+Device calls, mobile reports/acknowledgements and schedules remain serialized on
+the device owner. Up to four device requests can wait in the bounded queue, accommodating both API
+workers and ordinary bridge clients. The owner services up to four admitted calls
+between background ticks, so every queued call need not wait for a fresh polling
+batch; the bound also gives jobs a turn under sustained client load. When full,
+new device work receives JSON-RPC error -32000 stating that it was not queued or
+executed; the agent HTTP endpoint exposes the error as HTTP 503 with the caller's
+request ID. Neither transport automatically retries it. Metadata remains available
+while that queue is full. The OS bounds the listen backlog.
+
+Requests remain limited to 64 KiB; private replies are limited to 1 MiB. Framing and
+reply writes each have an absolute five-second deadline, including fragmented I/O;
+the bridge waits up to 300 seconds for device work. An incomplete same-user client
+can delay the accept thread until its framing deadline. Only trusted same-user
+clients should use this socket. Slow physical-device operations can still delay
+other device calls and jobs; unavailable readings and protocol timeouts remain
+explicit and never count as successful device recovery.
 A timeout/disconnect never retries a control. Bridges exit with an explicit
 transport error; after a lost reply, inspect fresh state before another action.
 Supervision can restart the daemon; existing durable attempt guards still apply.

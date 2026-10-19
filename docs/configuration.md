@@ -96,6 +96,12 @@ The local key and device ID come from your existing Tuya-local setup. Only
 protocol `3.3` is supported in this first module. Pairing, discovery, cloud API
 access, other Tuya versions, and additional Tuya device families are not implemented.
 
+Resetting or re-pairing a device changes its local key. If a reachable device
+rejects a Tuya command, retrieve its current local key, update the corresponding
+Infisical secret and securely update the deployed Meaco configuration. Restart
+the device owner to load it, then verify a fresh status read before any controls.
+Updating the secret alone does not update an already deployed runtime file.
+
 Configuration fields: `device_id`, literal-IP `host`, `local_key`,
 `protocol_version`, optional `port` (6668), `timeout_seconds` (8; range 1–30),
 and `settle_seconds` (20; range 1–60). Optional `presets` and `schedule` contain
