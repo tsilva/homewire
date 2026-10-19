@@ -51,6 +51,36 @@ class LockdownTests(unittest.TestCase):
     def test_missing_phone_never_synthesizes_a_privileged_agent(self):
         with self.assertRaises(ValueError):lockdown.patches({'agents':{}},'synthetic',self.profile)
 
+    def test_operator_grant_removes_old_write_denials_and_preserves_channel_access(self):
+        profile_value=copy.deepcopy(self.profile.value)
+        profile_value['agent']['telegram_control_tools']=['switch_set']
+        profile=deployment.Profile(profile_value)
+        config={'agents':{'phone':{'enabled':True}},'channels':{'telegram':{
+            'phone':{'enabled':True,'bot_token':'synthetic','excluded_tools':
+                ['homewire__'+n for n in lockdown.WRITE]+['custom_denial']},
+            'disabled':{'enabled':False}}},'peer_groups':{'telegram_phone':{
+                'channel':'telegram.phone','external_peers':['123'],'admin_for_agent_scope':True}}}
+        values={p['path']:p['value'] for p in lockdown.patches(config,'synthetic',profile)}
+        channels=values['/channels']['telegram']
+        self.assertTrue(channels['phone']['enabled'])
+        self.assertFalse(channels['disabled']['enabled'])
+        self.assertEqual(channels['phone']['bot_token'],'synthetic')
+        excluded=channels['phone']['excluded_tools']
+        self.assertNotIn('homewire__switch_set',excluded)
+        self.assertIn('custom_denial',excluded)
+        self.assertTrue(set(lockdown.BLOCKED)<=set(excluded))
+        self.assertTrue({'homewire__'+n for n in lockdown.WRITE if n!='switch_set'}<=set(excluded))
+        self.assertEqual(values['/peer_groups']['telegram_phone']['external_peers'],['123'])
+        self.assertFalse(values['/peer_groups']['telegram_phone']['admin_for_agent_scope'])
+        text=lockdown.instructions(profile.tools,profile.telegram_controls)
+        self.assertIn('Telegram may use these operator-granted controls: `homewire__switch_set`.',text)
+        self.assertNotIn('Telegram is read-only',text)
+        # Reapplying is stable; revoking the explicit grant restores read-only access.
+        updated={p['path'][1:]:p['value'] for p in lockdown.patches(config,'synthetic',profile)}
+        self.assertEqual(lockdown.patches(updated,'synthetic',profile),lockdown.patches(config,'synthetic',profile))
+        revoked={p['path']:p['value'] for p in lockdown.patches(updated,'synthetic',self.profile)}
+        self.assertIn('homewire__switch_set',revoked['/channels']['telegram']['phone']['excluded_tools'])
+
     def test_telegram_peers_cannot_administer_and_wildcards_fail_closed(self):
         config={'agents':{'phone':{'enabled':True}},'peer_groups':{
             'telegram_phone':{'channel':'telegram.phone','external_peers':['123'],
@@ -59,6 +89,21 @@ class LockdownTests(unittest.TestCase):
         self.assertFalse(values['/peer_groups']['telegram_phone']['admin_for_agent_scope'])
         config['peer_groups']['telegram_phone']['external_peers']=['*']
         with self.assertRaises(ValueError):lockdown.patches(config,'synthetic',self.profile)
+
+    def test_tv_grants_keep_general_settings_and_other_writes_blocked(self):
+        controls = ['switch_set', 'media_power', 'remote_key', 'media_launch', 'media_text']
+        values = copy.deepcopy(self.profile.value)
+        values['agent']['telegram_control_tools'] = controls
+        profile = deployment.Profile(values)
+        config = {'agents': {'phone': {'enabled': True}}, 'channels': {'telegram': {
+            'phone': {'enabled': True, 'excluded_tools': ['custom_denial']}}}}
+        patches = {p['path']: p['value'] for p in lockdown.patches(config, 'synthetic', profile)}
+        excluded = patches['/channels']['telegram']['phone']['excluded_tools']
+        self.assertFalse(set(excluded) & {'homewire__' + n for n in controls})
+        for name in ['entity_configure', 'routine_run', 'light_set', 'media_play', 'media_command']:
+            self.assertIn('homewire__' + name, excluded)
+        self.assertIn('custom_denial', excluded)
+        self.assertIn('homewire__entity_configure', patches['/risk_profiles']['homewire']['excluded_tools'])
 
     def test_isolated_deployment_refuses_legacy_grant_before_reading_config(self):
         class IsolatedPhone:

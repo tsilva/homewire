@@ -17,7 +17,7 @@ import deployment
 READ = ('entity_list', 'entity_status', 'entity_options', 'routine_list',
         'routine_plan', 'alert_list', 'history_series', 'history_query',
         'weather_status', 'shopping_list', 'radio_search', 'tts_media')
-WRITE = ('light_set', 'switch_set', 'media_power', 'remote_key', 'routine_run',
+WRITE = ('light_set', 'switch_set', 'media_power', 'remote_key', 'media_launch', 'media_text', 'routine_run',
          'media_play', 'media_command', 'shopping_update')
 BLOCKED = ('shell', 'file_read', 'file_write', 'file_list', 'file_edit',
            'glob_search', 'content_search', 'model_routing_config', 'delegate',
@@ -27,16 +27,28 @@ BLOCKED = ('shell', 'file_read', 'file_write', 'file_list', 'file_edit',
            'homewire__entity_configure')
 
 
-def instructions(tools=None):
+def telegram_exclusions(existing, controls):
+    """Reconcile operator-managed write exclusions; retain unrelated channel denials."""
+    writes = {'homewire__' + n for n in WRITE}
+    allowed = {'homewire__' + n for n in controls}
+    return sorted((set(existing) - writes) | set(BLOCKED) | (writes - allowed))
+
+
+def instructions(tools=None, telegram_controls=()):
     tools = tools if tools is not None else READ + WRITE
     reads = tuple(n for n in READ if n in tools)
     writes = tuple(n for n in WRITE if n in tools)
+    telegram = tuple(n for n in writes if n in telegram_controls)
+    channel_policy = ('Telegram may use these operator-granted controls: ' +
+        ', '.join('`homewire__'+n+'`' for n in telegram) +
+        '. Other control tools are excluded by the runtime. ' if telegram else
+        'Telegram is read-only: control tools are excluded by the runtime. ')
     return ('# Active tool policy\n\n'
         'The operator has isolated this ZeroClaw deployment. Use the actual supplied tool schemas. '
         'Old conversation memories and identity notes about shell, files or other tool bundles are obsolete.\n\n'
         'Read tools: '+', '.join('`homewire__'+n+'`' for n in reads)+'.\n\n'
         'Trusted Homewire gateway controls: '+', '.join('`homewire__'+n+'`' for n in writes)+'.\n\n'
-        'Telegram is read-only: control tools are excluded by the runtime. Telegram peers cannot administer agent settings. '
+        + channel_policy + 'Telegram peers cannot administer agent settings. '
         'Shell, filesystem, arbitrary HTTP, browser, delegation, cron, camera, microphone, Google and photo tools are unavailable. '
         'Homewire device/security settings cannot be configured by this agent.\n\n'
         'Use the granted discovery tools and actual entity names. Never substitute shell commands or invent readings.\n')
@@ -78,8 +90,7 @@ def patches(config, token, profile=None):
     baseline['auto_approve'] = ['time']
     channels = copy.deepcopy(config.get('channels', {}))
     for channel in channels.get('telegram', {}).values():
-        channel['excluded_tools'] = sorted(set(channel.get('excluded_tools', []) +
-            list(BLOCKED) + ['homewire__' + n for n in WRITE]))
+        channel['excluded_tools'] = telegram_exclusions(channel.get('excluded_tools', []), profile.telegram_controls)
     peers = copy.deepcopy(config.get('peer_groups', {}))
     for group in peers.values():
         if str(group.get('channel', '')).split('.')[0] == 'telegram':

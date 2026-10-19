@@ -5,7 +5,7 @@ from pathlib import Path
 FAMILIES = json.loads(Path(__file__).with_suffix('.json').read_text())
 ADAPTERS = tuple(row['name'] for row in FAMILIES if row['section'] == 'adapters')
 SERVICES = tuple(row['name'] for row in FAMILIES if row['section'] == 'services')
-CERTIFICATES = ('digi-cert.pem', 'digi-key.pem', 'api-cert.pem', 'api-key.pem')
+CERTIFICATES = ('digi-cert.pem', 'digi-key.pem', 'tcl-cert.pem', 'tcl-key.pem', 'api-cert.pem', 'api-key.pem')
 FILES = ('home.json',) + tuple(name + '.json' for name in ADAPTERS + SERVICES) + ('tv.json',) + CERTIFICATES
 
 

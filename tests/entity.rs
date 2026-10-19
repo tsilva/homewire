@@ -13,6 +13,79 @@ use std::{
 #[path = "support/mod.rs"]
 mod support;
 
+#[test]
+fn meaco_discovery_uses_dehumidifier_and_legacy_id_shares_one_fresh_read() -> Result<()> {
+    use homewire::{meaco, tuya::encrypt};
+    use std::{io::Read, time::Duration};
+    let temp = support::Directory::new()?;
+    let config = temp.config(
+        "meaco.json",
+        &json!({
+            "device_id":"synthetic", "host":"192.0.2.1", "local_key":"0123456789abcdef",
+            "protocol_version":"3.3", "timeout_seconds":2,
+        }),
+    )?;
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let mut devices = Devices {
+        meaco: Some(meaco::Manager::open_with_connect(
+            &config,
+            Some(listener.local_addr()?),
+        )?),
+        ..Devices::default()
+    };
+    let discovery = entity::list(&devices);
+    let base = &discovery["entities"][0];
+    assert_eq!(base["entity"], "dehumidifier.meaco");
+    assert_eq!(base["domain"], "dehumidifier");
+    assert!(!discovery.to_string().contains("\"humidifier.meaco\""));
+    let worker = thread::spawn(move || -> Result<TcpListener> {
+        let (mut socket, _) = listener.accept()?;
+        socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+        let mut header = [0; 16];
+        socket.read_exact(&mut header)?;
+        assert_eq!(u32::from_be_bytes(header[8..12].try_into()?), 10);
+        let mut query = vec![0; u32::from_be_bytes(header[12..].try_into()?) as usize];
+        socket.read_exact(&mut query)?;
+        let payload = encrypt(
+            &serde_json::to_vec(&json!({"dps":{"1":false,"2":55,"4":"manual","16":61,"19":0}}))?,
+            b"0123456789abcdef",
+        );
+        let mut frame = Vec::new();
+        for value in [0x55aa_u32, 1, 10, payload.len() as u32 + 12, 0] {
+            frame.extend_from_slice(&value.to_be_bytes());
+        }
+        frame.extend_from_slice(&payload);
+        frame.extend_from_slice(&crc32fast::hash(&frame).to_be_bytes());
+        frame.extend_from_slice(&0xaa55_u32.to_be_bytes());
+        socket.write_all(&frame)?;
+        Ok(listener)
+    });
+    let reply = entity::call(
+        &mut devices,
+        "entity_status",
+        &json!({"entities":["dehumidifier.meaco","humidifier.meaco","sensor.meaco_humidity","sensor.meaco_tank_full","sensor.meaco_target"]}),
+    )?;
+    let states = reply["states"].as_array().expect("states");
+    assert!(states.iter().all(|s| s["available"] == true));
+    assert_eq!(states[0]["state"], states[1]["state"]);
+    assert_eq!(states[0]["state"]["power"], false);
+    assert_eq!(states[2]["state"], 61);
+    assert_eq!(states[3]["state"], false);
+    assert_eq!(states[4]["state"], 55);
+    assert!(
+        states
+            .iter()
+            .all(|s| s["observed_at"] == states[0]["observed_at"])
+    );
+    let listener = worker.join().expect("mock")?;
+    listener.set_nonblocking(true)?;
+    assert_eq!(
+        listener.accept().expect_err("one read").kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    Ok(())
+}
+
 fn lights(temp: &support::Directory) -> Result<bulb::Manager> {
     let mut value: Value = serde_json::from_str(include_str!("../examples/lights.json"))?;
     value.as_object_mut().expect("config").remove("automation");
@@ -323,6 +396,14 @@ fn standard_mcp_grants_only_configured_categories_and_gates_all_writes() {
         (
             "remote_key",
             json!({"entity":"media_player.digi","key":"home"}),
+        ),
+        (
+            "media_launch",
+            json!({"entity":"media_player.digi","url":"https://www.netflix.com"}),
+        ),
+        (
+            "media_text",
+            json!({"entity":"media_player.digi","text":"movie"}),
         ),
         ("routine_run", json!({"routine":"tv_off"})),
     ] {

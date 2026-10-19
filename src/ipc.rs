@@ -15,23 +15,62 @@ use std::{
         mpsc::{self, Receiver},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 const REPLY_LIMIT: usize = 1024 * 1024;
 const FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 const CALL_TIMEOUT: Duration = Duration::from_secs(300);
+/// Room for both API workers and ordinary bridge clients, without an unbounded backlog.
+pub const DEVICE_QUEUE_CAPACITY: usize = 4;
 
 pub struct Server {
-    pub incoming: Receiver<UnixStream>,
+    pub incoming: Receiver<Pending>,
     path: PathBuf,
     _lock: File,
     stopped: Arc<AtomicBool>,
     worker: Option<thread::JoinHandle<()>>,
 }
+
+/// A bounded, already framed device request. Only the device owner executes it.
+pub struct Pending {
+    stream: UnixStream,
+    request: Value,
+}
+impl Pending {
+    pub fn exchange(mut self, handle: impl FnOnce(Value) -> Option<Value>) -> Result<()> {
+        write_reply(&mut self.stream, handle(self.request))
+    }
+    fn reject_busy(mut self) -> Result<()> {
+        let reply = self.request.get("id").map(|id| {
+            mcp::rpc_error(
+                id.clone(),
+                -32000,
+                "Device owner is busy; request was not queued or executed",
+            )
+        });
+        write_reply(&mut self.stream, reply)
+    }
+}
+
 impl Server {
     /// Parent must already be a private, real directory. An OS lock protects
     /// stale socket replacement across crashes and competing daemon startups.
     pub fn bind(path: &Path) -> Result<Self> {
+        Self::bind_with_protocol(path, |request| {
+            mcp::handle_selected(
+                request,
+                crate::device::Selection::default(),
+                mcp::Options::default(),
+                |_, _| Err(error("Device calls belong to the owner")),
+            )
+        })
+    }
+    /// Protocol-only replies use the existing accept thread. Device calls stay
+    /// on the owner, and a full queue never blocks protocol traffic.
+    pub fn bind_with_protocol(
+        path: &Path,
+        protocol: impl Fn(Value) -> Option<Value> + Send + 'static,
+    ) -> Result<Self> {
         let parent = path
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
@@ -67,21 +106,52 @@ impl Server {
             path.with_extension("pid"),
             fs::Permissions::from_mode(0o600),
         )?;
-        let (sender, incoming) = mpsc::sync_channel(1);
+        let (sender, incoming) = mpsc::sync_channel(DEVICE_QUEUE_CAPACITY);
         let stopped = Arc::new(AtomicBool::new(false));
         let stop = Arc::clone(&stopped);
         let worker = thread::Builder::new()
             .name("ipc-accept".into())
-            .stack_size(128 * 1024)
+            .stack_size(512 * 1024)
             .spawn(move || {
                 for connection in listener.incoming() {
                     if stop.load(Ordering::Acquire) {
                         break;
                     }
                     match connection {
-                        Ok(stream) => {
-                            if sender.send(stream).is_err() {
-                                break;
+                        Ok(mut stream) => {
+                            let request = match read_request(&mut stream) {
+                                Ok(Some(request)) => request,
+                                Ok(None) => {
+                                    let _ = write_reply(
+                                        &mut stream,
+                                        Some(mcp::rpc_error(Value::Null, -32700, "Invalid JSON")),
+                                    );
+                                    continue;
+                                }
+                                Err(e) => {
+                                    eprintln!("IPC frame rejected: {e}");
+                                    continue;
+                                }
+                            };
+                            if let Some(reply) = mcp::invalid_request(&request) {
+                                let _ = write_reply(&mut stream, Some(reply));
+                            } else if crate::api::protocol_only(&request)
+                                || !matches!(
+                                    request["method"].as_str(),
+                                    Some("tools/call" | "homewire/api")
+                                )
+                            {
+                                let _ = write_reply(&mut stream, protocol(request));
+                            } else {
+                                match sender.try_send(Pending { stream, request }) {
+                                    Ok(()) => (),
+                                    Err(mpsc::TrySendError::Full(pending)) => {
+                                        if let Err(e) = pending.reject_busy() {
+                                            eprintln!("IPC busy reply failed: {e}");
+                                        }
+                                    }
+                                    Err(mpsc::TrySendError::Disconnected(_)) => break,
+                                }
                             }
                         }
                         Err(e) => {
@@ -115,28 +185,70 @@ impl Drop for Server {
         let _ = fs::remove_file(self.path.with_extension("pid"));
     }
 }
-/// The caller owns serialization and scheduling; disconnected/malformed clients
-/// are isolated here and never terminate the device-owning daemon.
-pub fn exchange(
-    stream: &mut UnixStream,
-    handle: impl FnOnce(Value) -> Option<Value>,
-) -> Result<()> {
-    stream.set_read_timeout(Some(FRAME_TIMEOUT))?;
-    stream.set_write_timeout(Some(FRAME_TIMEOUT))?;
-    let line = mcp::read_message(&mut BufReader::with_capacity(1024, &mut *stream))?
+// Use one absolute deadline per frame/reply, including partial reads/writes.
+// A trickling client must not monopolize the protocol listener indefinitely.
+struct Framed<'a> {
+    stream: &'a mut UnixStream,
+    deadline: Instant,
+}
+impl<'a> Framed<'a> {
+    fn new(stream: &'a mut UnixStream) -> Self {
+        Self {
+            stream,
+            deadline: Instant::now() + FRAME_TIMEOUT,
+        }
+    }
+    fn remaining(&self) -> io::Result<Duration> {
+        self.deadline
+            .checked_duration_since(Instant::now())
+            // Socket timeouts use microseconds. Avoid rounding a fractional
+            // second up to an invalid one-million-microsecond timeval field.
+            .map(|left| Duration::from_micros(left.as_micros() as u64))
+            .filter(|left| !left.is_zero())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "IPC frame deadline exceeded"))
+    }
+}
+impl Read for Framed<'_> {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        self.stream.set_read_timeout(Some(self.remaining()?))?;
+        self.stream.read(bytes)
+    }
+}
+impl Write for Framed<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.stream.set_write_timeout(Some(self.remaining()?))?;
+        self.stream.write(bytes)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.stream.flush()
+    }
+}
+fn read_request(stream: &mut UnixStream) -> Result<Option<Value>> {
+    let line = mcp::read_message(&mut BufReader::with_capacity(1024, Framed::new(stream)))?
         .ok_or_else(|| error("Empty IPC request"))?;
-    let reply = match serde_json::from_str(&line) {
-        Ok(request) => handle(request),
-        Err(_) => Some(mcp::rpc_error(Value::Null, -32700, "Invalid JSON")),
-    };
+    Ok(serde_json::from_str(&line).ok())
+}
+fn write_reply(stream: &mut UnixStream, reply: Option<Value>) -> Result<()> {
     let bytes = serde_json::to_vec(&reply)?;
     if bytes.len() >= REPLY_LIMIT {
         return Err(error("IPC reply exceeds 1 MiB"));
     }
-    stream.write_all(&bytes)?;
-    stream.write_all(b"\n")?;
-    stream.flush()?;
+    let mut framed = Framed::new(stream);
+    framed.write_all(&bytes)?;
+    framed.write_all(b"\n")?;
+    framed.flush()?;
     Ok(())
+}
+/// Direct one-request exchange for callers that own their own listener.
+pub fn exchange(
+    stream: &mut UnixStream,
+    handle: impl FnOnce(Value) -> Option<Value>,
+) -> Result<()> {
+    let reply = match read_request(stream)? {
+        Some(request) => handle(request),
+        None => Some(mcp::rpc_error(Value::Null, -32700, "Invalid JSON")),
+    };
+    write_reply(stream, reply)
 }
 /// Connect exactly once. A timeout/disconnect after a write is an uncertain
 /// outcome and must never trigger an automatic retry.

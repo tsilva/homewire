@@ -51,6 +51,10 @@ class DeploymentTests(unittest.TestCase):
                  ('android','user',True),('agent','name','../../config'),('agent','mcp_port',43001),
                  ('agent','provider_host','host;id'),('agent','tools',['entity_configure']),
                  ('agent','tools',['entity_list','entity_list']),('network','dns_servers',['127.0.0.1']),
+                 ('agent','telegram_control_tools',['switch_set']),
+                 ('agent','telegram_control_tools',['entity_list']),
+                 ('agent','telegram_control_tools',['routine_run','routine_run']),
+                 ('agent','telegram_control_tools','routine_run'),
                  ('network','dns_servers',['192.0.2.1;id']),('network','lan_probe','192.0.2.1:0'),
                  ('network','admin_port',43002)]
         for section,key,value in invalid:
@@ -110,6 +114,36 @@ class DeploymentTests(unittest.TestCase):
         text=lockdown.instructions(('entity_list',))
         self.assertIn('`homewire__entity_list`',text)
         self.assertNotIn('`homewire__routine_run`',text)
+
+    def test_all_granted_writes_can_be_explicitly_enabled_for_telegram(self):
+        c=fixture();c['agent']['tools']=list(lockdown.READ+lockdown.WRITE)
+        c['agent']['telegram_control_tools']=list(lockdown.WRITE)
+        p=deployment.Profile(c)
+        excluded=lockdown.telegram_exclusions(['homewire__'+n for n in lockdown.WRITE],p.telegram_controls)
+        self.assertFalse(set(excluded)&{'homewire__'+n for n in lockdown.WRITE})
+        self.assertTrue(set(lockdown.BLOCKED)<=set(excluded))
+
+    def test_policy_update_preserves_native_files_and_stays_stopped_on_probe_failure(self):
+        profile=deployment.Profile(fixture())
+        config={p['path'][1:]:p['value'] for p in lockdown.patches({'agents':{'resident':{'enabled':True}}},'synthetic',profile)}
+        api={'agent':{'listen':profile.endpoint,'token':'synthetic','tools':list(profile.tools)}}
+        class FakePhone:
+            def sh(self,*args):return b''
+        for probe_ok in (True,False):
+            written=[]
+            def root(serial,command):
+                if command.startswith('cat ') and command.endswith('config.toml'):return lockdown.to_toml(config).encode()
+                if command.startswith('cat '):return b'synthetic-key'
+                if command.endswith('namespace.sh probe'):return b'filesystem_and_execution_denied=true' if probe_ok else b'failed'
+                return b''
+            with patch.object(deployment,'_ACTIVE',profile),patch.object(phone,'Phone',return_value=FakePhone()),patch.object(isolate,'preflight'),patch.object(phone,'read_api',return_value=('/api',{},api,False)),patch.object(isolate,'require_supported_binary'),patch.object(lockdown,'validate_prepared',side_effect=lambda p,d,c,k:c),patch.object(direct_boot,'root_sh',side_effect=root),patch.object(isolate,'stop') as stop,patch.object(isolate,'agent_uid',return_value=10001),patch.object(isolate,'root_put',side_effect=lambda serial,path,data:written.append(path)),patch.object(phone,'write_api') as write_api,patch.object(isolate,'restart') as restart:
+                if probe_ok:isolate.update('synthetic','/unused',policy_only=True)
+                else:
+                    with self.assertRaisesRegex(ValueError,'service stays stopped'):isolate.update('synthetic','/unused',policy_only=True)
+                stop.assert_called_once()
+                self.assertEqual(restart.call_count,int(probe_ok))
+                write_api.assert_not_called()
+                self.assertEqual(written,[isolate.ROOT+'/policy/'+name for name in ('deployment.json','config.toml','TOOLS.md')])
 
 
 if __name__=='__main__':unittest.main()

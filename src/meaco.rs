@@ -120,14 +120,14 @@ impl Adapter for Manager {
         let base = Entity::new(
             Family::Meaco,
             0,
-            Domain::Humidifier,
+            Domain::Dehumidifier,
             "meaco",
             "Arete Two",
             Capabilities::Read,
         );
         visit(base.configurable(SETTINGS));
         for (s, f, u) in [
-            ("_humidity", "humidity", "%"),
+            ("_humidity", "current_humidity", "%"),
             ("_target", "target_humidity", "%"),
             ("_remaining_hours", "remaining_hours", "h"),
             ("_tank_full", "tank_full", ""),

@@ -17,8 +17,8 @@ fn example(name: &str) -> Result<Value> {
 fn fixture() -> Result<Value> {
     let mut value = json!({"version":1,"adapters":{},"services":{},"routines":{},"automations":{}});
     for name in [
-        "meaco", "lights", "plugs", "printers", "awair", "samsung", "digi", "brother", "cast",
-        "dlna",
+        "meaco", "lights", "plugs", "printers", "awair", "samsung", "digi", "tcl", "brother",
+        "cast", "dlna",
     ] {
         value["adapters"][name] = example(name)?;
     }
@@ -32,9 +32,11 @@ fn fixture() -> Result<Value> {
             device["auth_hash"] = json!("00".repeat(32));
         }
     }
-    for family in ["digi", "cast"] {
+    for family in ["digi", "tcl", "cast"] {
         value["adapters"][family]["server_cert_sha256"] = json!("00".repeat(32));
     }
+    value["adapters"]["tcl"]["client_cert"] = json!("cert.pem");
+    value["adapters"]["tcl"]["client_key"] = json!("key.pem");
     value["adapters"]["digi"]["client_cert"] = json!("cert.pem");
     value["adapters"]["digi"]["client_key"] = json!("key.pem");
     let presets = value["adapters"]["meaco"]

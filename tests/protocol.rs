@@ -27,6 +27,31 @@ fn corruption_is_rejected_before_decryption() {
     assert!(decode_response(&frame, KEY).is_err());
 }
 #[test]
+fn device_rejection_reports_reachability_and_key_recovery_without_payload() {
+    let mut frame = golden();
+    frame[16..20].copy_from_slice(&1_u32.to_be_bytes());
+    let end = frame.len();
+    let crc = crc32fast::hash(&frame[..end - 8]);
+    frame[end - 8..end - 4].copy_from_slice(&crc.to_be_bytes());
+    let message = decode_response(&frame, KEY)
+        .expect_err("rejected")
+        .to_string();
+    assert!(message.contains("code 1"));
+    assert!(message.contains("device is reachable"));
+    assert!(message.contains("local key"));
+    assert!(message.contains("re-pairing"));
+    assert!(!message.contains(std::str::from_utf8(KEY).expect("key")));
+    assert!(!message.contains("dps"));
+
+    frame[end - 8] ^= 1;
+    assert!(
+        decode_response(&frame, KEY)
+            .expect_err("checksum")
+            .to_string()
+            .contains("checksum")
+    );
+}
+#[test]
 fn wrong_key_is_rejected() {
     assert!(decode_response(&golden(), b"fedcba9876543210").is_err());
 }

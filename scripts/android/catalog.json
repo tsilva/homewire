@@ -6,6 +6,7 @@
   {"name": "plugs", "section": "adapters"},
   {"name": "samsung", "section": "adapters"},
   {"name": "digi", "section": "adapters"},
+  {"name": "tcl", "section": "adapters"},
   {"name": "brother", "section": "adapters"},
   {"name": "cast", "section": "adapters"},
   {"name": "dlna", "section": "adapters"},

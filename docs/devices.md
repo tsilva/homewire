@@ -422,6 +422,62 @@ Protocol semantics follow python-kasa's
 [energy module](https://github.com/python-kasa/python-kasa/blob/master/kasa/smart/modules/energy.py)
 and [power-protection module](https://github.com/python-kasa/python-kasa/blob/master/kasa/smart/modules/powerprotection.py).
 
+## TCL Android / Google TV
+
+The `tcl` adapter shares the synchronous Android TV Remote v2 transport with
+DIGI, using mutual TLS on port 6466. It requires a paired client certificate/key,
+a pinned server certificate and an exact configured `model`. Live manufacturer
+must be `TCL`; both model and manufacturer are checked before sending controls.
+The verified `Smart TV` model is supported; other TCL Android/Google TV models
+must report the exact configured model through this same protocol.
+
+Copy [examples/tcl.json](../examples/tcl.json) to an ignored private file, or add
+its contents under `adapters.tcl` in the unified configuration. All DIGI transport
+fields and bounds below also apply. `model` is required (1–128 UTF-8 bytes,
+nonblank, no control characters). The standard entity is `media_player.tcl`,
+independent of the Samsung/DIGI shared-outlet TV routine.
+
+For a new pairing, run this host-only helper on a trusted LAN with the TV on:
+
+```sh
+python3 scripts/android/pair_digi.py --device tcl --host TV_IP --model 'Smart TV' --output-directory .local/tcl-pairing
+```
+
+Enter the six hexadecimal characters shown on the TV. The PIN authenticates
+both certificates, and setup checks the remote service's key and live identity
+before saving `tcl.json`. The helper refuses an existing output directory.
+Store the generated private key in Infisical, replace `client_key` with an
+`env:HOMEWIRE_SECRET_TCL_PRIVATE_KEY` reference, and remove the host key file
+after checking the stored credential. Keep the certificate and private configs
+protected with mode 600. Android projection materializes the referenced key on
+the target and includes the TCL certificate; it never uploads tunnel configs.
+
+```sh
+infisical run --env=prod -- target/release/homewire --tcl .local/tcl.json call entity_status '{"entities":["media_player.tcl"]}'
+infisical run --env=prod -- target/release/homewire --tcl .local/tcl.json call media_power '{"entity":"media_player.tcl","power":false}'
+infisical run --env=prod -- target/release/homewire --tcl .local/tcl.json call remote_key '{"entity":"media_player.tcl","key":"home"}'
+```
+
+MCP uses the same standard tools; writes require `--allow-control`. TCL has no
+additional legacy tools. `media_power` skips a matching fresh power state. Wake
+sends the absolute WAKEUP key once. Shutdown uses one POWER key only after the
+pinned session confirms the exact identity and an on state; some TCL firmware
+ignores the separate SLEEP key. The shutdown attempt is saved privately in
+`tcl.power.state.json` before sending. If off cannot be confirmed, another power
+toggle is blocked for 120 seconds, including after restart. A fresh confirmed
+off state clears that guard. The saved guard is tied to the configured device
+identity; invalid, nonprivate or mismatched state blocks opening the adapter.
+Failure to persist an attempt blocks the command. Raw power toggles remain
+unavailable through `remote_key`. DIGI retains absolute wake/sleep keys.
+
+Both TCL operations verify the reported result on the same session. An
+unreachable TV is unknown; standby must leave its remote service
+reachable for wake. Controls never reconnect or replay after uncertain errors.
+The remote keys, app-link launch and focused-field text settings described for
+DIGI below also apply; key/app/text delivery remains unverified. Normal commands
+never start pairing or silently replace a certificate pin. Roku/Fire TV remote
+protocols and ADB are outside this adapter.
+
 ## Samsung TV and DIGI R2A
 
 The Samsung adapter targets the **UE40H6200** with encrypted Socket.IO on port
@@ -501,8 +557,32 @@ correct settings send no key. Errors/disconnects after controls are not reconnec
 or replayed. `digi-key KEY` / `digi_key {"key":"home"}` supports `home`, `back`,
 `up`, `down`, `left`, `right`, `enter`, `volume_up`, `volume_down`, `mute`,
 `play_pause`, `play`, `pause`, `channel_up`, `channel_down`. It sends one short key
-and returns an unverified delivery result. `entity_configure` supports HTTP(S)
+and returns an unverified delivery result. After sending, the connection services
+pending TV messages (including pings) for up to 500 ms within the operation
+timeout, then closes TLS cleanly. This avoids dropping navigation keys during
+immediate connection teardown. Session failures remain uncertain and never
+replay the key; the wait does not acknowledge a resulting screen change.
+The result includes `current_app` from messages received after sending, or null
+when unavailable; this is supplemental evidence, not key execution confirmation.
+`entity_configure` supports HTTP(S)
 `app_link` launch and `text` (up to 512 bytes) in a live focused input field.
+The same operations have narrower tools suitable for agent grants:
+`media_launch {"entity":"media_player.tcl","url":"https://www.netflix.com/title/12345"}`
+and `media_text {"entity":"media_player.tcl","text":"A movie title"}`.
+These require `--allow-control` and do not grant `entity_configure` or permit
+changing other devices' settings. They exist only for adapters with app/text
+support; `entity_options` reports the live negotiated features and current app
+when the TV supplies it. Navigate to a focused search field before sending text.
+
+App links accept HTTP(S) and documented `stremio:///` board, discover, library,
+search and detail pages. For example,
+`stremio:///detail/movie/tt0066921/tt0066921?autoPlay=true` opens a title and
+requests autoplay. Custom installation links and arbitrary intent/file schemes
+are rejected. [Stremio documents](https://stremio.github.io/stremio-addon-sdk/deep-links.html)
+that autoplay depends on an available prior stream selection. Netflix links
+require a compatible installed app and may still show account/profile/title UI.
+No tool finds title IDs, sees the TV screen, bypasses subscriptions, or confirms
+that video is playing. Use actual supplied title links/IDs and reported results.
 Requests are sent once and remain unverified. TV voice streaming and ADB are
 not implemented. Host-only `scripts/android/pair_digi.py` performs PIN pairing
 without HA; existing credentials remain the normal runtime path.

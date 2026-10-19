@@ -48,7 +48,7 @@ class Profile:
         if any(not absolute(a[k]) for k in ('root_command','zeroclaw_config') if k in a):
             raise ValueError('Android overrides require normalized absolute paths')
         required = {'name','gateway_port','mcp_port','provider_host'}
-        if not required <= set(z) or set(z) - required - {'transcription_port','tools'}:
+        if not required <= set(z) or set(z) - required - {'transcription_port','tools','telegram_control_tools'}:
             raise ValueError('Invalid agent deployment fields')
         if not label(z['name']) or not isinstance(z['provider_host'], str) or not re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?', z['provider_host']):
             raise ValueError('Invalid agent alias or provider hostname')
@@ -78,11 +78,15 @@ class Profile:
         tools = z.get('tools', list(lockdown.READ + lockdown.WRITE))
         if not isinstance(tools,list) or not tools or not all(isinstance(t,str) for t in tools) or len(set(tools))!=len(tools) or not set(tools)<=set(lockdown.READ+lockdown.WRITE):
             raise ValueError('Agent tools must be a subset of supported Homewire capabilities')
+        telegram_controls = z.get('telegram_control_tools', [])
+        if not isinstance(telegram_controls,list) or not all(isinstance(t,str) for t in telegram_controls) or len(set(telegram_controls))!=len(telegram_controls) or not set(telegram_controls)<=set(tools)&set(lockdown.WRITE):
+            raise ValueError('Telegram controls must be a unique subset of granted Homewire write tools')
         self.value = json.loads(json.dumps(value))
         self.android = self.value['android']
         self.agent = self.value['agent']
         self.network = self.value['network']
         self.tools = tuple(tools)
+        self.telegram_controls = tuple(telegram_controls)
 
     @property
     def endpoint(self): return '127.0.0.1:' + str(self.agent['mcp_port'])

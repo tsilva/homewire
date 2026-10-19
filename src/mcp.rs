@@ -126,25 +126,17 @@ pub fn handle_capabilities(
         call,
     )
 }
-pub(crate) fn handle_tools(
-    mut request: Value,
-    tools: impl Iterator<Item = &'static crate::device::Tool> + Clone,
-    options: Options,
-    legacy: bool,
-    mut call: impl FnMut(&str, &Value) -> Result<Value>,
-) -> Option<Value> {
-    let id = request.get_mut("id").map(Value::take);
-    let method = request.get("method").and_then(Value::as_str);
-    let valid_id = id
-        .as_ref()
-        .is_none_or(|v| v.is_string() || v.is_number() || v.is_null());
+/// Shared envelope validation for the owner and the IPC protocol fast path.
+pub(crate) fn invalid_request(request: &Value) -> Option<Value> {
+    let id = request.get("id");
+    let valid_id = id.is_none_or(|v| v.is_string() || v.is_number() || v.is_null());
     if request.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
-        || method.is_none()
+        || request.get("method").and_then(Value::as_str).is_none()
         || !valid_id
     {
         return Some(rpc_error(
             if valid_id {
-                id.unwrap_or(Value::Null)
+                id.cloned().unwrap_or(Value::Null)
             } else {
                 Value::Null
             },
@@ -152,6 +144,21 @@ pub(crate) fn handle_tools(
             "Invalid JSON-RPC request",
         ));
     }
+    None
+}
+
+pub(crate) fn handle_tools(
+    mut request: Value,
+    tools: impl Iterator<Item = &'static crate::device::Tool> + Clone,
+    options: Options,
+    legacy: bool,
+    mut call: impl FnMut(&str, &Value) -> Result<Value>,
+) -> Option<Value> {
+    if let Some(reply) = invalid_request(&request) {
+        return Some(reply);
+    }
+    let id = request.get_mut("id").map(Value::take);
+    let method = request.get("method").and_then(Value::as_str);
     // Well-formed notifications, including initialized/cancelled, have no response.
     let id = id?;
     let result = match method.unwrap_or_default() {

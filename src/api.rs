@@ -382,6 +382,10 @@ fn handle(
         let request = json!({"jsonrpc":"2.0","id":1,"method":"homewire/api","params":{"role":"agent","route":"/mcp","tools":agent.tools,"data":data}});
         let reply =
             ipc::request(socket, &request.to_string())?.ok_or_else(|| error("No owner reply"))?;
+        if let Some(error) = reply.get("error") {
+            let body = json!({"jsonrpc":"2.0","id":request.pointer("/params/data/id").cloned().unwrap_or(Value::Null),"error":error});
+            return response(stream, 503, &serde_json::to_vec(&body)?, "application/json");
+        }
         let result = &reply["result"];
         return if result.is_null() {
             response(stream, 202, b"", "application/json")
@@ -492,6 +496,56 @@ fn response(stream: &mut impl Write, status: u16, body: &[u8], content_type: &st
     stream.flush()?;
     Ok(())
 }
+/// Only stateless, scoped MCP metadata can bypass the device owner. Reports,
+/// acknowledgements, device reads and controls still belong to that owner.
+pub fn protocol_only(request: &Value) -> bool {
+    request["method"] == "homewire/api"
+        && request.pointer("/params/role").and_then(Value::as_str) == Some("agent")
+        && request.pointer("/params/route").and_then(Value::as_str) == Some("/mcp")
+        && request
+            .pointer("/params/data/method")
+            .and_then(Value::as_str)
+            != Some("tools/call")
+}
+fn agent_mcp(
+    selection: crate::device::Selection,
+    params: &Value,
+    allow_control: bool,
+    call: impl FnMut(&str, &Value) -> Result<Value>,
+) -> Result<Value> {
+    let scope = params["tools"]
+        .as_array()
+        .filter(|t| !t.is_empty() && t.len() <= 32)
+        .ok_or_else(|| error("Missing tool scope"))?;
+    Ok(mcp::handle_tools(
+        params["data"].clone(),
+        entity::tools(selection).filter(|t| scope.iter().any(|n| n.as_str() == Some(t.name))),
+        mcp::Options {
+            allow_control,
+            light_names: false,
+        },
+        false,
+        call,
+    )
+    .unwrap_or(Value::Null))
+}
+pub fn dispatch_protocol(
+    selection: crate::device::Selection,
+    request: Value,
+    allow_control: bool,
+) -> Option<Value> {
+    let result = if protocol_only(&request) {
+        agent_mcp(selection, &request["params"], allow_control, |_, _| {
+            Err(error("Device calls belong to the owner"))
+        })
+    } else {
+        Err(error("This API request requires the device owner"))
+    };
+    Some(match result {
+        Ok(result) => json!({"jsonrpc":"2.0","id":request["id"],"result":result}),
+        Err(e) => mcp::rpc_error(request["id"].clone(), -32602, &e.to_string()),
+    })
+}
 pub fn dispatch(devices: &mut Devices, request: Value, allow_control: bool) -> Option<Value> {
     let id = request["id"].clone();
     let params = &request["params"];
@@ -500,23 +554,9 @@ pub fn dispatch(devices: &mut Devices, request: Value, allow_control: bool) -> O
     let data = &params["data"];
     let result = (|| -> Result<Value> {
         if role == "agent" && route == "/mcp" {
-            let scope = params["tools"]
-                .as_array()
-                .filter(|t| !t.is_empty() && t.len() <= 32)
-                .ok_or_else(|| error("Missing tool scope"))?;
-            let selection = devices.selection();
-            return Ok(mcp::handle_tools(
-                data.clone(),
-                entity::tools(selection)
-                    .filter(|t| scope.iter().any(|n| n.as_str() == Some(t.name))),
-                mcp::Options {
-                    allow_control,
-                    light_names: false,
-                },
-                false,
-                |name, args| entity::call(devices, name, args),
-            )
-            .unwrap_or(Value::Null));
+            return agent_mcp(devices.selection(), params, allow_control, |name, args| {
+                entity::call(devices, name, args)
+            });
         }
         if role == "dashboard" && route == "/api/call" {
             let name = data["name"]
@@ -561,6 +601,106 @@ pub fn dispatch(devices: &mut Devices, request: Value, allow_control: bool) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn agent_http_exposes_busy_error_with_original_request_id_without_retry() {
+        use std::os::unix::{fs::PermissionsExt, net::UnixListener};
+        let mut random = [0; 8];
+        getrandom::getrandom(&mut random).expect("random");
+        let dir = std::env::temp_dir().join(format!(
+            "homewire-api-busy-{:x}",
+            u64::from_ne_bytes(random)
+        ));
+        std::fs::create_dir(&dir).expect("directory");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+            .expect("permissions");
+        let path = dir.join("owner.sock");
+        let listener = UnixListener::bind(&path).expect("listener");
+        let owner = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("deadline");
+            let mut line = String::new();
+            BufReader::new(&mut stream)
+                .read_line(&mut line)
+                .expect("request");
+            assert_eq!(
+                serde_json::from_str::<Value>(&line).expect("JSON")["params"]["data"]["id"],
+                "caller-71"
+            );
+            writeln!(
+                stream,
+                "{}",
+                mcp::rpc_error(
+                    json!(1),
+                    -32000,
+                    "Device owner is busy; request was not queued or executed"
+                )
+            )
+            .expect("reply");
+            listener.set_nonblocking(true).expect("nonblocking");
+            thread::sleep(Duration::from_millis(50));
+            assert_eq!(
+                listener.accept().expect_err("no retry").kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+        });
+        let mut cfg: Config = serde_json::from_value(json!({
+            "listen":"127.0.0.1:0", "dashboard_token":"a".repeat(64),
+            "agent":{"listen":"127.0.0.1:0","token":"b".repeat(64),"tools":["entity_list"]}
+        }))
+        .expect("config");
+        cfg.agent_only = true;
+        let server = Server::listen(cfg, &path, None).expect("server");
+        let mut client = TcpStream::connect(server.local_addr()).expect("connect");
+        client
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .expect("deadline");
+        let body = json!({"jsonrpc":"2.0","id":"caller-71","method":"tools/call","params":{"name":"entity_list"}}).to_string();
+        write!(client,"POST /mcp HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nContent-Length: {}\r\n\r\n{body}","b".repeat(64),body.len()).expect("request");
+        let mut reply = String::new();
+        client.read_to_string(&mut reply).expect("reply");
+        assert!(reply.starts_with("HTTP/1.1 503"));
+        let body: Value =
+            serde_json::from_str(reply.split_once("\r\n\r\n").expect("body").1).expect("JSON");
+        assert_eq!(body["id"], "caller-71");
+        assert_eq!(body["error"]["code"], -32000);
+        owner.join().expect("owner");
+        drop(server);
+        std::fs::remove_dir_all(dir).expect("cleanup");
+    }
+    #[test]
+    fn protocol_fast_path_preserves_agent_scope_and_rejects_device_calls() {
+        let selection = crate::device::Selection::ALL;
+        let mut request = json!({"jsonrpc":"2.0","id":1,"method":"homewire/api","params":{"role":"agent","route":"/mcp","tools":["entity_list","switch_set"],"data":{"jsonrpc":"2.0","id":99,"method":"tools/list"}}});
+        assert!(protocol_only(&request));
+        let reply = dispatch_protocol(selection, request.clone(), false).expect("reply");
+        assert_eq!(reply["result"]["id"], 99);
+        let tools = reply["result"]["result"]["tools"]
+            .as_array()
+            .expect("tools");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["name"], "entity_list");
+        request["params"]["data"]["method"] = json!("tools/call");
+        assert!(!protocol_only(&request));
+        assert!(
+            dispatch_protocol(selection, request.clone(), true)
+                .expect("reply")
+                .get("error")
+                .is_some()
+        );
+        request["params"]["data"]["method"] = json!("ping");
+        request["params"]["role"] = json!("dashboard");
+        assert!(!protocol_only(&request));
+        request["params"]["role"] = json!("agent");
+        request["params"]["tools"] = json!([]);
+        assert!(
+            dispatch_protocol(selection, request, true)
+                .expect("reply")
+                .get("error")
+                .is_some()
+        );
+    }
     #[test]
     fn agent_listener_rejects_bad_credentials_and_other_api_routes() {
         let cfg: Config = serde_json::from_value(json!({

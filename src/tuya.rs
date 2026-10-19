@@ -197,8 +197,11 @@ pub fn decode_response(frame: &[u8], key: &[u8; 16]) -> Result<Value> {
     {
         return Err(error("Tuya response checksum or suffix mismatch"));
     }
-    if number(&frame[16..20])? != 0 {
-        return Err(error("Device rejected the command"));
+    let code = number(&frame[16..20])?;
+    if code != 0 {
+        return Err(error(format!(
+            "Device rejected the Tuya command (code {code}); device is reachable. Verify the local key, which changes after reset or re-pairing"
+        )));
     }
     let mut payload = &frame[20..end - 8];
     if payload.is_empty() {

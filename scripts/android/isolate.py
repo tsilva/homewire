@@ -178,7 +178,7 @@ def install(serial, artifacts):
          'touch '+q(ROOT)+'/root/dev/null '+q(ROOT)+'/root/dev/random '+q(ROOT)+'/root/dev/urandom '+q(ROOT)+'/root/dev/socket/dnsproxyd '+q(ROOT)+'/root/dev/socket/fwmarkd '+q(ROOT)+'/state/zero/config.toml '+q(ROOT)+'/state/zero/.secret_key')
     root_put(serial,ROOT+'/uid',str(uid).encode())
     root_put(serial,ROOT+'/policy/deployment.json',(json.dumps(deployment.current().value,indent=2)+'\n').encode())
-    root_put(serial,ROOT+'/policy/TOOLS.md',lockdown.instructions(deployment.current().tools).encode())
+    root_put(serial,ROOT+'/policy/TOOLS.md',lockdown.instructions(profile.tools,profile.telegram_controls).encode())
     workspace=ROOT+'/state/zero/agents/'+profile.agent['name']+'/workspace'
     root('mkdir -p '+q(workspace)+'; '
          'touch '+q(workspace+'/TOOLS.md')+'; '
@@ -251,7 +251,7 @@ def restart(serial):
     direct_boot.root_sh(serial,'nohup /system/bin/sh '+phone.q(SUPERVISOR)+' </dev/null >/dev/null 2>&1 &')
 
 
-def update(serial,artifacts):
+def update(serial,artifacts,policy_only=False):
     p=phone.Phone(serial)
     profile=deployment.current()
     preflight(p,profile)
@@ -269,17 +269,25 @@ def update(serial,artifacts):
         p.sh('rm -f '+phone.q(stage+'/config.toml')+' '+phone.q(stage+'/.secret_key')+'; rmdir '+phone.q(stage)+' 2>/dev/null || true')
     prepared=lockdown.to_toml(cfg)
     stop(serial)
+    backup=ROOT+'/policy-backup-'+str(time.time_ns())
+    direct_boot.root_sh(serial,'umask 077; mkdir '+phone.q(backup)+'; cp -p '+phone.q(ROOT)+'/policy/* '+phone.q(backup)+'/; cp -p '+phone.q(ROOT+'/policy/.secret_key')+' '+phone.q(backup)+'/')
     uid=agent_uid(serial)
     workspace=ROOT+'/state/zero/agents/'+profile.agent['name']+'/workspace'
     direct_boot.root_sh(serial,'mkdir -p '+phone.q(workspace)+'; touch '+phone.q(workspace+'/TOOLS.md')+'; chown -R '+str(uid)+':'+str(uid)+' '+phone.q(ROOT+'/state/zero/agents'))
     root_put(serial,ROOT+'/policy/deployment.json',(json.dumps(profile.value,indent=2)+'\n').encode())
     root_put(serial,ROOT+'/policy/config.toml',prepared.encode())
     direct_boot.root_sh(serial,'chown '+str(agent_uid(serial))+':'+str(agent_uid(serial))+' '+phone.q(ROOT+'/policy/config.toml'))
-    api['agent']['tools']=list(profile.tools)
-    phone.write_api(p, api_path, document)
-    p.restart()
-    root_put(serial,ROOT+'/policy/TOOLS.md',lockdown.instructions(deployment.current().tools).encode())
+    if api['agent'].get('tools')!=list(profile.tools):
+        api['agent']['tools']=list(profile.tools)
+        phone.write_api(p, api_path, document)
+        p.restart()
+    root_put(serial,ROOT+'/policy/TOOLS.md',lockdown.instructions(profile.tools,profile.telegram_controls).encode())
     direct_boot.root_sh(serial,'chown '+str(agent_uid(serial))+':'+str(agent_uid(serial))+' '+ROOT+'/policy/TOOLS.md')
+    if policy_only:
+        output=direct_boot.root_sh(serial,'/system/bin/sh '+phone.q(ROOT)+'/namespace.sh probe')
+        if b'filesystem_and_execution_denied=true' not in output:raise ValueError('Sandbox probe failed; service stays stopped')
+        restart(serial)
+        return
     for name in ('enter','probe','guard.so','log'):
         path=ROOT+('/enter' if name=='enter' else '/log-writer' if name=='log' else '/root/bin/'+name)
         direct_boot.root_sh(serial,'cp -p '+phone.q(path)+' '+phone.q(path+'.previous'))
@@ -311,8 +319,12 @@ def verify(serial):
     if [s['name'] for s in cfg['mcp']['servers']]!=['homewire']:
         raise ValueError('Unexpected MCP servers')
     for c in cfg.get('channels',{}).get('telegram',{}).values():
-        if not {'homewire__'+n for n in lockdown.WRITE}.issubset(c.get('excluded_tools',[])):
-            raise ValueError('Telegram control exclusion is missing')
+        excluded=c.get('excluded_tools',[])
+        if sorted(excluded)!=lockdown.telegram_exclusions(excluded,profile.telegram_controls):
+            raise ValueError('Telegram control policy does not match deployment profile')
+    for group in cfg.get('peer_groups',{}).values():
+        if str(group.get('channel','')).split('.')[0]=='telegram' and (group.get('admin_for_agent_scope') or '*' in group.get('external_peers',[])):
+            raise ValueError('Telegram peer confinement is missing')
     if cfg['agents'][deployment.current().agent['name']]['workspace']['unrestricted_filesystem'] or cfg['scheduler']['enabled']:
         raise ValueError('Unrestricted workspace or scheduler enabled')
     if not p.sh('[ ! -f '+phone.q(MARKER)+' ] || echo yes').strip():
@@ -329,7 +341,7 @@ def verify(serial):
         raise ValueError('The active daemon is missing its kernel confinement')
     if b'guard.so' not in direct_boot.root_sh(serial,'cat /proc/'+pid+'/maps'):
         raise ValueError('The active daemon did not load the obligatory guard')
-    print('Policy verified: Homewire only; Telegram read-only; legacy root boot bypass disabled.')
+    print('Policy verified: Homewire only; Telegram controls match operator scope; legacy root boot bypass disabled.')
 
 
 if __name__ == '__main__':
@@ -337,13 +349,15 @@ if __name__ == '__main__':
     ap.add_argument('--serial',required=True)
     deployment.add_argument(ap,required=True)
     ap.add_argument('--artifacts',default='target/android-sandbox')
-    ap.add_argument('command',choices=['install','update','verify','restart'],nargs='?',default='install')
+    ap.add_argument('command',choices=['install','update','policy','verify','restart'],nargs='?',default='install')
     a=ap.parse_args()
     profile=deployment.load(a.deployment)
     profile.android.setdefault('root_command',deployment.root_executable(a.serial))
     ROOT=profile.paths()['sandbox']
     MARKER=phone.CE_HOMEWIRE.rsplit('/',1)[0]+'/zeroclaw-isolated'
-    if a.command in ('install','update'):
+    if a.command=='policy':
+        update(a.serial,a.artifacts,policy_only=True)
+    elif a.command in ('install','update'):
         globals()[a.command](a.serial,a.artifacts)
     else:
         globals()[a.command](a.serial)

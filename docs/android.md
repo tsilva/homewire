@@ -23,7 +23,12 @@ installation without a profile retains the primary-user Termux layout.
   nonzero TCP ports. The latter opens only that configured loopback exception.
   `provider_host` selects the DNS probe target. Optional `tools` narrows the
   supported Homewire capability allowlist; shell, filesystem and device/security
-  configuration are never selectable. Telegram remains read-only.
+  configuration are never selectable. Optional `telegram_control_tools` grants
+  a unique subset of the selected write tools to existing authorized Telegram
+  peers; it defaults to an empty list (read-only). For example,
+  `"telegram_control_tools": ["switch_set"]` permits smart-plug controls,
+  including printer outlets. The grant applies to all configured Telegram
+  channels without enabling disabled channels or changing peer IDs.
 - `network.dns_servers` is an explicit 1–4 IPv4 server list. `lan_probe` is the
   operator's blocked IPv4:PORT test endpoint; `admin_port` must match the API
   listener. IPv6 remains denied by the sandbox. Private/special network denials
@@ -192,17 +197,28 @@ that built-in sandbox as inactive. The native launcher enforces the boundary.
 The model receives only Homewire MCP tools; shell, filesystem, browser, arbitrary
 HTTP, Google/photo/camera/microphone bundles, delegation and agent cron are removed.
 The `homewire` risk profile is `supervised`: ZeroClaw 0.8.5 bypasses channel exclusions
-under full autonomy ([pinned implementation](https://github.com/zeroclaw-labs/zeroclaw/blob/cb2b20a9fe59004b7ef03e123942d31f29236d15/crates/zeroclaw-channels/src/orchestrator/mod.rs#L6555)). Telegram excludes every Homewire mutation and its peers have
+under full autonomy ([pinned implementation](https://github.com/zeroclaw-labs/zeroclaw/blob/cb2b20a9fe59004b7ef03e123942d31f29236d15/crates/zeroclaw-channels/src/orchestrator/mod.rs#L6555)). Telegram excludes Homewire mutations unless the operator explicitly grants them
+in `deployment.agent.telegram_control_tools`; its peers have
 no agent-administration grant. Existing peer IDs, channel enablement, paired
 clients and encrypted model keys are preserved. Installation does not enable
 Telegram or send messages; validate delivery separately when it is enabled.
 
-The trusted local assistant gateway retains 20 Homewire tools. It cannot call
+The trusted local assistant gateway allows up to 22 Homewire tools; discovery
+omits tools whose adapters are absent. It cannot call
 `entity_configure`. Telegram can use the 12 read tools: `entity_list`,
 `entity_status`, `entity_options`, `routine_list`, `routine_plan`, `alert_list`,
 `history_series`, `history_query`, `weather_status`, `shopping_list`, `radio_search`
-and `tts_media`. It cannot change devices, run routines, play media or edit shopping
-items. A compromised allowed Telegram identity could still read household state
+and `tts_media`. With no control grant it cannot change devices, run routines,
+play media or edit shopping items. Supported opt-in write tools are `light_set`,
+`switch_set`, `media_power`, `remote_key`, `media_launch`, `media_text`, `routine_run`, `media_play`,
+`media_command` and `shopping_update`; each must also be in the agent's tool scope.
+Grants apply to whole tools, so `switch_set` permits all eligible configured
+switches, with Homewire's identity checks and device guards still enforced.
+`media_launch` and `media_text` are limited to media remotes advertising app/text
+support. They do not grant `entity_configure`. Link/text delivery is unverified;
+never automatically replay a failed or uncertain control or claim playback from
+delivery alone. No extra TV polling, screen capture, ADB or wake lock is added.
+A compromised allowed Telegram identity could use the explicitly granted controls, read household state
 and use the capped model account. This is a reduction in privileges, not protection
 against a compromised root user or kernel. The provider key necessarily exists in
 process memory; retain a dedicated provider-side spending cap to bound cost.
@@ -252,6 +268,8 @@ sh scripts/android/sandbox/build.sh
 sh scripts/android/sandbox/build-identity.sh
 python3 scripts/android/isolate.py --config .local/home.json --serial SERIAL install
 python3 scripts/android/isolate.py --config .local/home.json --serial SERIAL verify
+# Apply operator tool/channel policy without replacing native binaries or firewall scripts:
+python3 scripts/android/isolate.py --config .local/home.json --serial SERIAL policy
 # Rebuild native artifacts before updating them; policy/model keys remain intact.
 python3 scripts/android/isolate.py --config .local/home.json --serial SERIAL update
 python3 scripts/android/isolate.py --config .local/home.json --serial SERIAL restart
@@ -264,7 +282,12 @@ Original ZeroClaw files remain a private recovery copy. Homewire keeps its saved
 schedule/monitor/control flags. If adding the agent listener fails, the installer
 restores Homewire's prior API configuration without re-enabling the old agent.
 Do not run installation twice over an existing jail; use `update` for native guard
-changes. Updates retain previous native files alongside their replacements and
+changes. Use `policy` for tool/channel grant changes; it validates the pinned
+CLI configuration, stops the agent, saves a private policy backup, writes updated
+configuration and tool instructions, runs the installed negative probe and
+restarts the agent. It preserves native binaries and network scripts. Homewire
+restarts only if its agent tool scope changes. Policy and native updates retain
+the previous policy privately; native updates also retain previous native files and
 stay stopped if their negative probe fails. They never restore older permissions
 on failure. `verify` checks policy, the actual daemon's guard/capabilities/seccomp
 and native file/execution/network denials;

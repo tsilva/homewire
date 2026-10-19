@@ -21,6 +21,7 @@ section links remain available below.
 - <a id="l900-scheduling"></a>[L900 scheduling](devices.md#l900-scheduling)
 - <a id="tapo-p100p110-plugs"></a>[Tapo P100/P110 plugs](devices.md#tapo-p100p110-plugs)
 - <a id="samsung-tv-and-digi-r2a"></a>[Samsung TV and DIGI R2A](devices.md#samsung-tv-and-digi-r2a)
+- [TCL Android / Google TV](devices.md#tcl-android--google-tv)
 - <a id="shared-tv-outlet-workflow"></a>[Shared TV outlet workflow](devices.md#shared-tv-outlet-workflow)
 - <a id="computer-shutdown-service"></a>[Computer shutdown service](devices.md#computer-shutdown-service)
 - <a id="wake-on-lan"></a>[Wake-on-LAN](devices.md#wake-on-lan)

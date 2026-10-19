@@ -110,8 +110,10 @@ def deployment_secrets(value, name, generated, field=(), depth=0):
         return secret
     key_file = {('api.json', ('private_key',)): 'api-key.pem',
                 ('digi.json', ('client_key',)): 'digi-key.pem',
+                ('tcl.json', ('client_key',)): 'tcl-key.pem',
                 ('home.json', ('services', 'api', 'private_key')): 'api-key.pem',
-                ('home.json', ('adapters', 'digi', 'client_key')): 'digi-key.pem'}.get((name, field))
+                ('home.json', ('adapters', 'digi', 'client_key')): 'digi-key.pem',
+                ('home.json', ('adapters', 'tcl', 'client_key')): 'tcl-key.pem'}.get((name, field))
     if not key_file or 'PRIVATE KEY-----' not in secret or not secret.startswith('-----BEGIN '):
         raise ValueError('Invalid deployment private-key reference')
     data = secret.encode()
