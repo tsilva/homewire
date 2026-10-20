@@ -17,7 +17,7 @@ import deployment
 READ = ('entity_list', 'entity_status', 'entity_options', 'routine_list',
         'routine_plan', 'alert_list', 'history_series', 'history_query',
         'weather_status', 'shopping_list', 'radio_search', 'tts_media', 'wake_list')
-WRITE = ('light_set', 'switch_set', 'media_power', 'remote_key', 'remote_hold', 'media_voice', 'media_activity', 'media_launch', 'media_text', 'routine_run',
+WRITE = ('dehumidifier_set', 'light_set', 'switch_set', 'media_power', 'remote_key', 'remote_hold', 'media_voice', 'media_activity', 'media_launch', 'media_text', 'routine_run',
          'media_play', 'media_command', 'shopping_update', 'wake_on_lan')
 BLOCKED = ('shell', 'file_read', 'file_write', 'file_list', 'file_edit',
            'glob_search', 'content_search', 'model_routing_config', 'delegate',
@@ -94,6 +94,14 @@ def instructions(tools=None, telegram_controls=()):
         'Keep verification reads bounded and respect endpoint rate limits. Never automatically resend the packet, '
         'substitute a wake for an uncertain power command, or claim the screen is on from packet delivery alone.\n'
         if 'wake_list' in reads and 'wake_on_lan' in writes else '')
+    dehumidifier_policy = ('\n## Dehumidifier modes\n\n'
+        'Use `homewire__dehumidifier_set` for explicit purification or sleep requests on the Meaco. '
+        'Send only the requested boolean settings: purification true means air purifier mode, false means normal dehumidification; '
+        'sleep true/false controls sleep independently and preserves the unmentioned mode. '
+        'Read current status first and inspect verified outcomes. Sleep is a device toggle internally; never replay uncertain controls. '
+        'When sleep is active, a null purification reading means the underlying mode is unknown. '
+        'Do not use general device settings or substitute a combined day/night routine for an independent mode request.\n'
+        if 'dehumidifier_set' in writes else '')
     return ('# Active tool policy\n\n'
         'The operator has isolated this ZeroClaw deployment. Use the actual supplied tool schemas. '
         'Old conversation memories and identity notes about shell, files or other tool bundles are obsolete.\n\n'
@@ -104,7 +112,7 @@ def instructions(tools=None, telegram_controls=()):
         'Shell, filesystem, arbitrary HTTP, browser, delegation, cron, camera, microphone, Google and photo tools are unavailable. '
         'Homewire device/security settings cannot be configured by this agent.\n\n'
         'Use the granted discovery tools and actual entity names. Never substitute shell commands or invent readings.\n\n'
-        + media_policy + wake_policy)
+        + media_policy + wake_policy + dehumidifier_policy)
 
 
 def patches(config, token, profile=None):

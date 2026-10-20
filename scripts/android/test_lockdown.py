@@ -48,6 +48,25 @@ class LockdownTests(unittest.TestCase):
         self.assertIn('homewire__entity_configure',values['/risk_profiles']['homewire']['excluded_tools'])
         self.assertFalse(values['/scheduler']['enabled'])
 
+    def test_dehumidifier_grant_keeps_general_settings_and_disabled_channels_blocked(self):
+        values = copy.deepcopy(self.profile.value)
+        values['agent']['tools'] = ['entity_status', 'dehumidifier_set']
+        values['agent']['telegram_control_tools'] = ['dehumidifier_set']
+        profile = deployment.Profile(values)
+        config = {'agents': {'phone': {'enabled': True}}, 'channels': {'telegram': {
+            'phone': {'enabled': True}, 'disabled': {'enabled': False}}}}
+        patched = {p['path']: p['value'] for p in lockdown.patches(config, 'synthetic', profile)}
+        self.assertIn('homewire__dehumidifier_set', patched['/risk_profiles']['homewire']['allowed_tools'])
+        self.assertIn('homewire__entity_configure', patched['/risk_profiles']['homewire']['excluded_tools'])
+        excluded = patched['/channels']['telegram']['phone']['excluded_tools']
+        self.assertNotIn('homewire__dehumidifier_set', excluded)
+        self.assertIn('homewire__entity_configure', excluded)
+        self.assertIn('homewire__routine_run', excluded)
+        self.assertFalse(patched['/channels']['telegram']['disabled']['enabled'])
+        instructions = lockdown.instructions(profile.tools, profile.telegram_controls)
+        self.assertIn('purification', instructions)
+        self.assertIn('never replay uncertain controls', instructions)
+
     def test_missing_phone_never_synthesizes_a_privileged_agent(self):
         with self.assertRaises(ValueError):lockdown.patches({'agents':{}},'synthetic',self.profile)
 

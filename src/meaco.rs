@@ -109,7 +109,7 @@ impl Device for NetworkDevice {
 
 impl Adapter for Manager {
     crate::fault::monitored_background!("meaco", "Meaco");
-    const SUPPORT: crate::entity::Support = crate::entity::Support::READ
+    const SUPPORT: crate::entity::Support = crate::entity::Support::DEHUMIDIFIER
         .union(crate::entity::Support::ROUTINES)
         .union(crate::entity::Support::CONFIGURE);
     fn entities<'a>(&'a self, visit: &mut impl FnMut(crate::entity::Entity<'a>)) {
@@ -123,7 +123,7 @@ impl Adapter for Manager {
             Domain::Dehumidifier,
             "meaco",
             "Arete Two",
-            Capabilities::Read,
+            Capabilities::Dehumidifier,
         );
         visit(base.configurable(SETTINGS));
         for (s, f, u) in [
@@ -148,10 +148,24 @@ impl Adapter for Manager {
         command: crate::entity::Command,
         args: &Value,
     ) -> Result<Value> {
-        if index != 0 || !matches!(command, crate::entity::Command::Configure) {
+        if index != 0 {
             return Err(error("Unsupported Meaco command"));
         }
-        self.configure(&args["settings"])
+        match command {
+            crate::entity::Command::Configure => self.configure(&args["settings"]),
+            crate::entity::Command::Dehumidifier => {
+                let settings = &args["settings"];
+                crate::settings::validate(crate::entity::DEHUMIDIFIER_SETTINGS, settings)?;
+                Ok(serde_json::to_value(crate::routine::meaco::set_modes(
+                    &mut self.device,
+                    settings["purification"].as_bool(),
+                    settings["sleep"].as_bool(),
+                    &mut self.memory,
+                    |memory| self.store.save(memory),
+                )?)?)
+            }
+            _ => Err(error("Unsupported Meaco command")),
+        }
     }
 
     const TOOLS: &'static [Tool] = &[
@@ -319,6 +333,13 @@ impl Manager {
             result[name] = dps.get(dp).cloned().unwrap_or(Value::Null);
         }
         result["moisture"] = json!(state.fault_code == 128);
+        result["sleep"] = json!(state.mode == "sleep");
+        // The wire mode hides the underlying mode while sleep is active.
+        result["purification"] = if state.mode == "sleep" {
+            Value::Null
+        } else {
+            json!(state.mode == "purify")
+        };
         Ok(result)
     }
     fn configure(&mut self, settings: &Value) -> Result<Value> {

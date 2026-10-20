@@ -217,6 +217,82 @@ fn powered(state: &State) -> Result<()> {
     }
     Ok(())
 }
+
+#[derive(Serialize)]
+pub struct ModesApplied {
+    pub verified: bool,
+    pub changed: bool,
+    pub purification: Option<bool>,
+    pub sleep: bool,
+    pub state: State,
+}
+
+/// Absolute independent mode controls over the device's non-idempotent sleep DP.
+pub fn set_modes<D: Device>(
+    device: &mut D,
+    purification: Option<bool>,
+    sleep: Option<bool>,
+    memory: &mut Memory,
+    mut persist: impl FnMut(&Memory) -> Result<()>,
+) -> Result<ModesApplied> {
+    if purification.is_none() && sleep.is_none() {
+        return Err(error("Specify purification and/or sleep"));
+    }
+    let mut state = device.read()?;
+    let was_asleep = state.mode == "sleep";
+    let desired_sleep = sleep.unwrap_or(was_asleep);
+    let desired_mode = purification.map(|on| if on { "purify" } else { "manual" });
+    if desired_sleep == was_asleep && desired_mode.is_none_or(|mode| state.mode == mode) {
+        return Ok(ModesApplied {
+            verified: true,
+            changed: false,
+            purification: (!was_asleep).then_some(state.mode == "purify"),
+            sleep: was_asleep,
+            state,
+        });
+    }
+    let original_power = state.power;
+    memory.base_mode = None;
+    persist(memory)?;
+    let mut send = |action: Action| -> Result<State> {
+        let after = send_verified(device, &action)?;
+        if after.power != original_power {
+            return Err(error("Meaco power changed during mode control; no retry"));
+        }
+        Ok(after)
+    };
+    if was_asleep {
+        state = send(Action::Mode("sleep".into()))?;
+        if state.mode == "sleep" {
+            return Err(error("Sleep did not clear; no retry"));
+        }
+    }
+    if let Some(mode) = desired_mode
+        && state.mode != mode
+    {
+        state = send(Action::Mode(mode.into()))?;
+        if state.mode != mode {
+            return Err(error("Purification setting did not persist; no retry"));
+        }
+    }
+    let base = state.mode.clone();
+    if desired_sleep {
+        state = send(Action::Mode("sleep".into()))?;
+        if state.mode != "sleep" {
+            return Err(error("Sleep did not activate; no retry"));
+        }
+    }
+    memory.base_mode = matches!(base.as_str(), "manual" | "purify").then_some(base.clone());
+    persist(memory)?;
+    Ok(ModesApplied {
+        verified: true,
+        changed: true,
+        purification: Some(base == "purify"),
+        sleep: desired_sleep,
+        state,
+    })
+}
+
 fn send_verified<D: Device>(device: &mut D, action: &Action) -> Result<State> {
     // Never resend a command after a timeout: mode=sleep is a toggle.
     device.command(action)?;

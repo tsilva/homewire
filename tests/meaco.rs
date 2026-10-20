@@ -301,3 +301,111 @@ fn missing_presets_and_invalid_targets_send_no_controls() {
         assert!(fake.commands.is_empty());
     }
 }
+
+#[test]
+fn independent_modes_preserve_the_other_mode_power_and_target() -> Result<()> {
+    use homewire::routine::meaco::set_modes;
+    let mut fake = Fake::new("manual", true);
+    let mut memory = Memory::default();
+    let purifier = set_modes(&mut fake, Some(true), None, &mut memory, |_| Ok(()))?;
+    assert!(purifier.verified && purifier.changed);
+    assert_eq!(purifier.purification, Some(true));
+    assert!(!purifier.sleep);
+    let asleep = set_modes(&mut fake, None, Some(true), &mut memory, |_| Ok(()))?;
+    assert!(asleep.sleep);
+    assert_eq!(asleep.purification, Some(true));
+    // An identical sleep request must never send another toggle.
+    let commands = fake.commands.len();
+    assert!(!set_modes(&mut fake, None, Some(true), &mut memory, |_| Ok(()))?.changed);
+    assert_eq!(fake.commands.len(), commands);
+    // Turning purification off during sleep verifies the real underlying mode,
+    // establishes normal dehumidification, and restores sleep.
+    let result = set_modes(&mut fake, Some(false), None, &mut memory, |_| Ok(()))?;
+    assert!(result.sleep);
+    assert_eq!(result.purification, Some(false));
+    assert_eq!(memory.base_mode.as_deref(), Some("manual"));
+    let awake = set_modes(&mut fake, None, Some(false), &mut memory, |_| Ok(()))?;
+    assert_eq!(awake.state.mode, "manual");
+    assert!(awake.state.power);
+    assert_eq!(awake.state.target_humidity, 45);
+    assert!(fake.commands.iter().all(|a| matches!(a, Action::Mode(_))));
+    Ok(())
+}
+
+#[test]
+fn independent_modes_preserve_purification_when_clearing_sleep() -> Result<()> {
+    let mut fake = Fake::new("sleep", true);
+    fake.base = "purify".into();
+    let mut memory = Memory {
+        base_mode: Some("manual".into()),
+        ..Memory::default()
+    };
+    let result =
+        homewire::routine::meaco::set_modes(&mut fake, None, Some(false), &mut memory, |_| Ok(()))?;
+    assert_eq!(result.state.mode, "purify");
+    assert_eq!(memory.base_mode.as_deref(), Some("purify"));
+    assert_eq!(fake.commands, vec![Action::Mode("sleep".into())]);
+    Ok(())
+}
+
+#[test]
+fn independent_modes_stop_after_one_uncertain_or_stuck_sleep_toggle() {
+    for uncertain in [true, false] {
+        let mut fake = Fake::new("sleep", true);
+        fake.uncertain = uncertain;
+        fake.stuck_sleep = !uncertain;
+        let mut memory = Memory {
+            base_mode: Some("purify".into()),
+            ..Memory::default()
+        };
+        assert!(
+            homewire::routine::meaco::set_modes(
+                &mut fake,
+                Some(false),
+                Some(false),
+                &mut memory,
+                |_| Ok(())
+            )
+            .is_err()
+        );
+        assert_eq!(fake.commands, vec![Action::Mode("sleep".into())]);
+        assert_eq!(memory.base_mode, None);
+    }
+}
+
+#[test]
+fn independent_modes_refuse_controls_if_invalidation_cannot_persist() {
+    let mut fake = Fake::new("manual", true);
+    let mut memory = Memory::default();
+    assert!(
+        homewire::routine::meaco::set_modes(&mut fake, None, Some(true), &mut memory, |_| Err(
+            error("disk full")
+        ))
+        .is_err()
+    );
+    assert!(fake.commands.is_empty());
+}
+
+#[test]
+fn independent_modes_never_power_on_or_continue_after_unexpected_power_loss() -> Result<()> {
+    let mut fake = Fake::new("manual", false);
+    let mut memory = Memory::default();
+    let result =
+        homewire::routine::meaco::set_modes(&mut fake, Some(true), None, &mut memory, |_| Ok(()))?;
+    assert!(!result.state.power);
+    fake.state.power = true;
+    fake.lose_power = true;
+    assert!(
+        homewire::routine::meaco::set_modes(
+            &mut fake,
+            Some(false),
+            Some(true),
+            &mut memory,
+            |_| Ok(())
+        )
+        .is_err()
+    );
+    assert_eq!(fake.commands.len(), 2);
+    assert_eq!(memory.base_mode, None);
+    Ok(())
+}

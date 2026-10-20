@@ -27,6 +27,7 @@ routing branches.
 | `media_play` | `{"entity":"media_player.cast_player","media":{"url":"https://example.org/music.mp3","content_type":"audio/mpeg"}}` | Cast/DLNA + control flag |
 | `media_command` | `{"entity":"media_player.dlna_player","command":{"action":"volume","percent":20}}` | Playback + control flag |
 | `entity_status` | `{"entities":["light.bulb_1","sensor.awair_co2"]}` | Fresh batched reads |
+| `dehumidifier_set` | `{"entity":"dehumidifier.meaco","settings":{"purification":true,"sleep":false}}` | Independent mode booleans + control flag |
 | `light_set` | `{"entity":"light.led_strip","settings":{"power":true,"brightness_percent":30}}` | Lights + control flag |
 | `switch_set` | `{"entity":"switch.tv","power":false}` | Plugs + control flag; TV outlet requires maintenance |
 | `media_power` | `{"entity":"media_player.digi","power":true}` | Media + control flag; routine-owned power requires maintenance |
@@ -52,7 +53,14 @@ Discovery reports model capability envelopes, remote-key choices and power
 ownership. Light temperature ranges are model envelopes; actual live ranges
 are checked before controls. Light settings can disable or restore the device's stored effect; L900 fixed
 settings still require effects/music mode confirmed off. Meaco also exposes typed
-humidity, modes, child lock and timer settings. `meaco_day`, `meaco_night` and
+humidity, modes, child lock and timer settings. The narrower `dehumidifier_set`
+accepts only `purification` and `sleep` booleans: turning purification off restores
+normal dehumidification; omitted modes, power and humidity target are preserved.
+While asleep, changing purification clears sleep once, verifies the underlying
+mode, changes it if necessary, and restores sleep. Uncertain controls stop without
+retries. Status reports `sleep` and `purification`; purification is null while
+sleep hides its underlying mode. This tool can be granted to an assistant without
+granting `entity_configure` or access to timers and other device settings. `meaco_day`, `meaco_night` and
 `meaco_off` retain the deterministic household sequences.
 TV routines are `tv_on` and `tv_off`.
 
@@ -79,8 +87,8 @@ available. MCP writes also require `--allow-control`.
 
 Existing CLI commands are preserved. Existing MCP consumers should add
 `--legacy-tools` to their server arguments until migrated. Standard mode
-advertises only capabilities supported by loaded adapters; the complete household
-deployment exposes 21 tools with control enabled. It rejects legacy tool names.
+advertises only capabilities supported by loaded adapters; tool availability follows the configured
+adapters and enabled controls. It rejects legacy tool names.
 Legacy mode retains family lists/status/check/apply/key commands.
 Fault monitoring remains available through the existing watch flags; it reports
 events to stderr instead of adding monitoring checks to the normal agent tool set.

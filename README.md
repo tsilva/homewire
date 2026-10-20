@@ -62,7 +62,7 @@ schemas, state files and legacy installations.
 
 | Device / setup guide | What you can do |
 | --- | --- |
-| [Meaco Arete Two](docs/configuration.md#configuration) | Read status; preview and run configured day, night and off routines |
+| [Meaco Arete Two](docs/configuration.md#configuration) | Read status; independently set purification and sleep; run configured day, night and off routines |
 | [Brother HL-L2350DW / HP DeskJet 3630](docs/devices.md#printers) | Read status and supplies; monitor confirmed faults and low-supply warnings |
 | [Awair Element](docs/devices.md#awair-element) | Read fresh temperature, humidity, CO₂, TVOC, PM2.5 and score |
 | [Tapo L430C / L900](docs/devices.md#l900-led-strip) | Set power, brightness, colour and white temperature; monitor overheating |

@@ -27,6 +27,7 @@ impl Support {
     pub const REMOTE_HOLD: Self = Self(512);
     pub const VOICE: Self = Self(1024);
     pub const ACTIVITY: Self = Self(2048);
+    pub const DEHUMIDIFIER: Self = Self(1 | 4096);
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
     }
@@ -81,11 +82,13 @@ pub enum Command {
     Hold,
     Voice,
     Activity,
+    Dehumidifier,
 }
 #[derive(Clone, Copy)]
 pub enum Capabilities {
     Playback,
     Read,
+    Dehumidifier,
     Light {
         max_temperature_k: u16,
         fixed_settings_require_effects_off: bool,
@@ -179,6 +182,7 @@ impl<'a> Entity<'a> {
                 json!({"read":true,"play_url":true,"playback":["play","pause","stop","seek","volume","mute"]})
             }
             Capabilities::Read => json!({"read":true}),
+            Capabilities::Dehumidifier => json!({"read":true,"purification":true,"sleep":true}),
             Capabilities::Power => json!({"read":true,"power":true}),
             Capabilities::Light {
                 max_temperature_k,
@@ -287,6 +291,9 @@ fn control(devices: &mut Devices, tool: &str, args: &Value) -> Result<Value> {
         }
         ("media_play", Domain::MediaPlayer, Capabilities::Playback) => Command::Play,
         ("media_command", Domain::MediaPlayer, Capabilities::Playback) => Command::Playback,
+        ("dehumidifier_set", Domain::Dehumidifier, Capabilities::Dehumidifier) => {
+            Command::Dehumidifier
+        }
         ("media_launch", Domain::MediaPlayer, Capabilities::Media { .. })
             if entity.settings.iter().any(|s| s.name == "app_link") =>
         {
@@ -444,6 +451,28 @@ const STATUS: Tool = Tool {
         shape_error: "Expected only entities",
     },
     hints: Hints::READ,
+};
+pub(crate) const DEHUMIDIFIER_SETTINGS: &[crate::settings::Setting] = &[
+    crate::settings::Setting::boolean("purification"),
+    crate::settings::Setting::boolean("sleep"),
+];
+const DEHUMIDIFIER: Tool = Tool {
+    name: "dehumidifier_set",
+    description: "Set absolute purification and/or sleep booleans on a dehumidifier. Purification off restores normal dehumidification. Unspecified modes, power and humidity target are preserved. Sleep toggles are verified once and never retried after uncertainty.",
+    input: Input::Named {
+        key: "entity",
+        extra: Some(Field {
+            name: "settings",
+            schema: || crate::settings::schema(DEHUMIDIFIER_SETTINGS),
+            valid: |v| crate::settings::validate(DEHUMIDIFIER_SETTINGS, v).is_ok(),
+            error: "Expected purification and/or sleep booleans only",
+        }),
+        error: "Expected dehumidifier entity and settings",
+    },
+    hints: Hints {
+        idempotent: false,
+        ..Hints::CONTROL
+    },
 };
 const LIGHT: Tool = Tool {
     name: "light_set",
@@ -624,6 +653,9 @@ pub fn tools(selection: Selection) -> impl Iterator<Item = &'static Tool> + Clon
     let support = selection.support();
     let any = selection.any();
     [
+        support
+            .contains(Support::DEHUMIDIFIER)
+            .then_some(&DEHUMIDIFIER),
         support.contains(Support::PLAYBACK).then_some(&PLAY),
         support.contains(Support::PLAYBACK).then_some(&PLAYBACK),
         any.then_some(&LIST),
@@ -669,7 +701,7 @@ pub fn call(devices: &mut Devices, name: &str, args: &Value) -> Result<Value> {
         }
         "light_set" | "switch_set" | "media_power" | "remote_key" | "entity_configure"
         | "media_play" | "media_command" | "media_launch" | "media_text" | "remote_hold"
-        | "media_voice" | "media_activity" => control(devices, name, args),
+        | "media_voice" | "media_activity" | "dehumidifier_set" => control(devices, name, args),
         name if name.starts_with("routine_") => crate::routine::call(devices, name, args),
         _ => devices.call(name, args),
     };
@@ -689,6 +721,7 @@ pub fn call(devices: &mut Devices, name: &str, args: &Value) -> Result<Value> {
                 | "media_voice"
                 | "media_activity"
                 | "routine_run"
+                | "dehumidifier_set"
                 | "wake_on_lan"
         )
         && let Some(alerts) = devices.alerts.as_mut()
