@@ -68,7 +68,7 @@ schemas, state files and legacy installations.
 | [Tapo L430C / L900](docs/devices.md#l900-led-strip) | Set power, brightness, colour and white temperature; monitor overheating |
 | [Tapo P100 / P110](docs/devices.md#tapo-p100p110-plugs) | Control relays; read P110 energy and monitor overloads |
 | [Samsung UE40H6200 / DIGI R2A](docs/devices.md#samsung-tv-and-digi-r2a) | Use paired remotes and coordinated shared-outlet TV routines |
-| [TCL Android / Google TV](docs/devices.md#tcl-android--google-tv) | Read power; use paired remote keys, guarded shutdown, verified wake, app links and text |
+| [TCL Android / Google TV](docs/devices.md#tcl-android--google-tv) | Read power, volume/mute and current app; use extended buttons, HDMI keys, bounded holds, voice audio, app links and text; add Cast for playback and exact volume |
 | [Computers](docs/devices.md#computer-shutdown-service) | Wake configured targets; use authenticated shutdown and optional metered outlet cutoff |
 
 Controls check identity where supported and verify reported outcomes; uncertain
@@ -77,10 +77,28 @@ cannot confirm a successful wake, and Samsung shutdown may remain unverified.
 Each adapter guide explains its prerequisites and limits.
 Paired Android TV remote keys service incoming messages for up to 500 ms after
 sending and close TLS cleanly; delivery still does not confirm a screen change.
+TCL controls first wait for negotiated initial input/volume reports, because the
+power report can arrive before its input receiver is ready.
 
 Android TV app links and focused-field text have separate `media_launch` and
 `media_text` grants. Agents can open titles or type into search without receiving
 general device-settings access. App delivery does not confirm movie playback.
+`media_activity` opens named apps, searches, titles, Home, settings or inputs with
+one command. It reports fresh app confirmation separately from playback; see
+[activity parameters](docs/devices.md#android-tv-activities).
+Android TV also offers `remote_hold` (1–2000 ms) and `media_voice` (up to
+3 seconds of supplied raw PCM audio). Live voice support is reported by
+`entity_options`. [Google Cast setup](docs/devices.md#tcl-google-cast) adds a
+separate playback entity with absolute volume/mute, seeking and media URLs.
+Agents ask for screen confirmation after an unverified shutdown, distinguish the
+user's observation from adapter verification, and never automatically retry an
+uncertain power command when its guard expires.
+For TCL firmware that disconnects its remote service, test network standby with
+a configured [Wake-on-LAN target](docs/devices.md#wake-on-lan); some firmware needs
+Screenless standby. Verify power after each wake across multiple standby cycles;
+sending a packet alone is unverified.
+Wake can be delayed; an early timeout remains pending or unknown until a later
+status read confirms power. Do not repeat the control to compensate.
 
 ## Agents and automation
 

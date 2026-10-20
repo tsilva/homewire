@@ -16,9 +16,9 @@ import deployment
 
 READ = ('entity_list', 'entity_status', 'entity_options', 'routine_list',
         'routine_plan', 'alert_list', 'history_series', 'history_query',
-        'weather_status', 'shopping_list', 'radio_search', 'tts_media')
-WRITE = ('light_set', 'switch_set', 'media_power', 'remote_key', 'media_launch', 'media_text', 'routine_run',
-         'media_play', 'media_command', 'shopping_update')
+        'weather_status', 'shopping_list', 'radio_search', 'tts_media', 'wake_list')
+WRITE = ('light_set', 'switch_set', 'media_power', 'remote_key', 'remote_hold', 'media_voice', 'media_activity', 'media_launch', 'media_text', 'routine_run',
+         'media_play', 'media_command', 'shopping_update', 'wake_on_lan')
 BLOCKED = ('shell', 'file_read', 'file_write', 'file_list', 'file_edit',
            'glob_search', 'content_search', 'model_routing_config', 'delegate',
            'spawn_subagent', 'cron_add', 'cron_update', 'cron_run', 'cron_remove',
@@ -43,6 +43,33 @@ def instructions(tools=None, telegram_controls=()):
         ', '.join('`homewire__'+n+'`' for n in telegram) +
         '. Other control tools are excluded by the runtime. ' if telegram else
         'Telegram is read-only: control tools are excluded by the runtime. ')
+    media_policy = ('## TV shutdown and confirmation\n\n'
+        'Use `homewire__media_power` with the discovered media entity and `power:false` for a current shutdown request. '
+        'Respect channel grants, adapter guards and routine-owned power. '
+        'If the adapter says the shutdown was sent once but off is unverified, report that the command was sent '
+        'and ask whether the screen turned off. This is an unknown outcome, not a permission denial or proof of failure. '
+        'Never automatically retry, queue or schedule an uncertain power command, including after a 120-second guard expires. '
+        'Guard expiry does not establish that the TV is on. A further attempt requires a new explicit user request '
+        'and fresh state that satisfies the adapter guards.\n\n'
+        'If the user confirms the screen is off, acknowledge their visual confirmation and stop that shutdown attempt. '
+        'Attribute the result to the user; do not claim Homewire verified it or clear backend attempt guards. '
+        'If the user says it stayed on, treat shutdown as unsuccessful from their observation. '
+        'Use the latest explicit correction if their reports change. '
+        'An unreachable TV is unknown, never confirmed off; a conflicting remote power flag does not override a visual report. '
+        'Explain any conflict briefly and clarify the current screen state before another control. '
+        'Keep the reply focused on the current request; remembered unrelated tasks are not new requests.\n'
+        if 'media_power' in writes else '')
+    wake_policy = ('\n## Network wake\n\n'
+        'For a new power-on request, discover configured targets with `homewire__wake_list`. '
+        'If the requested device is unreachable in standby and has a matching configured target, '
+        'use `homewire__wake_on_lan` once, respecting its ownership and channel grants. '
+        'A generic result with `sent:true` and `verified:false` confirms only packet delivery to the local network stack. '
+        'Read the matching media entity with `homewire__entity_status` afterwards to verify its pinned identity and power state. '
+        'Network and remote-service recovery can take several minutes. If the first read is unavailable, '
+        'report the wake as pending or unknown, not failed; a later read may confirm it without sending another control. '
+        'Keep verification reads bounded and respect endpoint rate limits. Never automatically resend the packet, '
+        'substitute a wake for an uncertain power command, or claim the screen is on from packet delivery alone.\n'
+        if 'wake_list' in reads and 'wake_on_lan' in writes else '')
     return ('# Active tool policy\n\n'
         'The operator has isolated this ZeroClaw deployment. Use the actual supplied tool schemas. '
         'Old conversation memories and identity notes about shell, files or other tool bundles are obsolete.\n\n'
@@ -51,7 +78,8 @@ def instructions(tools=None, telegram_controls=()):
         + channel_policy + 'Telegram peers cannot administer agent settings. '
         'Shell, filesystem, arbitrary HTTP, browser, delegation, cron, camera, microphone, Google and photo tools are unavailable. '
         'Homewire device/security settings cannot be configured by this agent.\n\n'
-        'Use the granted discovery tools and actual entity names. Never substitute shell commands or invent readings.\n')
+        'Use the granted discovery tools and actual entity names. Never substitute shell commands or invent readings.\n\n'
+        + media_policy + wake_policy)
 
 
 def patches(config, token, profile=None):

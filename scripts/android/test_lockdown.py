@@ -100,7 +100,7 @@ class LockdownTests(unittest.TestCase):
         patches = {p['path']: p['value'] for p in lockdown.patches(config, 'synthetic', profile)}
         excluded = patches['/channels']['telegram']['phone']['excluded_tools']
         self.assertFalse(set(excluded) & {'homewire__' + n for n in controls})
-        for name in ['entity_configure', 'routine_run', 'light_set', 'media_play', 'media_command']:
+        for name in ['entity_configure', 'routine_run', 'light_set', 'media_play', 'media_command', 'remote_hold', 'media_voice', 'media_activity']:
             self.assertIn('homewire__' + name, excluded)
         self.assertIn('custom_denial', excluded)
         self.assertIn('homewire__entity_configure', patches['/risk_profiles']['homewire']['excluded_tools'])
@@ -112,6 +112,31 @@ class LockdownTests(unittest.TestCase):
                     raise AssertionError('Legacy configuration was accessed')
                 return b'yes\n'
         with self.assertRaises(ValueError):phone.connect(IsolatedPhone(),'phone')
+
+    def test_network_wake_requires_explicit_channel_grant_and_can_be_revoked(self):
+        values = copy.deepcopy(self.profile.value)
+        values['agent']['tools'] = ['wake_list', 'wake_on_lan', 'entity_status']
+        config = {'agents': {'phone': {'enabled': True}}, 'channels': {'telegram': {
+            'phone': {'enabled': False, 'excluded_tools': ['custom_denial']}}}}
+        denied = {p['path'][1:]: p['value'] for p in lockdown.patches(config, 'synthetic', deployment.Profile(values))}
+        self.assertIn('homewire__wake_on_lan', denied['channels']['telegram']['phone']['excluded_tools'])
+        values['agent']['telegram_control_tools'] = ['wake_on_lan']
+        profile = deployment.Profile(values)
+        granted = {p['path'][1:]: p['value'] for p in lockdown.patches(denied, 'synthetic', profile)}
+        channel = granted['channels']['telegram']['phone']
+        self.assertFalse(channel['enabled'])
+        self.assertNotIn('homewire__wake_on_lan', channel['excluded_tools'])
+        self.assertIn('custom_denial', channel['excluded_tools'])
+        self.assertIn('homewire__media_power', channel['excluded_tools'])
+        self.assertEqual(set(granted['risk_profiles']['homewire']['allowed_tools']),
+                         {'time', 'homewire__wake_list', 'homewire__wake_on_lan', 'homewire__entity_status'})
+        values['agent']['telegram_control_tools'] = []
+        revoked = {p['path'][1:]: p['value'] for p in lockdown.patches(granted, 'synthetic', deployment.Profile(values))}
+        self.assertIn('homewire__wake_on_lan', revoked['channels']['telegram']['phone']['excluded_tools'])
+        instructions = lockdown.instructions(profile.tools, profile.telegram_controls)
+        self.assertIn('Never automatically resend the packet', instructions)
+        self.assertIn('verify its pinned identity and power state', instructions)
+        self.assertIn('pending or unknown, not failed', instructions)
 
 
 if __name__=='__main__':unittest.main()

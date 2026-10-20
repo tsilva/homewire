@@ -26,6 +26,9 @@ use std::{
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+mod activity;
+mod input;
+use input::{KEYS, key_code};
 fn port() -> u16 {
     6466
 }
@@ -112,6 +115,14 @@ pub struct Status {
     pub model: String,
     pub manufacturer: String,
     pub power: bool,
+    pub current_app: Option<String>,
+    pub volume: Option<Volume>,
+}
+#[derive(Debug, Serialize)]
+pub struct Volume {
+    pub level: u16,
+    pub max: u16,
+    pub muted: bool,
 }
 struct Remote<'a> {
     expected_model: &'a str,
@@ -122,7 +133,10 @@ struct Remote<'a> {
     configured: bool,
     active: bool,
     ime: Option<(u64, u64)>,
-    current_app: Option<String>,
+    supported_features: u64,
+    requested_features: u64,
+    voice_session: Option<u64>,
+    ime_context_seen: bool,
 }
 impl Config {
     fn validate<const TCL: bool>(&self) -> Result<()> {
@@ -148,6 +162,9 @@ impl Config {
         Ok(())
     }
     fn remote<const TCL: bool>(&self, deadline: Instant) -> Result<Remote<'_>> {
+        self.remote_input::<TCL>(deadline, false)
+    }
+    fn remote_input<const TCL: bool>(&self, deadline: Instant, voice: bool) -> Result<Remote<'_>> {
         private_permissions(&self.client_cert)?;
         private_permissions(&self.client_key)?;
         let cert = CertificateDer::from_pem_slice(&read_bounded(
@@ -190,7 +207,10 @@ impl Config {
             configured: false,
             active: false,
             ime: None,
-            current_app: None,
+            supported_features: 0,
+            requested_features: 35 | 4 | 64 | 512 | if voice { 8 } else { 0 },
+            voice_session: None,
+            ime_context_seen: false,
         };
         remote.until(|r| r.active && r.status.is_some())?;
         Ok(remote)
@@ -224,7 +244,11 @@ impl Remote<'_> {
             if features & 35 != 35 {
                 return Err(error("Android TV lacks required key/power features"));
             }
-            self.features = features & (35 | 4 | 512);
+            if features > u32::MAX as u64 {
+                return Err(error("Invalid Android TV feature flags"));
+            }
+            self.supported_features = features;
+            self.features = features & self.requested_features;
             let device = configure
                 .nested(2)?
                 .ok_or_else(|| error("Missing Android TV device identity"))?;
@@ -243,6 +267,8 @@ impl Remote<'_> {
                 model: model.into(),
                 manufacturer: vendor.into(),
                 power: false,
+                current_app: None,
+                volume: None,
             });
             let mut info = Vec::new();
             pb::integer(3, 1, &mut info);
@@ -286,24 +312,104 @@ impl Remote<'_> {
         if let Some(ime) = message.nested(21)? {
             self.ime = Some((ime.int(1)?.unwrap_or(0), ime.int(2)?.unwrap_or(0)));
         }
-        if let Some(ime) = message.nested(20)?
-            && let Some(info) = ime.nested(1)?
-        {
-            self.current_app = info.text(12)?.filter(|s| s.len() <= 256).map(str::to_owned);
+        if let Some(ime) = message.nested(20)? {
+            self.ime_context_seen = true;
+            if let Some(info) = ime.nested(1)? {
+                let app = info.text(12)?.filter(|s| s.len() <= 256).map(str::to_owned);
+                if let Some(status) = self.status.as_mut() {
+                    status.current_app = app;
+                }
+            }
+        }
+        if let Some(volume) = message.nested(50)? {
+            if self.features & 64 == 0 {
+                return Err(error("Android TV sent unnegotiated volume information"));
+            }
+            let max = volume.int(6)?.unwrap_or(0);
+            let level = volume.int(7)?.unwrap_or(0);
+            let muted = volume.int(8)?.unwrap_or(0);
+            if max == 0 || max > u16::MAX as u64 || level > max || muted > 1 {
+                return Err(error("Invalid Android TV volume reading"));
+            }
+            if let Some(status) = self.status.as_mut() {
+                status.volume = Some(Volume {
+                    level: level as u16,
+                    max: max as u16,
+                    muted: muted == 1,
+                });
+            }
+        }
+        if let Some(voice) = message.nested(30)? {
+            if self.features & 8 == 0 || self.voice_session.is_some() {
+                return Err(error("Unexpected Android TV voice session"));
+            }
+            let session = voice.int(1)?.unwrap_or(0);
+            if session > i32::MAX as u64 {
+                return Err(error("Invalid Android TV voice session"));
+            }
+            self.voice_session = Some(session);
         }
         Ok(())
     }
     fn key(&mut self, code: u64) -> Result<()> {
+        self.key_direction(code, 3)
+    }
+    /// TCL reports power before its input receiver is ready. Collect the
+    /// negotiated initial IME/volume reports before issuing any on-state control.
+    /// These are session-local signals, never cached across connections.
+    fn prepare_control<const TCL: bool>(&mut self, operation_deadline: Instant) -> Result<()> {
+        if !TCL || !self.status.as_ref().is_some_and(|s| s.power) {
+            return Ok(());
+        }
+        let deadline = operation_deadline.min(Instant::now() + Duration::from_secs(1));
+        self.stream.sock.set_deadline(deadline);
+        let ready = self.until(|r| {
+            (r.features & 4 == 0 || r.ime_context_seen)
+                && (r.features & 64 == 0 || r.status.as_ref().is_some_and(|s| s.volume.is_some()))
+        });
+        self.stream.sock.set_deadline(operation_deadline);
+        ready.map_err(|_| error("TCL input readiness was not confirmed; no control sent"))
+    }
+    fn key_direction(&mut self, code: u64, direction: u64) -> Result<()> {
         let mut body = Vec::new();
         pb::integer(1, code, &mut body);
-        pb::integer(2, 3, &mut body);
+        pb::integer(2, direction, &mut body);
         pb::write(&mut self.stream, 10, &body)
     }
+    /// Collect supplemental state after remote_start without treating EOF as off.
+    fn read_details(&mut self, operation_deadline: Instant) -> Result<()> {
+        let deadline = operation_deadline.min(Instant::now() + Duration::from_millis(500));
+        self.stream.sock.set_deadline(deadline);
+        for _ in 0..128 {
+            if Instant::now() >= deadline {
+                return Ok(());
+            }
+            if let Err(failure) = self.receive() {
+                if failure.downcast_ref::<std::io::Error>().is_some_and(|e| {
+                    matches!(
+                        e.kind(),
+                        std::io::ErrorKind::TimedOut
+                            | std::io::ErrorKind::WouldBlock
+                            | std::io::ErrorKind::UnexpectedEof
+                            | std::io::ErrorKind::ConnectionReset
+                    )
+                }) {
+                    return Ok(());
+                }
+                return Err(failure);
+            }
+        }
+        Err(error("Too many Android remote state messages"))
+    }
     fn finish_key(&mut self, operation_deadline: Instant) -> Result<()> {
+        self.finish_control(operation_deadline, Duration::from_millis(500))
+    }
+    fn finish_control(&mut self, operation_deadline: Instant, observe: Duration) -> Result<()> {
         // Closing immediately can reset TCP with unread TV messages and discard
         // the key. Keep servicing the session briefly, then close TLS cleanly.
         // Neither pings nor this wait acknowledge execution of the key.
-        let deadline = operation_deadline.min(Instant::now() + Duration::from_millis(500));
+        let deadline =
+            (operation_deadline - Duration::from_millis(100)).min(Instant::now() + observe);
         self.stream.sock.set_deadline(deadline);
         let mut drained = false;
         for _ in 0..128 {
@@ -322,13 +428,13 @@ impl Remote<'_> {
                     break;
                 }
                 return Err(error(
-                    "Android TV key was sent but the session failed; outcome unknown; do not replay",
+                    "Android TV control was sent but the session failed; outcome unknown; do not replay",
                 ));
             }
         }
         if !drained {
             return Err(error(
-                "Too many Android remote messages after key; outcome unknown; do not replay",
+                "Too many Android remote messages after control; outcome unknown; do not replay",
             ));
         }
         self.stream.conn.send_close_notify();
@@ -453,15 +559,17 @@ impl<const TCL: bool> RemoteManager<TCL> {
         })
     }
     pub fn status(&self) -> Result<Status> {
-        self.config
-            .remote::<TCL>(Instant::now() + Duration::from_secs(self.config.timeout_seconds))?
+        let deadline = Instant::now() + Duration::from_secs(self.config.timeout_seconds);
+        let mut remote = self.config.remote::<TCL>(deadline)?;
+        remote.read_details(deadline)?;
+        remote
             .status
             .ok_or_else(|| error("Missing Android TV power state"))
     }
     pub fn apply(&mut self, power: bool) -> Result<Value> {
-        let mut remote = self
-            .config
-            .remote::<TCL>(Instant::now() + Duration::from_secs(self.config.timeout_seconds))?;
+        let deadline = Instant::now() + Duration::from_secs(self.config.timeout_seconds);
+        let mut remote = self.config.remote::<TCL>(deadline)?;
+        remote.prepare_control::<TCL>(deadline)?;
         if remote.status.as_ref().is_some_and(|s| s.power == power) {
             if !power && let Some(guard) = self.shutdown_guard.as_mut() {
                 guard.confirmed_off()?;
@@ -503,10 +611,15 @@ impl<const TCL: bool> RemoteManager<TCL> {
         let code = key_code(key).ok_or_else(|| error("Unsupported Android TV key"))?;
         let deadline = Instant::now() + Duration::from_secs(self.config.timeout_seconds);
         let mut remote = self.config.remote::<TCL>(deadline)?;
-        remote.current_app = None;
+        remote.prepare_control::<TCL>(deadline)?;
+        if let Some(status) = remote.status.as_mut() {
+            status.current_app = None;
+        }
         remote.key(code)?;
         remote.finish_key(deadline)?;
-        Ok(json!({"sent":true,"verified":false,"key":key,"current_app":remote.current_app}))
+        Ok(
+            json!({"sent":true,"verified":false,"key":key,"current_app":remote.status.as_ref().and_then(|s|s.current_app.as_deref())}),
+        )
     }
     fn configure(&mut self, settings: &Value) -> Result<Value> {
         crate::settings::validate(SETTINGS, settings)?;
@@ -516,9 +629,9 @@ impl<const TCL: bool> RemoteManager<TCL> {
         if let Some(link) = settings["app_link"].as_str() {
             validate_app_link(link)?;
         }
-        let mut remote = self
-            .config
-            .remote::<TCL>(Instant::now() + Duration::from_secs(self.config.timeout_seconds))?;
+        let deadline = Instant::now() + Duration::from_secs(self.config.timeout_seconds);
+        let mut remote = self.config.remote::<TCL>(deadline)?;
+        remote.prepare_control::<TCL>(deadline)?;
         if let Some(link) = settings["app_link"].as_str() {
             if remote.features & 512 == 0 {
                 return Err(error("Android TV does not support app links"));
@@ -548,12 +661,16 @@ impl<const TCL: bool> RemoteManager<TCL> {
             pb::bytes(3, &edit, &mut batch);
             pb::write(&mut remote.stream, 21, &batch)?;
         }
+        remote.finish_key(deadline)?;
         Ok(
             json!({"sent":true,"verified":false,"note":"Android remote does not acknowledge app/text controls; never replay automatically"}),
         )
     }
 }
 fn validate_app_link(link: &str) -> Result<()> {
+    if link == "netflix://" {
+        return Ok(());
+    }
     if let Some(page) = link.strip_prefix("stremio:///") {
         // Only documented content/navigation pages, never addon installation.
         let (path, query) = page.split_once('?').unwrap_or((page, ""));
@@ -588,43 +705,6 @@ fn validate_app_link(link: &str) -> Result<()> {
     }
     crate::web::Url::parse(link).map(|_| ())
 }
-fn key_code(key: &str) -> Option<u64> {
-    Some(match key {
-        "home" => 3,
-        "back" => 4,
-        "up" => 19,
-        "down" => 20,
-        "left" => 21,
-        "right" => 22,
-        "enter" => 23,
-        "volume_up" => 24,
-        "volume_down" => 25,
-        "mute" => 164,
-        "play_pause" => 85,
-        "play" => 126,
-        "pause" => 127,
-        "channel_up" => 166,
-        "channel_down" => 167,
-        _ => return None,
-    })
-}
-const KEYS: &[&str] = &[
-    "home",
-    "back",
-    "up",
-    "down",
-    "left",
-    "right",
-    "enter",
-    "volume_up",
-    "volume_down",
-    "mute",
-    "play_pause",
-    "play",
-    "pause",
-    "channel_up",
-    "channel_down",
-];
 const SETTINGS: &[crate::settings::Setting] = &[
     crate::settings::Setting {
         name: "app_link",
@@ -647,7 +727,10 @@ const KEY: Input = Input::Field {
 impl<const TCL: bool> Adapter for RemoteManager<TCL> {
     const SUPPORT: crate::entity::Support = crate::entity::Support::MEDIA
         .union(crate::entity::Support::CONFIGURE)
-        .union(crate::entity::Support::APP_INPUT);
+        .union(crate::entity::Support::APP_INPUT)
+        .union(crate::entity::Support::REMOTE_HOLD)
+        .union(crate::entity::Support::VOICE)
+        .union(crate::entity::Support::ACTIVITY);
     fn entities<'a>(&'a self, visit: &mut impl FnMut(crate::entity::Entity<'a>)) {
         use crate::{
             device::Family,
@@ -663,6 +746,9 @@ impl<const TCL: bool> Adapter for RemoteManager<TCL> {
                 Capabilities::Media {
                     keys: KEYS,
                     verified_off: true,
+                    hold: true,
+                    voice: true,
+                    activities: activity::NAMES,
                 },
             )
             .configurable(SETTINGS),
@@ -684,6 +770,9 @@ impl<const TCL: bool> Adapter for RemoteManager<TCL> {
             return Err(error("Unknown Android TV device"));
         }
         match command {
+            crate::entity::Command::Activity => self.activity(&args["activity"]),
+            crate::entity::Command::Hold => self.hold(args),
+            crate::entity::Command::Voice => self.voice(&args["audio"]),
             crate::entity::Command::Launch => self.configure(&json!({"app_link":args["url"]})),
             crate::entity::Command::Text => self.configure(&json!({"text":args["text"]})),
             crate::entity::Command::Configure => self.configure(&args["settings"]),
@@ -704,11 +793,11 @@ impl<const TCL: bool> Adapter for RemoteManager<TCL> {
         if index != 0 {
             return Err(error("Unknown Android TV device"));
         }
-        let remote = self
-            .config
-            .remote::<TCL>(Instant::now() + Duration::from_secs(self.config.timeout_seconds))?;
+        let deadline = Instant::now() + Duration::from_secs(self.config.timeout_seconds);
+        let mut remote = self.config.remote::<TCL>(deadline)?;
+        remote.read_details(deadline)?;
         Ok(
-            json!({"app_link":remote.features&512!=0,"text":remote.features&4!=0,"current_app":remote.current_app}),
+            json!({"app_link":remote.features&512!=0,"text":remote.features&4!=0,"voice":remote.supported_features&8!=0,"volume_supported":remote.features&64!=0,"current_app":remote.status.as_ref().and_then(|s|s.current_app.as_deref()),"volume":remote.status.as_ref().and_then(|s|s.volume.as_ref()),"remote_hold_max_ms":crate::media_input::MAX_HOLD_MS,"hdmi_keys_require_firmware_validation":true,"activity_parameters":activity::options()}),
         )
     }
 
@@ -800,8 +889,14 @@ mod tests {
     enum TestControl {
         Key(u64),
         Launch(&'static str),
+        Activity(&'static str, Option<&'static str>),
         Text(&'static str),
         NoKey,
+        Details(bool),
+        Hold(bool),
+        Voice(&'static [u8]),
+        UnsupportedVoice,
+        ReadyKey(bool),
     }
     fn server_control(
         on: bool,
@@ -841,11 +936,19 @@ mod tests {
             pb::bytes(1, model.as_bytes(), &mut info);
             pb::bytes(2, manufacturer.as_bytes(), &mut info);
             let mut configure = Vec::new();
-            let features = if matches!(command, Some(TestControl::Launch(_) | TestControl::Text(_)))
-            {
-                35 | 512 | 4
+            let features = match command {
+                Some(
+                    TestControl::Launch(_) | TestControl::Activity(_, _) | TestControl::Text(_),
+                ) => 35 | 512 | 4,
+                Some(
+                    TestControl::Voice(_) | TestControl::Details(_) | TestControl::ReadyKey(_),
+                ) => 35 | 512 | 4 | 64 | 8,
+                _ => 35,
+            };
+            let negotiated = if matches!(command, Some(TestControl::Voice(_))) {
+                features
             } else {
-                35
+                features & !8
             };
             pb::integer(1, features, &mut configure);
             pb::bytes(2, &info, &mut configure);
@@ -862,7 +965,7 @@ mod tests {
                     .nested(1)?
                     .expect("configure")
                     .int(1)?,
-                Some(features)
+                Some(negotiated)
             );
             assert!(
                 stream
@@ -877,13 +980,141 @@ mod tests {
                     .nested(2)?
                     .expect("active")
                     .int(1)?,
-                Some(features)
+                Some(negotiated)
             );
             let mut start = Vec::new();
             if on {
                 pb::integer(1, 1, &mut start);
             }
             pb::write(&mut stream, 40, &start)?;
+            if features & 64 != 0 && !matches!(command, Some(TestControl::Details(_))) {
+                let mut volume = Vec::new();
+                pb::integer(6, 100, &mut volume);
+                pb::integer(7, 27, &mut volume);
+                pb::write(&mut stream, 50, &volume)?;
+            }
+            if let Some(TestControl::ReadyKey(complete)) = command {
+                stream
+                    .sock
+                    .set_read_timeout(Some(Duration::from_millis(100)))?;
+                assert!(
+                    pb::read(&mut stream).is_err(),
+                    "no key before initial IME report"
+                );
+                stream.sock.set_read_timeout(Some(Duration::from_secs(3)))?;
+                if !complete {
+                    assert!(
+                        pb::read(&mut stream).is_err(),
+                        "missing readiness must send no key"
+                    );
+                    return Ok(());
+                }
+            }
+            if features & 4 != 0 && !matches!(command, Some(TestControl::Details(_))) {
+                let mut app = Vec::new();
+                pb::bytes(12, b"example.player", &mut app);
+                let mut ime = Vec::new();
+                pb::bytes(1, &app, &mut ime);
+                pb::write(&mut stream, 20, &ime)?;
+            }
+            let command = if matches!(command, Some(TestControl::ReadyKey(_))) {
+                Some(TestControl::Key(3))
+            } else {
+                command
+            };
+            if let Some(TestControl::Details(valid)) = command {
+                let mut volume = Vec::new();
+                pb::integer(6, 100, &mut volume);
+                pb::integer(7, if valid { 27 } else { 101 }, &mut volume);
+                pb::integer(8, 1, &mut volume);
+                pb::write(&mut stream, 50, &volume)?;
+                if valid {
+                    let mut app = Vec::new();
+                    pb::bytes(12, b"example.player", &mut app);
+                    let mut ime = Vec::new();
+                    pb::bytes(1, &app, &mut ime);
+                    pb::write(&mut stream, 20, &ime)?;
+                }
+                return Ok(());
+            }
+            if let Some(TestControl::Hold(fail)) = command {
+                let key = pb::read(&mut stream)?;
+                let key = Message::new(&key)?.nested(10)?.expect("press");
+                assert_eq!(key.int(1)?, Some(23));
+                assert_eq!(key.int(2)?, Some(1));
+                let pressed_at = Instant::now();
+                if fail {
+                    pb::write(&mut stream, 3, &[])?;
+                } else {
+                    let mut ping = Vec::new();
+                    pb::integer(1, 42, &mut ping);
+                    pb::write(&mut stream, 8, &ping)?;
+                    let pong = pb::read(&mut stream)?;
+                    assert_eq!(
+                        Message::new(&pong)?.nested(9)?.expect("pong").int(1)?,
+                        Some(42)
+                    );
+                }
+                let release = pb::read(&mut stream)?;
+                let release = Message::new(&release)?.nested(10)?.expect("release");
+                assert_eq!(release.int(1)?, Some(23));
+                assert_eq!(release.int(2)?, Some(2));
+                if !fail {
+                    assert!(pressed_at.elapsed() >= Duration::from_millis(60));
+                    let mut byte = [0];
+                    assert_eq!(std::io::Read::read(&mut stream, &mut byte)?, 0);
+                }
+                return Ok(());
+            }
+            if let Some(TestControl::Voice(audio)) = command {
+                let search = pb::read(&mut stream)?;
+                let search = Message::new(&search)?.nested(10)?.expect("search");
+                assert_eq!(search.int(1)?, Some(84));
+                assert_eq!(search.int(2)?, Some(3));
+                let mut begin = Vec::new();
+                pb::integer(1, 27, &mut begin);
+                pb::write(&mut stream, 30, &begin)?;
+                let ack = pb::read(&mut stream)?;
+                assert_eq!(
+                    Message::new(&ack)?.nested(30)?.expect("voice ack").int(1)?,
+                    Some(27)
+                );
+                for samples in audio.chunks(8192) {
+                    use std::io::Read;
+                    let mut size = 0;
+                    for shift in (0..21).step_by(7) {
+                        let mut byte = [0];
+                        stream.read_exact(&mut byte)?;
+                        size |= ((byte[0] & 127) as usize) << shift;
+                        if byte[0] < 128 {
+                            break;
+                        }
+                    }
+                    assert!(size <= 8256);
+                    let mut actual = vec![0; size];
+                    stream.read_exact(&mut actual)?;
+                    let mut padded = [0; 8192];
+                    padded[..samples.len()].copy_from_slice(samples);
+                    let mut payload = Vec::new();
+                    pb::integer(1, 27, &mut payload);
+                    pb::bytes(2, &padded, &mut payload);
+                    let mut expected = Vec::new();
+                    pb::bytes(31, &payload, &mut expected);
+                    assert_eq!(actual, expected);
+                }
+                let end = pb::read(&mut stream)?;
+                assert_eq!(
+                    Message::new(&end)?.nested(32)?.expect("voice end").int(1)?,
+                    Some(27)
+                );
+                let mut byte = [0];
+                assert_eq!(std::io::Read::read(&mut stream, &mut byte)?, 0);
+                return Ok(());
+            }
+            if matches!(command, Some(TestControl::UnsupportedVoice)) {
+                assert!(pb::read(&mut stream).is_err());
+                return Ok(());
+            }
             if matches!(command, Some(TestControl::NoKey)) {
                 let failure = pb::read(&mut stream).expect_err("no control may be sent");
                 assert!(failure.downcast_ref::<std::io::Error>().is_some_and(|e| {
@@ -894,7 +1125,7 @@ mod tests {
                 }));
                 return Ok(());
             }
-            if let Some(TestControl::Launch(link)) = command {
+            if let Some(TestControl::Launch(link) | TestControl::Activity(link, _)) = command {
                 let response = pb::read(&mut stream)?;
                 assert_eq!(
                     Message::new(&response)?
@@ -903,6 +1134,13 @@ mod tests {
                         .text(1)?,
                     Some(link)
                 );
+            }
+            if let Some(TestControl::Activity(_, Some(package))) = command {
+                let mut app = Vec::new();
+                pb::bytes(12, package.as_bytes(), &mut app);
+                let mut ime = Vec::new();
+                pb::bytes(1, &app, &mut ime);
+                pb::write(&mut stream, 20, &ime)?;
             }
             if let Some(TestControl::Text(text)) = command {
                 let mut ime = Vec::new();
@@ -923,6 +1161,25 @@ mod tests {
                         .text(3)?,
                     Some(text)
                 );
+            }
+            if matches!(
+                command,
+                Some(TestControl::Text(_) | TestControl::Launch(_) | TestControl::Activity(_, _))
+            ) {
+                let mut ping = Vec::new();
+                pb::integer(1, 42, &mut ping);
+                pb::write(&mut stream, 8, &ping)?;
+                let pong = pb::read(&mut stream)?;
+                assert_eq!(
+                    Message::new(&pong)?
+                        .nested(9)?
+                        .expect("pong after input")
+                        .int(1)?,
+                    Some(42)
+                );
+                let mut byte = [0];
+                assert_eq!(std::io::Read::read(&mut stream, &mut byte)?, 0);
+                return Ok(());
             }
             if let Some(TestControl::Key(command)) = command {
                 let mut ping = Vec::new();
@@ -1211,8 +1468,246 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn activity_observes_only_fresh_app_reports_and_remains_unverified() -> Result<()> {
+        use crate::{device::Devices, entity};
+        for (package, confirmed) in [
+            (Some("com.netflix.ninja"), json!(true)),
+            (Some("example.other"), json!(false)),
+            (None, Value::Null),
+        ] {
+            let temp = support::Directory::new()?;
+            let (address, worker, pin) = server_control(
+                true,
+                Some(TestControl::Activity(
+                    "https://www.netflix.com/title/12345?source=30",
+                    package,
+                )),
+                "Smart TV",
+                "TCL",
+                true,
+                true,
+            )?;
+            let mut devices = Devices {
+                tcl: Some(TclManager::open(&tcl_config(&temp, address, pin)?)?),
+                ..Devices::default()
+            };
+            let result = entity::call(
+                &mut devices,
+                "media_activity",
+                &json!({"entity":"media_player.tcl","activity":{"name":"netflix","content_id":"12345"}}),
+            )?;
+            assert_eq!(result["result"]["app_confirmed"], confirmed);
+            assert_eq!(result["result"]["current_app"], json!(package));
+            assert_eq!(result["result"]["verified"], false);
+            worker.join().expect("server")?;
+        }
+        Ok(())
+    }
+    #[test]
+    fn live_volume_and_app_are_collected_after_power_without_inference() -> Result<()> {
+        for valid in [true, false] {
+            let temp = support::Directory::new()?;
+            let (address, worker, pin) = server_control(
+                true,
+                Some(TestControl::Details(valid)),
+                "Smart TV",
+                "TCL",
+                true,
+                true,
+            )?;
+            let manager = TclManager::open(&tcl_config(&temp, address, pin)?)?;
+            let result = manager.status();
+            if valid {
+                let status = result?;
+                assert!(status.power);
+                assert_eq!(status.current_app.as_deref(), Some("example.player"));
+                let volume = status.volume.expect("fresh volume");
+                assert_eq!((volume.level, volume.max, volume.muted), (27, 100, true));
+            } else {
+                assert!(result.is_err());
+            }
+            worker.join().expect("server")?;
+        }
+        Ok(())
+    }
+    #[test]
+    fn held_key_services_ping_and_releases_once_even_after_protocol_error() -> Result<()> {
+        use crate::{device::Devices, entity};
+        for fail in [false, true] {
+            let temp = support::Directory::new()?;
+            let (address, worker, pin) = server_control(
+                true,
+                Some(TestControl::Hold(fail)),
+                "Smart TV",
+                "TCL",
+                true,
+                true,
+            )?;
+            let mut devices = Devices {
+                tcl: Some(TclManager::open(&tcl_config(&temp, address, pin)?)?),
+                ..Devices::default()
+            };
+            let result = entity::call(
+                &mut devices,
+                "remote_hold",
+                &json!({"entity":"media_player.tcl","key":"enter","hold_ms":80}),
+            );
+            if fail {
+                assert!(
+                    result
+                        .expect_err("uncertain hold")
+                        .to_string()
+                        .contains("do not replay")
+                );
+            } else {
+                assert_eq!(result?["result"]["verified"], false);
+            }
+            worker.join().expect("server")?;
+        }
+        Ok(())
+    }
+    #[test]
+    fn voice_negotiates_session_streams_bounded_pcm_and_ends_once() -> Result<()> {
+        use crate::{device::Devices, entity};
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        static AUDIO: [u8; 16_386] = [42; 16_386];
+        for supported in [true, false] {
+            let temp = support::Directory::new()?;
+            let command = if supported {
+                TestControl::Voice(&AUDIO)
+            } else {
+                TestControl::UnsupportedVoice
+            };
+            let (address, worker, pin) =
+                server_control(true, Some(command), "Smart TV", "TCL", true, true)?;
+            let mut devices = Devices {
+                tcl: Some(TclManager::open(&tcl_config(&temp, address, pin)?)?),
+                ..Devices::default()
+            };
+            let result = entity::call(
+                &mut devices,
+                "media_voice",
+                &json!({"entity":"media_player.tcl","audio":STANDARD.encode(AUDIO)}),
+            );
+            if supported {
+                assert_eq!(result?["result"]["verified"], false);
+            } else {
+                assert!(
+                    result
+                        .expect_err("unsupported voice")
+                        .to_string()
+                        .contains("does not support voice")
+                );
+            }
+            worker.join().expect("server")?;
+        }
+        Ok(())
+    }
+    #[test]
+    fn extended_input_keeps_mcp_grants_bounds_and_power_guards() -> Result<()> {
+        use crate::{device::Devices, entity, mcp};
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        let temp = support::Directory::new()?;
+        let mut devices = Devices {
+            tcl: Some(TclManager::open(&tcl_config(
+                &temp,
+                "127.0.0.1:1".parse()?,
+                "00".repeat(32),
+            )?)?),
+            ..Devices::default()
+        };
+        for (tool, args) in [
+            (
+                "remote_hold",
+                json!({"entity":"media_player.tcl","key":"enter","hold_ms":80}),
+            ),
+            (
+                "media_voice",
+                json!({"entity":"media_player.tcl","audio":STANDARD.encode([0,0])}),
+            ),
+            (
+                "media_activity",
+                json!({"entity":"media_player.tcl","activity":{"name":"home"}}),
+            ),
+        ] {
+            let response=mcp::handle_entities(json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":tool,"arguments":args}}),&mut devices,false).expect("reply");
+            assert!(response["error"].is_object() || response["result"]["isError"] == true);
+        }
+        for args in [
+            json!({"entity":"media_player.tcl","key":"power","hold_ms":80}),
+            json!({"entity":"media_player.tcl","key":"enter","hold_ms":0}),
+            json!({"entity":"media_player.tcl","key":"enter","hold_ms":2001}),
+            json!({"entity":"media_player.tcl","key":"enter","hold_ms":80,"extra":true}),
+        ] {
+            assert!(entity::call(&mut devices, "remote_hold", &args).is_err());
+        }
+        for audio in [
+            json!(""),
+            json!("bad!"),
+            json!(STANDARD.encode([0])),
+            json!(STANDARD.encode([0; 48_002])),
+            json!(STANDARD.encode(b"RIFF0000")),
+        ] {
+            assert!(
+                entity::call(
+                    &mut devices,
+                    "media_voice",
+                    &json!({"entity":"media_player.tcl","audio":audio})
+                )
+                .is_err()
+            );
+        }
+        assert!(crate::media_input::valid_voice(&json!(
+            STANDARD.encode([0; 48_000])
+        )));
+        assert!(key_code("power").is_none());
+        for key in [
+            "hdmi_1",
+            "hdmi_4",
+            "stop",
+            "next",
+            "settings",
+            "captions",
+            "audio_track",
+            "0",
+            "9",
+        ] {
+            assert!(key_code(key).is_some());
+        }
+        Ok(())
+    }
+    #[test]
+    fn tcl_waits_for_initial_input_reports_and_fails_before_control_if_missing() -> Result<()> {
+        for complete in [true, false] {
+            let temp = support::Directory::new()?;
+            let (address, worker, pin) = server_control(
+                true,
+                Some(TestControl::ReadyKey(complete)),
+                "Smart TV",
+                "TCL",
+                true,
+                true,
+            )?;
+            let mut manager = TclManager::open(&tcl_config(&temp, address, pin)?)?;
+            let result = manager.key("home");
+            if complete {
+                assert_eq!(result?["sent"], true);
+            } else {
+                assert!(
+                    result
+                        .expect_err("readiness missing")
+                        .to_string()
+                        .contains("no control sent")
+                );
+            }
+            worker.join().expect("server")?;
+        }
+        Ok(())
+    }
+    #[test]
     fn app_links_reject_installation_and_non_navigation_schemes() {
         for link in [
+            "netflix://",
             "stremio:///board",
             "stremio:///search?search=A%20Movie",
             "stremio:///detail/series/tt0108778/tt0108778:1:1",
@@ -1223,6 +1718,7 @@ mod tests {
         for link in [
             "intent://app/#Intent;end",
             "file:///data/private",
+            "netflix://arbitrary-action",
             "stremio://addon.example/manifest.json",
             "stremio:///addons",
             "stremio:///search?search=x&install=1",

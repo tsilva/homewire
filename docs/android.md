@@ -203,21 +203,42 @@ no agent-administration grant. Existing peer IDs, channel enablement, paired
 clients and encrypted model keys are preserved. Installation does not enable
 Telegram or send messages; validate delivery separately when it is enabled.
 
-The trusted local assistant gateway allows up to 22 Homewire tools; discovery
+The trusted local assistant gateway allows explicitly selected Homewire tools; discovery
 omits tools whose adapters are absent. It cannot call
-`entity_configure`. Telegram can use the 12 read tools: `entity_list`,
+`entity_configure`. Telegram can use these read tools: `entity_list`,
 `entity_status`, `entity_options`, `routine_list`, `routine_plan`, `alert_list`,
-`history_series`, `history_query`, `weather_status`, `shopping_list`, `radio_search`
-and `tts_media`. With no control grant it cannot change devices, run routines,
+`history_series`, `history_query`, `weather_status`, `shopping_list`, `radio_search`,
+`tts_media` and `wake_list`. With no control grant it cannot change devices, run routines,
 play media or edit shopping items. Supported opt-in write tools are `light_set`,
 `switch_set`, `media_power`, `remote_key`, `media_launch`, `media_text`, `routine_run`, `media_play`,
-`media_command` and `shopping_update`; each must also be in the agent's tool scope.
+`media_command`, `shopping_update` and `wake_on_lan`; each must also be in the agent's tool scope.
 Grants apply to whole tools, so `switch_set` permits all eligible configured
 switches, with Homewire's identity checks and device guards still enforced.
 `media_launch` and `media_text` are limited to media remotes advertising app/text
 support. They do not grant `entity_configure`. Link/text delivery is unverified;
 never automatically replay a failed or uncertain control or claim playback from
-delivery alone. No extra TV polling, screen capture, ADB or wake lock is added.
+delivery alone. Generated instructions ask for screen confirmation after an
+unverified shutdown and attribute visual confirmation to the user, retaining
+the backend's separate verification status and attempt guard. The user's latest
+correction replaces earlier visual reports. Guard expiry never triggers an
+automatic retry; another attempt requires a new explicit request and fresh state
+accepted by the adapter. Unreachable readings remain unknown, and unrelated
+remembered tasks are not new requests. No extra TV polling, screen capture, ADB
+or wake lock is added.
+Android TV extensions use separate `media_activity`, `remote_hold` and
+`media_voice` write grants. Activities send one named app/input/navigation action
+and distinguish fresh app reports from unverified playback or screen changes.
+Holds are limited to 2000 ms. Voice accepts at most 3 seconds of supplied base64
+PCM and does not add microphone access to the agent. Configured Cast entities
+use the existing `media_play` and `media_command` grants. Operator updates must
+add requested tools to the API and agent scopes and, when desired, the explicit
+Telegram controls; unrelated denials and disabled channels remain in force.
+Network wake uses separate `wake_list` discovery and opt-in `wake_on_lan` control
+grants. Generic targets send one packet without verifying wake; generated agent
+instructions require a fresh media status before claiming the TV is on and
+prohibit automatic replay or substituting wake after an uncertain power command.
+An early unavailable reading is pending or unknown: network recovery may be
+delayed, so bounded later reads can confirm wake without repeating the control.
 A compromised allowed Telegram identity could use the explicitly granted controls, read household state
 and use the capped model account. This is a reduction in privileges, not protection
 against a compromised root user or kernel. The provider key necessarily exists in
@@ -241,7 +262,8 @@ served. The endpoint wraps requests into the existing private owner IPC with its
 operator-controlled role and scope. Caller-supplied roles/scopes cannot widen
 permissions, nor can the agent use dashboard or companion routes. MCP messages
 are stateless JSON responses, with 202 for notifications. Requests are limited to
-8 KiB and bounded deadlines. Endpoint counters permit 30 authenticated MCP
+8 KiB and bounded deadlines; authenticated `media_voice` requests alone may use
+up to 64 KiB for the bounded base64 PCM payload. Endpoint counters permit 30 authenticated MCP
 requests per minute and 20 control attempts per hour, independently of ZeroClaw.
 Discovery/reads count toward the minute limit; initialization and denied attempts
 also count. Excess traffic receives HTTP 429 before owner dispatch. Counters reset

@@ -472,11 +472,151 @@ unavailable through `remote_key`. DIGI retains absolute wake/sleep keys.
 
 Both TCL operations verify the reported result on the same session. An
 unreachable TV is unknown; standby must leave its remote service
-reachable for wake. Controls never reconnect or replay after uncertain errors.
+reachable for the WAKEUP key. On firmware that drops the IP services in standby,
+enable network standby in System > Power and energy > Standby mode and configure
+a separate [Wake-on-LAN target](#wake-on-lan) using the TV's verified network MAC
+and the sender's LAN broadcast destination. Send one `wake_on_lan` request, then
+read the media entity to confirm its identity and power. Packet transmission
+alone does not verify wake. Other TCL firmware may require Screenless service
+to keep the remote service reachable; confirm the setting and outcome on the
+actual TV across multiple standby cycles and realistic idle periods. One
+successful wake does not establish reliability. Controls never reconnect or
+replay after uncertain errors.
+Network and remote-service recovery can be delayed: an unavailable first status
+read after a magic packet means pending or unknown, rather than a failed wake.
+Use bounded later status reads to verify recovery; do not resend controls to
+compensate for an early timeout. Packet delivery and Cast availability alone
+do not establish that the screen is on.
 The remote keys, app-link launch and focused-field text settings described for
 DIGI below also apply; key/app/text delivery remains unverified. Normal commands
 never start pairing or silently replace a certificate pin. Roku/Fire TV remote
 protocols and ADB are outside this adapter.
+
+TCL/DIGI status includes `current_app` and optional `volume` with the reported
+`level`, `max` and `muted` fields. Supplemental messages are collected for up to
+500 ms after the initial power report; unavailable readings remain null. Levels
+use the TV's native scale, not an assumed percentage. `entity_options` reports
+live app/text/voice/volume support and the current supplemental readings.
+Before an on-state TCL control, the adapter waits up to one second for the
+negotiated initial IME and volume reports. Missing readiness fails before sending
+the control. App/text/key sessions service pending messages and close TLS cleanly.
+
+### Android TV activities
+
+`media_activity` accepts an `entity` and an `activity` object. Discover supported
+names through `entity_list`; each plan sends exactly one key or app link:
+
+| Activity `name` | Optional parameter |
+| --- | --- |
+| `home`, `quick_settings`, `settings`, `inputs`, `live_tv` | None |
+| `hdmi` | Required `input`: integer 1–4 |
+| `netflix` | Numeric `content_id` (up to 12 digits) |
+| `youtube` | `query` or 11-character `content_id` |
+| `prime_video` | None |
+| `stremio` | `query` |
+
+For example, `media_activity {"entity":"media_player.tcl","activity":{"name":"youtube","query":"nature documentaries"}}`.
+Queries are limited to 256 UTF-8 bytes and safely encoded into fixed app links.
+`quick_settings` holds Home for 800 ms and releases once; other navigation
+activities send a single short key. Direct Settings/Input/HDMI keys may be ignored
+by firmware even when the quick-settings panel can be reached by holding Home.
+The TV must already report on; use guarded `media_power` separately. Links depend
+on installed apps, supported firmware and signed-in accounts. No arbitrary
+intents, addon installation, UI macros or automatic replay are added.
+
+The adapter collects reports for up to two seconds after sending and returns
+`current_app` only from fresh messages. `app_confirmed` is true/false when a fresh
+package report can be compared with the requested app, otherwise null. This does
+not prove playback, title selection, screen contents or HDMI input selection;
+`verified` remains false. Activity controls require `--allow-control` and a
+separate `media_activity` agent grant.
+`entity_options.activity_parameters` exposes these parameter rules to agents.
+Netflix home uses the fixed `netflix://` link; title links use its HTTPS title URL.
+Prime Video uses its `/home` link; an account/profile picker may still require
+navigation before viewing. App links never bypass authentication or subscriptions.
+
+### Android TV extended input
+
+Extended `remote_key` names include `stop`, `next`, `previous`, `rewind`,
+`fast_forward`, `skip_forward`, `skip_backward`, `0`–`9`, `delete`, `menu`,
+`search`, `info`, `tv`, `guide`, `captions`, `settings`, `input`, `red`, `green`,
+`yellow`, `blue`, `app_switch`, `assist`, `audio_track`, `last_channel`,
+`teletext`, and `hdmi_1`–`hdmi_4`. Use discovery for the complete list.
+HDMI shortcuts, subtitles, audio tracks and settings depend on firmware and the
+foreground app; successful delivery is not proof that the requested UI appeared.
+No direct brightness/picture-mode setter or input-state reading is inferred.
+
+`remote_hold {"entity":"media_player.tcl","key":"enter","hold_ms":800}`
+holds a supported key for 1–2000 ms, services incoming messages, and attempts one
+release on the same connection, including after a read failure. Holds are
+serialized under the adapter's existing configuration lock. Power keys remain
+unavailable, and failed presses/releases are never reconnected or replayed.
+
+`media_voice {"entity":"media_player.tcl","audio":"BASE64_RAW_PCM"}`
+sends supplied signed 16-bit little-endian PCM, mono at 8000 Hz, with no WAV
+header. Audio must contain 1–24000 samples (at most 3 seconds / 48000 bytes /
+64000 base64 characters). Voice is negotiated only for that request. The client
+sends SEARCH once, waits up to 2 seconds for a voice session, echoes its id,
+streams 8192-byte chunks with final zero padding, and attempts session end once.
+Only these outgoing audio frames may exceed the usual 8 KiB protobuf bound,
+with an 8256-byte limit; ordinary commands and incoming frames retain 8 KiB.
+The total operation uses `timeout_seconds`; use at least 8 seconds for holds/voice.
+There is no microphone capture or speech synthesis. Recognition and any
+assistant action remain unverified; audio is not retained or logged by the adapter.
+Both tools require `--allow-control` in MCP and separate agent grants.
+
+### TCL Google Cast
+
+Configure the existing `cast` adapter alongside `tcl`, with a distinct entity
+name. Both use the same TV address, but Cast needs its own independently inspected
+port-8009 certificate pin, not the remote-service certificate. For example:
+
+```json
+"cast": {
+  "name": "tcl_cast",
+  "host": "192.0.2.40",
+  "server_cert_sha256": "REPLACE_WITH_CAST_CERTIFICATE_SHA256"
+}
+```
+
+Read `homewire certificate-sha256 TV_IP:8009` on a trusted LAN, verify the endpoint
+identity, and save the pin in private configuration. This creates
+`media_player.tcl_cast` for the standard `entity_status`, `media_play` and
+`media_command` tools. For example:
+
+```json
+{"entity":"media_player.tcl_cast","command":{"action":"volume","percent":25}}
+{"entity":"media_player.tcl_cast","command":{"action":"mute","muted":true}}
+{"entity":"media_player.tcl_cast","command":{"action":"seek","seconds":120}}
+{"entity":"media_player.tcl_cast","media":{"url":"https://media.example/movie.mp4","content_type":"video/mp4"}}
+```
+
+Cast adds absolute volume/mute, play/pause/stop/seek and HTTP(S) media playback.
+Status includes the receiver and available media metadata, position and playback
+state. Native apps without the Cast media namespace retain receiver/volume status
+with `media:null`; playback controls fail explicitly. Cast metadata and seeking
+depend on the active app. URL playback may launch the default Cast receiver and
+replace the current app; a Netflix webpage is not a direct media URL. Use the
+remote entity for app links and power. Cast availability never establishes TV power.
+Each URL replacement stops an existing default media receiver session once,
+verifies its removal, and launches a fresh receiver before LOAD. This prevents a
+hidden receiver from playing behind the TV launcher and ends its previous media.
+An uncertain stop aborts before launch/load. Other native app sessions are not
+stopped individually; the new receiver launch can still replace the foreground app.
+Agent access to Cast playback uses separate `media_play` / `media_command` grants;
+enabling an adapter alone does not grant those tools or enable a disabled channel.
+Some receivers first echo a LOAD request as `IDLE` with an extended `LOADING`
+state. The adapter keeps that same connection open and services heartbeats until
+the request completes, within its existing deadline/frame bounds. It never resends
+LOAD. Only a matching URL and reported `PLAYING` state verify URL playback;
+rejected sources or an expired deadline do not establish playback.
+An unsolicited completion without the original request ID is accepted only when
+its new media session ID matches the acknowledged load. If that incremental update
+omits the URL, one fresh GET_STATUS on the same connection must confirm both the
+session and requested URL. Unrelated playback updates do not complete the request.
+`timeout_seconds` defaults to 8 and accepts 1–30 seconds. Adaptive streams can
+need a longer initial buffering deadline. After an uncertain timeout, read fresh
+status to learn whether playback started; do not automatically resend the URL.
 
 ## Samsung TV and DIGI R2A
 
@@ -546,8 +686,10 @@ openssl s_client -connect DIGI_IP:6466 -cert .local/digi-cert.pem -key .local/di
 The adapter verifies the pinned certificate plus live model/vendor, negotiates
 ping/key/power plus supported app-link/text features, and waits for a `remote_start` power reading. An
 absent proto3 `started` field means false only inside a present `remote_start`;
-identity/connection alone never defaults to off. Messages are limited to 8 KiB,
-128 fields and 128 frames per state wait, with a socket deadline. Unknown valid
+identity/connection alone never defaults to off. Incoming messages and ordinary
+commands are limited to 8 KiB; only outgoing voice payloads use the bounded
+exception described above. Parsing allows 128 fields and 128 frames per state
+wait, with a socket deadline. Unknown valid
 fields are skipped; malformed/truncated/overflowing fields fail.
 
 `digi-status` / `digi_status` takes no arguments. `digi-set on|off` /
@@ -581,10 +723,13 @@ requests autoplay. Custom installation links and arbitrary intent/file schemes
 are rejected. [Stremio documents](https://stremio.github.io/stremio-addon-sdk/deep-links.html)
 that autoplay depends on an available prior stream selection. Netflix links
 require a compatible installed app and may still show account/profile/title UI.
+For Netflix title targeting, use `https://www.netflix.com/title/TITLE_ID?source=30`
+as described by the [Android TV Remote integration](https://www.home-assistant.io/integrations/androidtv_remote/#launching-activities).
 No tool finds title IDs, sees the TV screen, bypasses subscriptions, or confirms
 that video is playing. Use actual supplied title links/IDs and reported results.
-Requests are sent once and remain unverified. TV voice streaming and ADB are
-not implemented. Host-only `scripts/android/pair_digi.py` performs PIN pairing
+Requests are sent once and remain unverified. Supplied PCM voice streaming uses
+the bounded `media_voice` tool described above; ADB is not implemented.
+Host-only `scripts/android/pair_digi.py` performs PIN pairing
 without HA; existing credentials remain the normal runtime path.
 
 Both managers hold exclusive config locks. Config/credential parser errors omit

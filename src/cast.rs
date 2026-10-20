@@ -103,10 +103,13 @@ impl Channel {
         Ok(())
     }
     fn call(&mut self, namespace: &str, dest: &str, mut payload: Value) -> Result<Value> {
+        let wait_for_load = namespace == MEDIA && payload["type"] == "LOAD";
         let id = self.next;
         self.next += 1;
         payload["requestId"] = json!(id);
+        let requested_url = payload["media"]["contentId"].as_str().map(str::to_owned);
         self.send(namespace, dest, payload)?;
+        let mut loading_session = None;
         for _ in 0..64 {
             let mut length = [0; 4];
             self.stream.read_exact(&mut length)?;
@@ -128,12 +131,77 @@ impl Channel {
                 )?;
                 continue;
             }
-            if ns == namespace && value["requestId"] == id {
+            let completed_load = wait_for_load
+                && value["type"] == "MEDIA_STATUS"
+                && value.get("requestId").is_none_or(|v| *v == 0)
+                && loading_session.is_some_and(|session| {
+                    value["status"][0]["mediaSessionId"].as_u64() == Some(session)
+                })
+                && value["status"][0]["media"]
+                    .get("contentId")
+                    .is_none_or(|url| {
+                        requested_url
+                            .as_deref()
+                            .is_some_and(|expected| *url == expected)
+                    })
+                && matches!(
+                    value["status"][0]["playerState"].as_str(),
+                    Some("PLAYING" | "PAUSED")
+                );
+            if ns == namespace && (value["requestId"] == id || completed_load) {
                 if value["type"]
                     .as_str()
                     .is_some_and(|s| s.ends_with("ERROR") || s == "INVALID_REQUEST")
                 {
                     return Err(error("Cast request rejected; no retry"));
+                }
+                // TCL first echoes the LOAD request id with IDLE/LOADING, then
+                // completes it with PLAYING, sometimes as an unsolicited status
+                // without the request id. Match that only to the new session
+                // and requested URL. Closing the sender
+                // on the initial echo can cancel the load. Service heartbeats
+                // and wait on this connection; never issue LOAD again.
+                if wait_for_load
+                    && (value["status"][0]["extendedStatus"]["playerState"] == "LOADING"
+                        || matches!(
+                            value["status"][0]["playerState"].as_str(),
+                            Some("BUFFERING" | "LOADING")
+                        ))
+                {
+                    if let Some(url) =
+                        value["status"][0]["media"]["contentId"]
+                            .as_str()
+                            .or_else(|| {
+                                value["status"][0]["extendedStatus"]["media"]["contentId"].as_str()
+                            })
+                    {
+                        if requested_url.as_deref() != Some(url) {
+                            return Err(error(
+                                "Cast LOAD acknowledged a different URL; do not replay",
+                            ));
+                        }
+                        loading_session =
+                            value["status"][0]["mediaSessionId"].as_u64().or_else(|| {
+                                value["status"][0]["extendedStatus"]["mediaSessionId"].as_u64()
+                            });
+                    }
+                    continue;
+                }
+                if completed_load && value["status"][0]["media"].get("contentId").is_none() {
+                    // Adaptive-stream updates are incremental. Read full metadata
+                    // once on this same connection instead of inferring a URL
+                    // or retaining/merging snapshots. This is never another LOAD.
+                    let fresh = self.call(MEDIA, dest, json!({"type":"GET_STATUS"}))?;
+                    if fresh["status"][0]["mediaSessionId"].as_u64() != loading_session
+                        || !requested_url
+                            .as_deref()
+                            .is_some_and(|url| fresh["status"][0]["media"]["contentId"] == url)
+                    {
+                        return Err(error(
+                            "Cast load session changed before verification; do not replay",
+                        ));
+                    }
+                    return Ok(fresh);
                 }
                 return Ok(value);
             }
@@ -151,7 +219,26 @@ impl Channel {
         status["applications"]
             .as_array()?
             .iter()
-            .find_map(|a| a["transportId"].as_str().filter(|s| s.len() <= 128))
+            .filter(|a| a["appId"] == "CC1AD845")
+            .find_map(|a| {
+                a["transportId"]
+                    .as_str()
+                    .filter(|s| !s.is_empty() && s.len() <= 128)
+            })
+    }
+    fn media_transport(status: &Value) -> Option<&str> {
+        status["applications"].as_array()?.iter().find_map(|app| {
+            app["namespaces"]
+                .as_array()?
+                .iter()
+                .any(|n| n["name"] == MEDIA)
+                .then(|| {
+                    app["transportId"]
+                        .as_str()
+                        .filter(|s| !s.is_empty() && s.len() <= 128)
+                })
+                .flatten()
+        })
     }
     fn media_status(&mut self, transport: &str) -> Result<Value> {
         self.send(CONNECTION, transport, json!({"type":"CONNECT","origin":{}}))?;
@@ -183,7 +270,7 @@ impl Manager {
     fn status(&self) -> Result<Value> {
         let mut c = Channel::open(&self.config)?;
         let receiver = c.receiver()?;
-        let status = if let Some(t) = Channel::transport(&receiver) {
+        let status = if let Some(t) = Channel::media_transport(&receiver) {
             c.media_status(t)?
         } else {
             Value::Null
@@ -192,27 +279,50 @@ impl Manager {
     }
     fn control(&self, command: Command, args: &Value) -> Result<Value> {
         let mut c = Channel::open(&self.config)?;
-        let mut receiver = c.receiver()?;
+        let receiver = c.receiver()?;
         let result = if matches!(command, Command::Play) {
             let m = &args["media"];
             if !crate::playback::valid_play(m) {
                 return Err(error("Invalid media request"));
             }
-            if !receiver["applications"]
+            // A receiver may remain registered behind the TV launcher. LAUNCH
+            // alone can reuse that hidden session without bringing video back.
+            // URL replacement deliberately ends only the default media receiver
+            // session, verifies its removal, then launches one fresh instance.
+            if let Some(app) = receiver["applications"]
                 .as_array()
-                .is_some_and(|a| a.iter().any(|a| a["appId"] == "CC1AD845"))
+                .and_then(|a| a.iter().find(|a| a["appId"] == "CC1AD845"))
             {
-                receiver = c.call(
-                    RECEIVER,
-                    "receiver-0",
-                    json!({"type":"LAUNCH","appId":"CC1AD845"}),
-                )?["status"]
-                    .take();
+                let session = app["sessionId"]
+                    .as_str()
+                    .filter(|s| !s.is_empty() && s.len() <= 128)
+                    .ok_or_else(|| {
+                        error("Missing bounded default Cast receiver session; no replacement sent")
+                    })?;
+                let stopped = c.call(RECEIVER, "receiver-0", json!({"type":"STOP","sessionId":session}))
+                    .map_err(|failure| error(format!("Cast receiver stop attempted once; outcome unknown; no launch or load sent; do not replay: {failure}")))?;
+                if !stopped["status"].is_object()
+                    || !stopped["status"].get("applications").is_none_or(|apps| {
+                        apps.as_array()
+                            .is_some_and(|a| a.iter().all(|a| a["appId"] != "CC1AD845"))
+                    })
+                {
+                    return Err(error(
+                        "Default Cast receiver stop not confirmed; no launch or load sent; do not replay",
+                    ));
+                }
             }
+            let receiver = c.call(
+                RECEIVER,
+                "receiver-0",
+                json!({"type":"LAUNCH","appId":"CC1AD845"}),
+            )?["status"]
+                .take();
             let transport = Channel::transport(&receiver)
                 .ok_or_else(|| error("Default Cast media receiver did not launch"))?;
             c.send(CONNECTION, transport, json!({"type":"CONNECT","origin":{}}))?;
-            c.call(MEDIA,transport,json!({"type":"LOAD","autoplay":true,"media":{"contentId":m["url"],"contentType":m["content_type"],"streamType":"BUFFERED"}}))?
+            c.call(MEDIA,transport,json!({"type":"LOAD","autoplay":true,"media":{"contentId":m["url"],"contentType":m["content_type"],"streamType":"BUFFERED"}}))
+                .map_err(|failure| error(format!("Cast LOAD attempted once; outcome unknown; do not replay: {failure}")))?
         } else {
             let a = &args["command"];
             if !crate::playback::valid_command(a) {
@@ -231,8 +341,9 @@ impl Manager {
                     json!({"type":"SET_VOLUME","volume":volume}),
                 )?
             } else {
-                let t = Channel::transport(&receiver)
-                    .ok_or_else(|| error("Cast has no active media application"))?;
+                let t = Channel::media_transport(&receiver).ok_or_else(|| {
+                    error("Cast application does not advertise media playback support")
+                })?;
                 let current = c.media_status(t)?;
                 let session = current["mediaSessionId"]
                     .as_u64()
@@ -304,3 +415,6 @@ impl Adapter for Manager {
         self.control(c, a)
     }
 }
+
+#[cfg(test)]
+mod tests;

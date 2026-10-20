@@ -34,6 +34,7 @@ pub fn error(message: impl Into<String>) -> Box<dyn std::error::Error + Send + S
 
 pub mod androidtv;
 mod media;
+mod media_input;
 mod protobuf;
 pub mod samsung;
 mod tapo_settings;

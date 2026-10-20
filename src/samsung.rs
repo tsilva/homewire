@@ -415,6 +415,9 @@ impl Adapter for Manager {
             Capabilities::Media {
                 keys: KEYS,
                 verified_off: false,
+                hold: false,
+                voice: false,
+                activities: &[],
             },
         ));
     }
