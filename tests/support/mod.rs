@@ -1,21 +1,16 @@
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 use serde_json::Value;
-use std::{
-    fs,
-    path::PathBuf,
-    sync::atomic::{AtomicUsize, Ordering},
-};
+use std::{fs, path::PathBuf};
 #[allow(dead_code)]
 pub struct Directory(pub PathBuf);
 #[allow(dead_code)]
 impl Directory {
     pub fn new() -> Result<Self> {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "homewire-test-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        // This helper is included by multiple test modules, each with its own
+        // scope. Keep directories unique and short enough for macOS IPC paths.
+        let mut nonce = [0; 8];
+        getrandom::getrandom(&mut nonce)?;
+        let path = std::env::temp_dir().join(format!("hw-{:016x}", u64::from_ne_bytes(nonce)));
         fs::create_dir(&path)?;
         #[cfg(unix)]
         {

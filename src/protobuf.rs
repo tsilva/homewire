@@ -134,9 +134,19 @@ pub(crate) fn bytes(number: u32, value: &[u8], out: &mut Vec<u8>) {
     out.extend_from_slice(value)
 }
 pub(crate) fn write(stream: &mut impl Write, number: u32, body: &[u8]) -> Result<()> {
+    write_limit(stream, number, body, MAX)
+}
+/// Voice has an 8 KiB minimum sample chunk plus bounded protobuf overhead.
+/// All normal commands and incoming messages retain the smaller MAX bound.
+pub(crate) fn write_limit(
+    stream: &mut impl Write,
+    number: u32,
+    body: &[u8],
+    limit: usize,
+) -> Result<()> {
     let mut message = Vec::with_capacity(body.len() + 8);
     bytes(number, body, &mut message);
-    if message.len() > MAX {
+    if message.len() > limit {
         return Err(error("Oversized Android command"));
     }
     let mut prefix = Vec::with_capacity(3);

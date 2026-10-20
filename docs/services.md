@@ -33,6 +33,8 @@ inspects first-use identity without saving or trusting it in any adapter. Verify
 the endpoint before copying its pin; normal adapters reject changed certificates.
 Cast launches the standard media receiver when needed. Controls are never replayed
 on a timeout; results distinguish sent from confirmed playback.
+Authenticated dashboard/agent voice requests may use up to 64 KiB; other API
+request bodies retain their 8 KiB limit. TV audio is supplied as bounded raw PCM.
 
 ### Typed settings
 
@@ -204,7 +206,8 @@ import the updated API config using the normal installer. The frontend proxies
 only its configured loopback ZeroClaw webhook. Agent calls are sent once, even after
 an uncertain response. A 90-second wait can delay other frontend connections;
 the independent device owner/scheduler continues. Faster-whisper pipelines
-and Android TV voice audio streaming are not implemented.
+are not implemented. Supplied Android TV voice audio uses the separate bounded
+`media_voice` tool; this companion voice path does not capture or forward TV audio.
 
 Remote access can use a Cloudflare One client and a tunnel private IP route
 to the Homewire server's HTTPS port. Include that IP in WARP routing and

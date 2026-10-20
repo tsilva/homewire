@@ -24,6 +24,9 @@ impl Support {
     pub const PLAYBACK: Self = Self(1 | 64);
     pub const WAKE: Self = Self(128);
     pub const APP_INPUT: Self = Self(256);
+    pub const REMOTE_HOLD: Self = Self(512);
+    pub const VOICE: Self = Self(1024);
+    pub const ACTIVITY: Self = Self(2048);
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
     }
@@ -75,6 +78,9 @@ pub enum Command {
     Playback,
     Launch,
     Text,
+    Hold,
+    Voice,
+    Activity,
 }
 #[derive(Clone, Copy)]
 pub enum Capabilities {
@@ -88,6 +94,9 @@ pub enum Capabilities {
     Media {
         keys: &'static [&'static str],
         verified_off: bool,
+        hold: bool,
+        voice: bool,
+        activities: &'static [&'static str],
     },
 }
 #[derive(Clone, Copy)]
@@ -177,8 +186,14 @@ impl<'a> Entity<'a> {
             } => {
                 json!({"read":true,"power":true,"brightness_percent":{"min":1,"max":100},"color_modes":["hs","color_temperature"],"color_temperature_k":{"min":2500,"max":max_temperature_k,"range_source":"model_envelope","live_range_verified_on_control":true},"effects_control":false,"fixed_settings_require_effects_off":fixed_settings_require_effects_off})
             }
-            Capabilities::Media { keys, verified_off } => {
-                json!({"read":true,"power":true,"remote_keys":keys,"power_off_verifiable":verified_off})
+            Capabilities::Media {
+                keys,
+                verified_off,
+                hold,
+                voice,
+                activities,
+            } => {
+                json!({"read":true,"power":true,"remote_keys":keys,"power_off_verifiable":verified_off,"remote_hold_max_ms":if hold {Some(crate::media_input::MAX_HOLD_MS)} else {None},"voice_input":voice,"voice_support_requires_live_options":voice,"activities":activities})
             }
         };
         if self.owner.is_some() && !maintenance {
@@ -289,6 +304,23 @@ fn control(devices: &mut Devices, tool: &str, args: &Value) -> Result<Value> {
             if args["key"].as_str().is_some_and(|key| keys.contains(&key)) =>
         {
             Command::Key
+        }
+        (
+            "remote_hold",
+            Domain::MediaPlayer,
+            Capabilities::Media {
+                keys, hold: true, ..
+            },
+        ) if args["key"].as_str().is_some_and(|key| keys.contains(&key)) => Command::Hold,
+        ("media_voice", Domain::MediaPlayer, Capabilities::Media { voice: true, .. }) => {
+            Command::Voice
+        }
+        ("media_activity", Domain::MediaPlayer, Capabilities::Media { activities, .. })
+            if args["activity"]["name"]
+                .as_str()
+                .is_some_and(|name| activities.contains(&name)) =>
+        {
+            Command::Activity
         }
         _ => return Err(error("Unsupported entity capability or remote key")),
     };
@@ -462,6 +494,55 @@ const REMOTE: Tool = Tool {
         ..Hints::CONTROL
     },
 };
+const HOLD: Tool = Tool {
+    name: "remote_hold",
+    description: "Hold one supported remote key for 1–2000 ms, then release it on the same session. No power toggles or automatic replay. Delivery does not confirm a screen change.",
+    input: Input::Object {
+        schema: crate::media_input::hold_schema,
+        valid: crate::media_input::valid_hold,
+        error: "Expected entity, supported key and hold_ms (1–2000)",
+    },
+    hints: Hints {
+        idempotent: false,
+        ..Hints::CONTROL
+    },
+};
+const VOICE: Tool = Tool {
+    name: "media_voice",
+    description: "Send up to 3 seconds of raw 16-bit little-endian PCM, mono 8000 Hz, as base64 audio to the TV voice assistant. Check entity_options for live support. Audio is sent once; recognition and resulting actions are unverified. No microphone capture or speech synthesis.",
+    input: Input::Named {
+        key: "entity",
+        extra: Some(Field {
+            name: "audio",
+            schema: crate::media_input::voice_schema,
+            valid: crate::media_input::valid_voice,
+            error: "Expected base64 raw PCM audio of at most 3 seconds",
+        }),
+        error: "Expected media entity and audio",
+    },
+    hints: Hints {
+        idempotent: false,
+        ..Hints::CONTROL
+    },
+};
+const ACTIVITY: Tool = Tool {
+    name: "media_activity",
+    description: "Open a named TV activity with one key or app link. Discover names in entity_list and parameter rules in entity_options. Optional query/content_id/input depends on the activity. Fresh app confirmation does not prove content playback or an input switch. Never replay automatically; use media_power for power.",
+    input: Input::Named {
+        key: "entity",
+        extra: Some(Field {
+            name: "activity",
+            schema: crate::media_input::activity_schema,
+            valid: crate::media_input::valid_activity,
+            error: "Expected activity name and at most one bounded query, content_id or input",
+        }),
+        error: "Expected media entity and activity",
+    },
+    hints: Hints {
+        idempotent: false,
+        ..Hints::CONTROL
+    },
+};
 const PLAY: Tool = Tool {
     name: "media_play",
     description: "Play an HTTP(S) media URL through a configured Cast or DLNA entity; verify without replaying a failed control.",
@@ -475,11 +556,14 @@ const PLAY: Tool = Tool {
         }),
         error: "Expected entity and media",
     },
-    hints: Hints::CONTROL,
+    hints: Hints {
+        idempotent: false,
+        ..Hints::CONTROL
+    },
 };
 const LAUNCH: Tool = Tool {
     name: "media_launch",
-    description: "Send one app/title link to a media remote. Accepts HTTP(S) app links and documented Stremio page links. Delivery does not prove playback; never replay automatically. Read entity_options for live support/current app.",
+    description: "Send one app/title link to a media remote. Accepts HTTP(S) app links, the fixed netflix:// home link and documented Stremio page links. Delivery does not prove playback; never replay automatically. Read entity_options for live support/current app.",
     input: Input::Named {
         key: "entity",
         extra: Some(Field {
@@ -548,6 +632,9 @@ pub fn tools(selection: Selection) -> impl Iterator<Item = &'static Tool> + Clon
         support.contains(Support::SWITCH).then_some(&SWITCH),
         support.contains(Support::MEDIA).then_some(&MEDIA),
         support.contains(Support::MEDIA).then_some(&REMOTE),
+        support.contains(Support::REMOTE_HOLD).then_some(&HOLD),
+        support.contains(Support::VOICE).then_some(&VOICE),
+        support.contains(Support::ACTIVITY).then_some(&ACTIVITY),
         support.contains(Support::APP_INPUT).then_some(&LAUNCH),
         support.contains(Support::APP_INPUT).then_some(&TEXT),
         support.contains(Support::CONFIGURE).then_some(&CONFIGURE),
@@ -581,9 +668,8 @@ pub fn call(devices: &mut Devices, name: &str, args: &Value) -> Result<Value> {
             devices.options(device)
         }
         "light_set" | "switch_set" | "media_power" | "remote_key" | "entity_configure"
-        | "media_play" | "media_command" | "media_launch" | "media_text" => {
-            control(devices, name, args)
-        }
+        | "media_play" | "media_command" | "media_launch" | "media_text" | "remote_hold"
+        | "media_voice" | "media_activity" => control(devices, name, args),
         name if name.starts_with("routine_") => crate::routine::call(devices, name, args),
         _ => devices.call(name, args),
     };
@@ -599,6 +685,9 @@ pub fn call(devices: &mut Devices, name: &str, args: &Value) -> Result<Value> {
                 | "media_command"
                 | "media_launch"
                 | "media_text"
+                | "remote_hold"
+                | "media_voice"
+                | "media_activity"
                 | "routine_run"
                 | "wake_on_lan"
         )

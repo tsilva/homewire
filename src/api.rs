@@ -368,13 +368,19 @@ fn handle(
             return response(stream, 404, b"{}", "application/json");
         }
         let len = length.unwrap_or(0);
-        if len == 0 || len > 8192 {
+        if len == 0 || len > mcp::MAX_MESSAGE {
             return response(stream, 413, b"{}", "application/json");
         }
         let mut body = vec![0; len];
         input.read_exact(&mut body)?;
         drop(input);
         let data: Value = serde_json::from_slice(&body).map_err(|_| error("Invalid MCP JSON"))?;
+        if len > 8192
+            && !(data["method"] == "tools/call"
+                && data.pointer("/params/name").and_then(Value::as_str) == Some("media_voice"))
+        {
+            return response(stream, 413, b"{}", "application/json");
+        }
         if !budget.admit(&data, Instant::now()) {
             return response(stream, 429, b"{}", "application/json");
         }
@@ -419,7 +425,12 @@ fn handle(
         return response(stream, 404, b"{}", "application/json");
     }
     let len = length.unwrap_or(0);
-    if len > 8192 {
+    let limit = if role == "dashboard" && path == "/api/call" {
+        mcp::MAX_MESSAGE
+    } else {
+        8192
+    };
+    if len > limit {
         return response(stream, 413, b"{}", "application/json");
     }
     let mut body = vec![0; len];
@@ -431,6 +442,9 @@ fn handle(
     } else {
         serde_json::from_slice(&body).map_err(|_| error("Invalid API JSON"))?
     };
+    if len > 8192 && data["name"] != "media_voice" {
+        return response(stream, 413, b"{}", "application/json");
+    }
     if path == "/api/assistant" {
         let permitted = role == "dashboard"
             || cfg
@@ -745,5 +759,74 @@ mod tests {
         assert!(budget.admit(&read, next));
         assert!(!budget.admit(&control, next + Duration::from_secs(60)));
         assert!(budget.admit(&control, start + Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn large_voice_crosses_authenticated_http_and_ipc_without_widening_other_bodies() -> Result<()>
+    {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        use std::os::unix::{fs::PermissionsExt, net::UnixListener};
+        for agent in [false, true] {
+            let mut random = [0; 8];
+            getrandom::getrandom(&mut random)?;
+            let directory =
+                std::env::temp_dir().join(format!("hw-api-{:016x}", u64::from_ne_bytes(random)));
+            std::fs::create_dir(&directory)?;
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
+            let socket = directory.join("owner.sock");
+            let listener = UnixListener::bind(&socket)?;
+            let owner = thread::spawn(move || -> Result<()> {
+                let (mut stream, _) = listener.accept()?;
+                stream.set_read_timeout(Some(Duration::from_secs(3)))?;
+                let mut line = String::new();
+                BufReader::new(&mut stream).read_line(&mut line)?;
+                assert!(line.len() <= mcp::MAX_MESSAGE);
+                let request: Value = serde_json::from_str(&line)?;
+                let data = &request["params"]["data"];
+                let arguments = if agent {
+                    &data["params"]["arguments"]
+                } else {
+                    &data["arguments"]
+                };
+                assert_eq!(arguments["audio"].as_str().expect("audio").len(), 64_000);
+                writeln!(
+                    stream,
+                    "{}",
+                    json!({"jsonrpc":"2.0","id":1,"result":{"accepted":true}})
+                )?;
+                Ok(())
+            });
+            let mut cfg: Config = serde_json::from_value(
+                json!({"listen":"127.0.0.1:0","dashboard_token":"a".repeat(64),"agent":{"listen":"127.0.0.1:0","token":"b".repeat(64),"tools":["media_voice"]}}),
+            )?;
+            cfg.agent_only = agent;
+            let server = Server::listen(cfg, &socket, None)?;
+            let path = if agent { "/mcp" } else { "/api/call" };
+            let token = if agent { "b" } else { "a" }.repeat(64);
+            for voice in [false, true] {
+                let name = if voice { "media_voice" } else { "media_text" };
+                let args =
+                    json!({"entity":"media_player.tcl","audio":STANDARD.encode(vec![0;48_000])});
+                let body=if agent {json!({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":name,"arguments":args}})}else{json!({"name":name,"arguments":args})}.to_string();
+                let mut stream = TcpStream::connect(server.local_addr())?;
+                stream.set_read_timeout(Some(Duration::from_secs(3)))?;
+                write!(
+                    stream,
+                    "POST {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                )?;
+                let mut reply = String::new();
+                stream.read_to_string(&mut reply)?;
+                assert!(reply.starts_with(if voice {
+                    "HTTP/1.1 200"
+                } else {
+                    "HTTP/1.1 413"
+                }));
+            }
+            owner.join().expect("owner")?;
+            drop(server);
+            std::fs::remove_dir_all(directory)?;
+        }
+        Ok(())
     }
 }

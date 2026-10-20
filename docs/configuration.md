@@ -15,7 +15,7 @@ families. The file is bounded to 64 KiB and requires `version: 1`.
 
 | Section | Contents |
 | --- | --- |
-| `adapters` | `meaco`, `printers`, `awair`, `lights`, `plugs`, `samsung`, `digi`, `brother`, `cast`, `dlna`, `wol`, `computer`; objects use the existing adapter schemas below |
+| `adapters` | `meaco`, `printers`, `awair`, `lights`, `plugs`, `samsung`, `digi`, `tcl`, `brother`, `cast`, `dlna`, `wol`, `computer`; objects use the existing adapter schemas below |
 | `routines.meaco` | Day/night presets, previously `meaco.json`'s `presets` |
 | `routines.tv` | `plug`, `shutdown_policy`, `timings`; its children are the configured Samsung, DIGI and plugs adapters, without file references |
 | `automations.meaco` | `timezone`, `day`, `night`, previously Meaco `schedule` |
