@@ -223,7 +223,11 @@ the backend's separate verification status and attempt guard. The user's latest
 correction replaces earlier visual reports. Guard expiry never triggers an
 automatic retry; another attempt requires a new explicit request and fresh state
 accepted by the adapter. Unreachable readings remain unknown, and unrelated
-remembered tasks are not new requests. No extra TV polling, screen capture, ADB
+remembered tasks are not new requests. Short follow-ups retain the last device
+selected by the user; an unsolicited assistant mention does not switch focus.
+Generated instructions avoid repeated permission for an already authorized
+control, unrelated discovery and unsupported tool arguments. Replies report the
+outcome briefly. No extra TV polling, screen capture, ADB
 or wake lock is added.
 Android TV extensions use separate `media_activity`, `remote_hold` and
 `media_voice` write grants. Activities send one named app/input/navigation action
@@ -237,8 +241,12 @@ Network wake uses separate `wake_list` discovery and opt-in `wake_on_lan` contro
 grants. Generic targets send one packet without verifying wake; generated agent
 instructions require a fresh media status before claiming the TV is on and
 prohibit automatic replay or substituting wake after an uncertain power command.
-An early unavailable reading is pending or unknown: network recovery may be
-delayed, so bounded later reads can confirm wake without repeating the control.
+Configured TCL integrated recovery stays inside one `media_power` operation.
+The agent inspects its structured verification result instead of treating a
+successful tool call as a successful power change. Expired verification is an
+incomplete request; instructions prohibit invented recovery times and promises
+of unscheduled background checks. Experimental Cast wake is disabled unless
+the operator explicitly configures it after firmware validation.
 A compromised allowed Telegram identity could use the explicitly granted controls, read household state
 and use the capped model account. This is a reduction in privileges, not protection
 against a compromised root user or kernel. The provider key necessarily exists in

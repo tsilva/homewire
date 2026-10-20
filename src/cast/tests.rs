@@ -26,7 +26,7 @@ fn reply(
     Ok(())
 }
 
-fn server(
+pub(crate) fn server(
     expected: Option<Value>,
     has_media: bool,
 ) -> Result<(SocketAddr, thread::JoinHandle<Result<()>>, String)> {
@@ -59,7 +59,13 @@ fn server(
                     json!({"appId":"CC1AD845","sessionId":"session-1","transportId":"app-1","namespaces":[{"name":MEDIA}]}),
                 );
             }
-            json!({"volume":{"level":0.27,"muted":false},"applications":applications})
+            let mut status =
+                json!({"volume":{"level":0.27,"muted":false},"applications":applications});
+            if !expected.as_ref().is_some_and(|e| e["omit_standby"] == true) {
+                status["isStandBy"] =
+                    json!(expected.as_ref().is_none_or(|e| e["standby"] != false));
+            }
+            status
         };
         let mut control_count = 0;
         for _ in 0..16 {
@@ -82,9 +88,17 @@ fn server(
                 if expected.is_none() && !has_media {
                     done = true;
                 }
+                if expected.as_ref().is_some_and(|e| {
+                    e["action"] == "wake" && (e["standby"] == false || e["omit_standby"] == true)
+                }) {
+                    done = true;
+                }
                 json!({"type":"RECEIVER_STATUS","status":receiver(launched)})
             } else if ns == RECEIVER && kind == "STOP" {
-                assert_eq!(expected.as_ref().expect("load")["action"], "load");
+                assert!(matches!(
+                    expected.as_ref().expect("activation")["action"].as_str(),
+                    Some("load" | "wake")
+                ));
                 assert_eq!(request["sessionId"], "session-1");
                 assert!(launched);
                 if expected.as_ref().expect("load")["refuse_stop"] == true {
@@ -94,13 +108,20 @@ fn server(
                 }
                 json!({"type":"RECEIVER_STATUS","status":receiver(launched)})
             } else if ns == RECEIVER && kind == "LAUNCH" {
-                assert_eq!(expected.as_ref().expect("play")["action"], "load");
+                assert!(matches!(
+                    expected.as_ref().expect("activation")["action"].as_str(),
+                    Some("load" | "wake")
+                ));
                 assert_eq!(request["appId"], "CC1AD845");
                 assert!(
                     !launched,
                     "existing default receiver must be stopped before replacing URL"
                 );
                 launched = true;
+                if expected.as_ref().is_some_and(|e| e["action"] == "wake") {
+                    control_count += 1;
+                    done = true;
+                }
                 json!({"type":"RECEIVER_STATUS","status":receiver(true)})
             } else if ns == RECEIVER && kind == "SET_VOLUME" {
                 control_count += 1;
@@ -218,7 +239,9 @@ fn server(
             if done {
                 assert_eq!(
                     control_count,
-                    usize::from(expected.as_ref().is_some_and(|v| v["refuse_stop"] != true))
+                    usize::from(expected.as_ref().is_some_and(|v| v["refuse_stop"] != true
+                        && v["standby"] != false
+                        && v["omit_standby"] != true))
                 );
                 return Ok(());
             }
@@ -226,6 +249,42 @@ fn server(
         Err(error("Cast test frame limit exceeded"))
     });
     Ok((address, worker, pin))
+}
+
+#[test]
+fn cast_wake_launches_once_without_loading_content_and_preserves_active_apps() -> Result<()> {
+    for (standby, has_media) in [(true, false), (true, true), (false, false), (false, true)] {
+        let (address, worker, pin) =
+            server(Some(json!({"action":"wake","standby":standby})), has_media)?;
+        let wake: Wake = serde_json::from_value(
+            json!({"server_cert_sha256":pin,"port":address.port(),"timeout_seconds":2}),
+        )?;
+        wake.validate()?;
+        let activated = wake.activate(address.ip()).map_err(|e| e.cause)?;
+        assert_eq!(activated, standby);
+        worker.join().expect("Cast wake server")?;
+    }
+    Ok(())
+}
+
+#[test]
+fn cast_wake_rejects_unknown_standby_and_does_not_launch_after_failed_stop() -> Result<()> {
+    for expected in [
+        json!({"action":"wake","omit_standby":true}),
+        json!({"action":"wake","refuse_stop":true}),
+    ] {
+        let (address, worker, pin) = server(Some(expected.clone()), true)?;
+        let wake: Wake = serde_json::from_value(
+            json!({"server_cert_sha256":pin,"port":address.port(),"timeout_seconds":2}),
+        )?;
+        let failure = match wake.activate(address.ip()) {
+            Ok(_) => panic!("wake must fail"),
+            Err(e) => e,
+        };
+        assert_eq!(failure.command_sent, Some(expected["refuse_stop"] == true));
+        worker.join().expect("Cast wake server")?;
+    }
+    Ok(())
 }
 
 #[test]

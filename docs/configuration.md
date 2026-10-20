@@ -58,6 +58,12 @@ availability. Configuration presence alone does not enable controls or
 schedules: `--allow-control`, `--schedule`, `--light-schedule` and watch flags
 remain explicit runtime grants. Android updates preserve saved grants.
 
+Optional TCL `wake`, `cast_wake` and `power_on_key` fields are described in
+[TCL power and network standby](devices.md#tcl-power-and-network-standby).
+Defaults retain the existing WAKEUP key with no integrated network/Cast wake.
+Cast wake requires its own certificate pin and firmware validation; adding a
+separate Cast playback adapter does not enable it.
+
 To migrate existing private files in place:
 
 ```sh

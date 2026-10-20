@@ -28,6 +28,7 @@ use std::{
 };
 mod activity;
 mod input;
+mod power;
 use input::{KEYS, key_code};
 fn port() -> u16 {
     6466
@@ -54,6 +55,12 @@ pub struct Config {
     pub timeout_seconds: u64,
     #[serde(default = "verify")]
     pub verify_seconds: u64,
+    #[serde(default)]
+    pub wake: Option<power::Wake>,
+    #[serde(default)]
+    pub cast_wake: Option<crate::cast::Wake>,
+    #[serde(default)]
+    pub power_on_key: power::PowerOnKey,
     #[serde(default)]
     pub connect: Option<SocketAddr>,
 }
@@ -150,6 +157,21 @@ impl Config {
             return Err(error("DIGI uses its fixed ZTE DIGI R2A identity"));
         }
         media::valid_endpoint(self.port, self.connect, self.timeout_seconds)?;
+        if !TCL
+            && (self.wake.is_some()
+                || self.cast_wake.is_some()
+                || self.power_on_key != power::PowerOnKey::Wakeup)
+        {
+            return Err(error(
+                "Network wake and configurable power keys are TCL-only",
+            ));
+        }
+        if let Some(wake) = &self.wake {
+            wake.validate()?;
+        }
+        if let Some(wake) = &self.cast_wake {
+            wake.validate()?;
+        }
         media::hex::<32>(&self.server_cert_sha256)?;
         if self.client_cert.as_os_str().is_empty()
             || self.client_key.as_os_str().is_empty()
@@ -456,6 +478,8 @@ pub type TclManager = RemoteManager<true>;
 struct ShutdownMemory {
     identity: [u8; 32],
     attempt: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    requested_power: Option<bool>,
 }
 struct ShutdownGuard {
     path: PathBuf,
@@ -485,12 +509,13 @@ impl ShutdownGuard {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => ShutdownMemory {
                 identity,
                 attempt: None,
+                requested_power: None,
             },
             Err(e) => return Err(e.into()),
         };
         Ok(Self { path, memory })
     }
-    fn record_attempt(&mut self) -> Result<()> {
+    fn record_attempt(&mut self, power: bool) -> Result<()> {
         let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
         if self
             .memory
@@ -498,26 +523,40 @@ impl ShutdownGuard {
             .is_some_and(|last| now < last.saturating_add(120))
         {
             return Err(error(
-                "Recent TCL shutdown attempt; another power toggle is blocked for 120 seconds",
+                "Recent TCL shutdown or wake attempt; another power control is blocked for 120 seconds",
             ));
         }
         let memory = ShutdownMemory {
             identity: self.memory.identity,
             attempt: Some(now),
+            requested_power: Some(power),
         };
         save_private(&self.path, &memory)?;
         self.memory = memory;
         Ok(())
     }
-    fn confirmed_off(&mut self) -> Result<()> {
-        if self.memory.attempt.is_some() {
+    fn confirmed(&mut self, power: bool) -> Result<()> {
+        if self.memory.attempt.is_some() && self.memory.requested_power.unwrap_or(false) == power {
             let memory = ShutdownMemory {
                 identity: self.memory.identity,
                 attempt: None,
+                requested_power: None,
             };
             save_private(&self.path, &memory)?;
             self.memory = memory;
         }
+        Ok(())
+    }
+    /// Cancel only our newly persisted attempt when no device-changing write
+    /// was attempted. Never use this after a partial write or verification error.
+    fn cancel_unsent(&mut self) -> Result<()> {
+        let memory = ShutdownMemory {
+            identity: self.memory.identity,
+            attempt: None,
+            requested_power: None,
+        };
+        save_private(&self.path, &memory)?;
+        self.memory = memory;
         Ok(())
     }
 }
@@ -567,44 +606,25 @@ impl<const TCL: bool> RemoteManager<TCL> {
             .ok_or_else(|| error("Missing Android TV power state"))
     }
     pub fn apply(&mut self, power: bool) -> Result<Value> {
+        if TCL {
+            return power::apply(self, power);
+        }
         let deadline = Instant::now() + Duration::from_secs(self.config.timeout_seconds);
         let mut remote = self.config.remote::<TCL>(deadline)?;
         remote.prepare_control::<TCL>(deadline)?;
         if remote.status.as_ref().is_some_and(|s| s.power == power) {
-            if !power && let Some(guard) = self.shutdown_guard.as_mut() {
-                guard.confirmed_off()?;
-            }
             return Ok(json!({"applied":false,"verified":true,"status":remote.status}));
         }
-        // TCL ignores SLEEP on some firmware. Use POWER only after a fresh,
-        // identity-checked on state and a durable attempt; never expose raw POWER.
-        let code = if power {
-            224
-        } else if let Some(guard) = self.shutdown_guard.as_mut() {
-            guard.record_attempt()?;
-            26
-        } else {
-            223
-        };
+        // DIGI retains absolute keys. TCL's guarded firmware-specific path above
+        // also owns its bounded network recovery and structured outcomes.
+        let code = if power { 224 } else { 223 };
         remote.key(code)?;
         // A new total verification deadline, still no reconnect/replay of controls.
         remote
             .stream
             .sock
             .set_deadline(Instant::now() + Duration::from_secs(self.config.verify_seconds));
-        if let Err(failure) = remote.until(|r| r.status.as_ref().is_some_and(|s| s.power == power))
-        {
-            return if TCL && !power {
-                Err(error(
-                    "TCL shutdown sent once; off is unverified; another toggle is blocked for 120 seconds",
-                ))
-            } else {
-                Err(failure)
-            };
-        }
-        if !power && let Some(guard) = self.shutdown_guard.as_mut() {
-            guard.confirmed_off()?;
-        }
+        remote.until(|r| r.status.as_ref().is_some_and(|s| s.power == power))?;
         Ok(json!({"applied":true,"verified":true,"status":remote.status}))
     }
     pub fn key(&mut self, key: &str) -> Result<Value> {
@@ -730,7 +750,31 @@ impl<const TCL: bool> Adapter for RemoteManager<TCL> {
         .union(crate::entity::Support::APP_INPUT)
         .union(crate::entity::Support::REMOTE_HOLD)
         .union(crate::entity::Support::VOICE)
-        .union(crate::entity::Support::ACTIVITY);
+        .union(crate::entity::Support::ACTIVITY)
+        .union(if TCL {
+            crate::entity::Support::WAKE
+        } else {
+            crate::entity::Support::NONE
+        });
+    fn wake_targets<'a>(&'a self, visit: &mut impl FnMut(crate::wol::Target<'a>)) {
+        if TCL && let Some(wake) = &self.config.wake {
+            visit(crate::wol::Target {
+                device: crate::entity::Device {
+                    family: crate::device::Family::Tcl,
+                    index: 0,
+                },
+                name: "tcl",
+                mac: crate::wol::mac_bytes(&wake.mac).expect("validated TCL wake MAC"),
+                verified: true,
+            });
+        }
+    }
+    fn wake_device(&mut self, index: usize) -> Result<Value> {
+        if !TCL || index != 0 || self.config.wake.is_none() {
+            return Err(error("Unknown Android TV wake target"));
+        }
+        self.apply(true)
+    }
     fn entities<'a>(&'a self, visit: &mut impl FnMut(crate::entity::Entity<'a>)) {
         use crate::{
             device::Family,
@@ -1214,7 +1258,7 @@ mod tests {
                     return Ok(());
                 }
                 let mut start = Vec::new();
-                if command == 224 {
+                if command == 224 || (command == 26 && !on) {
                     pb::integer(1, 1, &mut start);
                 }
                 pb::write(&mut stream, 40, &start)?;
@@ -1335,7 +1379,10 @@ mod tests {
         let temp = support::Directory::new()?;
         let (address, worker, pin) = server_as(true, Some(26), "Smart TV", "TCL", false, true)?;
         let mut manager = TclManager::open(&tcl_config(&temp, address, pin)?)?;
-        assert!(manager.apply(false).is_err());
+        let result = manager.apply(false)?;
+        assert_eq!(result["verified"], false);
+        assert_eq!(result["command_sent"], true);
+        assert_eq!(result["phase"], "verify");
         worker.join().expect("server")?;
         Ok(())
     }
@@ -1345,13 +1392,9 @@ mod tests {
         let (address, worker, pin) = server_as(true, Some(26), "Smart TV", "TCL", false, true)?;
         let path = tcl_config(&temp, address, pin)?;
         let mut manager = TclManager::open(&path)?;
-        assert!(
-            manager
-                .apply(false)
-                .expect_err("unconfirmed shutdown")
-                .to_string()
-                .contains("sent once")
-        );
+        let result = manager.apply(false)?;
+        assert_eq!(result["verified"], false);
+        assert_eq!(result["command_sent"], true);
         worker.join().expect("server")?;
         drop(manager);
         let memory: ShutdownMemory =
@@ -1380,6 +1423,150 @@ mod tests {
         let memory: ShutdownMemory =
             serde_json::from_slice(&std::fs::read(path.with_extension("power.state.json"))?)?;
         assert!(memory.attempt.is_none());
+        Ok(())
+    }
+    #[test]
+    fn tcl_power_key_wake_is_state_checked_and_guarded_after_restart() -> Result<()> {
+        for confirm in [true, false] {
+            let temp = support::Directory::new()?;
+            let (address, worker, pin) =
+                server_as(false, Some(26), "Smart TV", "TCL", confirm, true)?;
+            let path = tcl_config(&temp, address, pin)?;
+            let mut value: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+            value["power_on_key"] = json!("power");
+            temp.config("tcl.json", &value)?;
+            let mut manager = TclManager::open(&path)?;
+            let result = manager.apply(true)?;
+            assert_eq!(result["verified"], confirm);
+            assert_eq!(result["command_sent"], true);
+            worker.join().expect("server")?;
+            drop(manager);
+            if !confirm {
+                let (address, worker, pin) = server_control(
+                    false,
+                    Some(TestControl::NoKey),
+                    "Smart TV",
+                    "TCL",
+                    true,
+                    true,
+                )?;
+                value["connect"] = json!(address);
+                value["server_cert_sha256"] = json!(pin);
+                temp.config("tcl.json", &value)?;
+                let mut manager = TclManager::open(&path)?;
+                assert!(
+                    manager
+                        .apply(true)
+                        .expect_err("uncertain wake cannot toggle again")
+                        .to_string()
+                        .contains("Recent TCL")
+                );
+                worker.join().expect("server")?;
+            }
+        }
+        Ok(())
+    }
+    #[test]
+    fn tcl_network_recovery_sends_one_packet_and_preserves_unknown_attempt() -> Result<()> {
+        use std::net::UdpSocket;
+        let temp = support::Directory::new()?;
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        drop(listener);
+        let udp = UdpSocket::bind("127.0.0.1:0")?;
+        udp.set_read_timeout(Some(Duration::from_millis(200)))?;
+        let path = tcl_config(&temp, address, "00".repeat(32))?;
+        let mut value: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+        value["wake"] =
+            json!({"mac":"02:00:00:00:00:40","wake_address":udp.local_addr()?,"ready_seconds":1});
+        temp.config("tcl.json", &value)?;
+        let mut manager = TclManager::open(&path)?;
+        let result = manager.apply(true)?;
+        assert_eq!(result["verified"], false);
+        assert_eq!(result["phase"], "network_recovery");
+        assert_eq!(result["command_sent"], false);
+        assert_eq!(result["wake_packet_sent"], true);
+        let mut bytes = [0; 128];
+        let len = udp.recv(&mut bytes)?;
+        assert_eq!(len, 102);
+        assert_eq!(&bytes[..6], &[0xff; 6]);
+        for block in bytes[6..len].chunks_exact(6) {
+            assert_eq!(block, &[2, 0, 0, 0, 0, 64]);
+        }
+        drop(manager);
+        let mut manager = TclManager::open(&path)?;
+        assert!(manager.apply(true).is_err());
+        assert!(udp.recv(&mut bytes).is_err(), "no replay after restart");
+        let off = manager.apply(false)?;
+        assert_eq!(off["outcome"], "not_sent");
+        assert_eq!(off["command_sent"], false);
+        let memory: ShutdownMemory =
+            serde_json::from_slice(&std::fs::read(path.with_extension("power.state.json"))?)?;
+        assert_eq!(memory.requested_power, Some(true));
+        Ok(())
+    }
+    #[test]
+    fn tcl_network_wake_never_follows_identity_failure_or_uses_invalid_endpoints() -> Result<()> {
+        use std::net::UdpSocket;
+        let temp = support::Directory::new()?;
+        let udp = UdpSocket::bind("127.0.0.1:0")?;
+        udp.set_read_timeout(Some(Duration::from_millis(100)))?;
+        let (address, worker, _) = server_as(false, None, "Smart TV", "TCL", true, false)?;
+        let path = tcl_config(&temp, address, "00".repeat(32))?;
+        let mut value: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+        value["wake"] = json!({"mac":"02:00:00:00:00:40","wake_address":udp.local_addr()?});
+        temp.config("tcl.json", &value)?;
+        let mut manager = TclManager::open(&path)?;
+        assert!(manager.apply(true).is_err());
+        let mut bytes = [0; 128];
+        assert!(udp.recv(&mut bytes).is_err());
+        worker.join().expect("server")?;
+        drop(manager);
+        for bad in [
+            json!({"mac":"ff:ff:ff:ff:ff:ff","wake_address":"192.0.2.255:9"}),
+            json!({"mac":"02:00:00:00:00:40","wake_address":"0.0.0.0:9"}),
+            json!({"mac":"02:00:00:00:00:40","wake_address":"192.0.2.255:9","ready_seconds":121}),
+        ] {
+            value["wake"] = bad;
+            temp.config("tcl.json", &value)?;
+            assert!(TclManager::open(&path).is_err());
+        }
+        Ok(())
+    }
+    #[test]
+    fn tcl_cast_activation_requires_independent_pinned_power_confirmation() -> Result<()> {
+        for reported_on in [true, false] {
+            let temp = support::Directory::new()?;
+            let (address, worker, pin) = server_control(
+                reported_on,
+                Some(TestControl::NoKey),
+                "Smart TV",
+                "TCL",
+                true,
+                true,
+            )?;
+            let (cast_address, cast_worker, cast_pin) =
+                crate::cast::tests::server(Some(json!({"action":"wake","standby":true})), false)?;
+            let path = tcl_config(&temp, address, pin)?;
+            let mut value: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+            value["host"] = json!("127.0.0.1");
+            value["cast_wake"] = json!({"server_cert_sha256":cast_pin,
+                "port":cast_address.port(),"timeout_seconds":2});
+            value["wake"] = json!({"mac":"02:00:00:00:00:40",
+                "wake_address":"127.0.0.1:9","ready_seconds":1});
+            temp.config("tcl.json", &value)?;
+            let mut manager = TclManager::open(&path)?;
+            let result = power::cast_wake(&mut manager, power::Outcome::new(true))?;
+            assert_eq!(result["verified"], reported_on);
+            assert_eq!(result["cast_command_sent"], true);
+            assert_eq!(result["command_sent"], false);
+            assert_eq!(result["wake_packet_sent"], false);
+            worker.join().expect("remote server")?;
+            cast_worker.join().expect("Cast server")?;
+            let memory: ShutdownMemory =
+                serde_json::from_slice(&std::fs::read(path.with_extension("power.state.json"))?)?;
+            assert_eq!(memory.attempt.is_none(), reported_on);
+        }
         Ok(())
     }
     #[test]

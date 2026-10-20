@@ -136,7 +136,20 @@ class LockdownTests(unittest.TestCase):
         instructions = lockdown.instructions(profile.tools, profile.telegram_controls)
         self.assertIn('Never automatically resend the packet', instructions)
         self.assertIn('verify its pinned identity and power state', instructions)
-        self.assertIn('pending or unknown, not failed', instructions)
+        self.assertIn('report the wake as unverified and the request as incomplete', instructions)
+
+    def test_focus_and_power_outcomes_do_not_depend_on_ungranted_tools(self):
+        instructions = lockdown.instructions(('entity_status', 'media_power'), ('media_power',))
+        for phrase in ('does not change the active device',
+                       'Older remembered tasks are context, not pending authorization',
+                       '"turn it on" means the same TV',
+                       'without asking for the same permission again',
+                       'a successful tool transport or `applied:true` does not prove',
+                       'Do not promise background follow-up',
+                       'never replay it'):
+            self.assertIn(phrase, instructions)
+        self.assertNotIn('`homewire__wake_on_lan`', instructions)
+        self.assertNotIn('`homewire__switch_set`', instructions)
 
 
 if __name__=='__main__':unittest.main()

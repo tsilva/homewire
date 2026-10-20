@@ -458,35 +458,57 @@ infisical run --env=prod -- target/release/homewire --tcl .local/tcl.json call m
 infisical run --env=prod -- target/release/homewire --tcl .local/tcl.json call remote_key '{"entity":"media_player.tcl","key":"home"}'
 ```
 
+### TCL power and network standby
+
 MCP uses the same standard tools; writes require `--allow-control`. TCL has no
-additional legacy tools. `media_power` skips a matching fresh power state. Wake
-sends the absolute WAKEUP key once. Shutdown uses one POWER key only after the
-pinned session confirms the exact identity and an on state; some TCL firmware
-ignores the separate SLEEP key. The shutdown attempt is saved privately in
-`tcl.power.state.json` before sending. If off cannot be confirmed, another power
-toggle is blocked for 120 seconds, including after restart. A fresh confirmed
-off state clears that guard. The saved guard is tied to the configured device
-identity; invalid, nonprivate or mismatched state blocks opening the adapter.
-Failure to persist an attempt blocks the command. Raw power toggles remain
+additional legacy tools. `media_power` skips a matching fresh power state.
+By default, on sends one absolute WAKEUP key; off sends one POWER key only after
+the pinned session confirms the exact identity and an on state. Some firmware
+ignores SLEEP. Both directions persist their attempt privately in
+`tcl.power.state.json` before sending and verify on the same session. An
+unconfirmed attempt blocks another power operation for 120 seconds, including
+after restart. Only confirmation of the requested state clears it; an off
+reading cannot clear an uncertain on attempt. Legacy saved shutdown attempts
+remain supported. Invalid, nonprivate or mismatched state blocks opening the
+adapter, and failure to persist an attempt blocks control. Raw power keys remain
 unavailable through `remote_key`. DIGI retains absolute wake/sleep keys.
 
-Both TCL operations verify the reported result on the same session. An
-unreachable TV is unknown; standby must leave its remote service
-reachable for the WAKEUP key. On firmware that drops the IP services in standby,
-enable network standby in System > Power and energy > Standby mode and configure
-a separate [Wake-on-LAN target](#wake-on-lan) using the TV's verified network MAC
-and the sender's LAN broadcast destination. Send one `wake_on_lan` request, then
-read the media entity to confirm its identity and power. Packet transmission
-alone does not verify wake. Other TCL firmware may require Screenless service
-to keep the remote service reachable; confirm the setting and outcome on the
-actual TV across multiple standby cycles and realistic idle periods. One
-successful wake does not establish reliability. Controls never reconnect or
-replay after uncertain errors.
-Network and remote-service recovery can be delayed: an unavailable first status
-read after a magic packet means pending or unknown, rather than a failed wake.
-Use bounded later status reads to verify recovery; do not resend controls to
-compensate for an early timeout. Packet delivery and Cast availability alone
-do not establish that the screen is on.
+Optional fields under `adapters.tcl` support firmware-specific recovery:
+
+| Field | Behavior |
+| --- | --- |
+| `power_on_key` | `wakeup` (default) or `power`. The latter sends one state-checked POWER toggle, with the same persistent guard. |
+| `wake` | Object with verified unicast `mac`, UDP `wake_address` and `ready_seconds` (default 45, range 1–120). If the remote service is unreachable before any control, send one magic packet and attempt read-only recovery before the one power key. |
+| `cast_wake` | Object with independent `server_cert_sha256`, `port` (default 8009) and `timeout_seconds` (default 8, range 1–30). Uses the TV's configured host; no media URL or separate host is accepted. |
+
+Cast wake is **experimental and opt-in**. It first reads the pinned remote
+interface; identity errors abort. If that interface is unavailable or reports
+off, the independently pinned Cast interface must explicitly report standby.
+An active Cast receiver is left alone. A standby receiver launches the Default
+Media Receiver once, stopping an existing instance first if necessary; it never
+loads media. Only subsequent pinned Android TV power-on confirmation counts as
+success, within `wake.ready_seconds` or 45 seconds. This path takes precedence
+over magic packets and power keys and never falls back to another control after
+an uncertain result. No standby setting is changed automatically. Validate this
+option across standby cycles and idle periods on the actual TV before relying
+on it; simulated protocol checks do not establish firmware reliability.
+
+An integrated `wake` also advertises `tcl.tcl` through `wake_list`; invoking it
+uses the same bounded power-on operation. Do not duplicate its MAC in a generic
+[Wake-on-LAN target](#wake-on-lan). Generic targets remain available separately
+and cannot confirm wake.
+
+TCL power results include `requested_power`, `applied`, `verified`, `outcome`,
+`phase`, `command_sent`, `wake_packet_sent`, `cast_command_sent`, `status` and an
+optional bounded `error`. `outcome` is `confirmed`, `not_sent` or `unknown`.
+`command_sent` describes the remote power key and `cast_command_sent` describes
+Cast activation; either is null when write completion is uncertain. `applied`
+means an attempt was made, not that the screen changed. `verified:true` requires
+the pinned remote power report to match the request. When verification expires,
+report the request as incomplete. An unreachable TV, a sent packet or Cast
+availability alone never establishes screen power. Only read-side recovery is
+retried; device-changing writes are never replayed after transport errors.
+
 The remote keys, app-link launch and focused-field text settings described for
 DIGI below also apply; key/app/text delivery remains unverified. Normal commands
 never start pairing or silently replace a certificate pin. Roku/Fire TV remote
