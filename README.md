@@ -93,12 +93,13 @@ separate playback entity with absolute volume/mute, seeking and media URLs.
 Agents ask for screen confirmation after an unverified shutdown, distinguish the
 user's observation from adapter verification, and never automatically retry an
 uncertain power command when its guard expires.
-For TCL firmware that disconnects its remote service, test network standby with
-a configured [Wake-on-LAN target](docs/devices.md#wake-on-lan); some firmware needs
-Screenless standby. Verify power after each wake across multiple standby cycles;
-sending a packet alone is unverified.
-Wake can be delayed; an early timeout remains pending or unknown until a later
-status read confirms power. Do not repeat the control to compensate.
+TCL power results distinguish confirmed state, an unsent command and an uncertain
+attempt. Optional [integrated wake settings](docs/devices.md#tcl-power-and-network-standby)
+keep recovery and bounded verification inside one power-on operation. Cast wake
+is experimental and disabled by default; validate it on the actual firmware
+before relying on it. Packet delivery or Cast availability alone never proves
+the screen is on. Generated agent instructions keep short follow-ups focused on
+the selected device and report incomplete requests without reviving unrelated tasks.
 
 ## Agents and automation
 

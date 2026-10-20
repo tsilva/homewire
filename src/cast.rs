@@ -44,6 +44,56 @@ fn port() -> u16 {
 fn timeout() -> u64 {
     8
 }
+/// A second, independently pinned interface on the same physical TV. This
+/// contains no media URL and cannot target a host other than its TV adapter.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Wake {
+    server_cert_sha256: String,
+    #[serde(default = "port")]
+    port: u16,
+    #[serde(default = "timeout")]
+    timeout_seconds: u64,
+}
+pub(crate) struct WakeFailure {
+    pub command_sent: Option<bool>,
+    pub cause: Box<dyn std::error::Error + Send + Sync>,
+}
+impl Wake {
+    pub(crate) fn validate(&self) -> Result<()> {
+        media::valid_endpoint(self.port, None, self.timeout_seconds)?;
+        media::hex::<32>(&self.server_cert_sha256).map(|_| ())
+    }
+    pub(crate) fn activate(&self, host: IpAddr) -> std::result::Result<bool, WakeFailure> {
+        let config = Config {
+            name: "tv_wake".into(),
+            host,
+            server_cert_sha256: self.server_cert_sha256.clone(),
+            port: self.port,
+            timeout_seconds: self.timeout_seconds,
+            connect: None,
+        };
+        let mut sent = Some(false);
+        (|| -> Result<bool> {
+            let mut channel = Channel::open(&config)?;
+            let receiver = channel.receiver()?;
+            // Do not interrupt an already active receiver merely because its
+            // Android remote interface is temporarily unavailable.
+            if receiver["isStandBy"].as_bool() == Some(false) {
+                return Ok(false);
+            }
+            if receiver["isStandBy"].as_bool() != Some(true) {
+                return Err(error("Cast wake requires an explicit standby reading"));
+            }
+            channel.activate_default(&receiver, &mut sent)?;
+            Ok(true)
+        })()
+        .map_err(|cause| WakeFailure {
+            command_sent: sent,
+            cause,
+        })
+    }
+}
 pub struct Manager {
     config: Config,
     _lock: File,
@@ -215,6 +265,47 @@ impl Channel {
         }
         Ok(response["status"].take())
     }
+    fn activate_default(&mut self, receiver: &Value, sent: &mut Option<bool>) -> Result<Value> {
+        // A registered background receiver may not become foreground on LAUNCH.
+        // End only that default receiver, confirm removal, and launch once.
+        if let Some(app) = receiver["applications"]
+            .as_array()
+            .and_then(|a| a.iter().find(|a| a["appId"] == "CC1AD845"))
+        {
+            let session = app["sessionId"]
+                .as_str()
+                .filter(|s| !s.is_empty() && s.len() <= 128)
+                .ok_or_else(|| {
+                    error("Missing bounded default Cast receiver session; no replacement sent")
+                })?;
+            *sent = None;
+            let stopped = self.call(RECEIVER, "receiver-0", json!({"type":"STOP","sessionId":session}))
+                .map_err(|failure| error(format!("Cast receiver stop attempted once; outcome unknown; no launch or load sent; do not replay: {failure}")))?;
+            *sent = Some(true);
+            if !stopped["status"].is_object()
+                || !stopped["status"].get("applications").is_none_or(|apps| {
+                    apps.as_array()
+                        .is_some_and(|a| a.iter().all(|a| a["appId"] != "CC1AD845"))
+                })
+            {
+                return Err(error(
+                    "Default Cast receiver stop not confirmed; no launch or load sent; do not replay",
+                ));
+            }
+        }
+        *sent = None;
+        let receiver = self.call(
+            RECEIVER,
+            "receiver-0",
+            json!({"type":"LAUNCH","appId":"CC1AD845"}),
+        )?["status"]
+            .take();
+        *sent = Some(true);
+        if Self::transport(&receiver).is_none() {
+            return Err(error("Default Cast media receiver did not launch"));
+        }
+        Ok(receiver)
+    }
     fn transport(status: &Value) -> Option<&str> {
         status["applications"]
             .as_array()?
@@ -285,39 +376,7 @@ impl Manager {
             if !crate::playback::valid_play(m) {
                 return Err(error("Invalid media request"));
             }
-            // A receiver may remain registered behind the TV launcher. LAUNCH
-            // alone can reuse that hidden session without bringing video back.
-            // URL replacement deliberately ends only the default media receiver
-            // session, verifies its removal, then launches one fresh instance.
-            if let Some(app) = receiver["applications"]
-                .as_array()
-                .and_then(|a| a.iter().find(|a| a["appId"] == "CC1AD845"))
-            {
-                let session = app["sessionId"]
-                    .as_str()
-                    .filter(|s| !s.is_empty() && s.len() <= 128)
-                    .ok_or_else(|| {
-                        error("Missing bounded default Cast receiver session; no replacement sent")
-                    })?;
-                let stopped = c.call(RECEIVER, "receiver-0", json!({"type":"STOP","sessionId":session}))
-                    .map_err(|failure| error(format!("Cast receiver stop attempted once; outcome unknown; no launch or load sent; do not replay: {failure}")))?;
-                if !stopped["status"].is_object()
-                    || !stopped["status"].get("applications").is_none_or(|apps| {
-                        apps.as_array()
-                            .is_some_and(|a| a.iter().all(|a| a["appId"] != "CC1AD845"))
-                    })
-                {
-                    return Err(error(
-                        "Default Cast receiver stop not confirmed; no launch or load sent; do not replay",
-                    ));
-                }
-            }
-            let receiver = c.call(
-                RECEIVER,
-                "receiver-0",
-                json!({"type":"LAUNCH","appId":"CC1AD845"}),
-            )?["status"]
-                .take();
+            let receiver = c.activate_default(&receiver, &mut Some(false))?;
             let transport = Channel::transport(&receiver)
                 .ok_or_else(|| error("Default Cast media receiver did not launch"))?;
             c.send(CONNECTION, transport, json!({"type":"CONNECT","origin":{}}))?;
@@ -417,4 +476,4 @@ impl Adapter for Manager {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
