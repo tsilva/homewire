@@ -1570,6 +1570,175 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn tcl_cast_retries_precontrol_connections_until_the_service_returns() -> Result<()> {
+        let temp = support::Directory::new()?;
+        let (address, remote_worker, pin) = server_control(
+            true,
+            Some(TestControl::NoKey),
+            "Smart TV",
+            "TCL",
+            true,
+            true,
+        )?;
+        let reserve = TcpListener::bind("127.0.0.1:0")?;
+        let cast_address = reserve.local_addr()?;
+        drop(reserve);
+        // A refused connection is a transient service outage, not permission to
+        // repeat a device-changing command. Bring the fake service up later.
+        let worker = thread::spawn(move || -> Result<()> {
+            thread::sleep(Duration::from_millis(200));
+            let (_, worker, _) = crate::cast::tests::server_at(
+                Some(json!({"action":"wake","standby":true})),
+                false,
+                cast_address,
+            )?;
+            worker.join().expect("Cast server")
+        });
+        let path = tcl_config(&temp, address, pin.clone())?;
+        let mut value: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+        value["host"] = json!("127.0.0.1");
+        value["cast_wake"] = json!({"server_cert_sha256":pin,
+            "port":cast_address.port(),"timeout_seconds":2});
+        temp.config("tcl.json", &value)?;
+        let result = power::cast_wake(&mut TclManager::open(&path)?, power::Outcome::new(true))?;
+        assert_eq!(result["verified"], true);
+        assert_eq!(result["cast_command_sent"], true);
+        assert_eq!(result["wake_packet_sent"], false);
+        assert_eq!(result["command_sent"], false);
+        worker.join().expect("delayed Cast service")?;
+        remote_worker.join().expect("remote server")?;
+        Ok(())
+    }
+    #[test]
+    fn tcl_cast_outage_sends_one_network_wake_and_skips_launch_if_already_on() -> Result<()> {
+        use std::net::UdpSocket;
+        let temp = support::Directory::new()?;
+        let (address, worker, pin) = server_control(
+            true,
+            Some(TestControl::NoKey),
+            "Smart TV",
+            "TCL",
+            true,
+            true,
+        )?;
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let cast_address = listener.local_addr()?;
+        drop(listener);
+        let udp = UdpSocket::bind("127.0.0.1:0")?;
+        udp.set_read_timeout(Some(Duration::from_millis(100)))?;
+        let path = tcl_config(&temp, address, pin.clone())?;
+        let mut value: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+        value["host"] = json!("127.0.0.1");
+        value["cast_wake"] = json!({"server_cert_sha256":pin,
+            "port":cast_address.port(),"timeout_seconds":2});
+        value["wake"] = json!({"mac":"02:00:00:00:00:40",
+            "wake_address":udp.local_addr()?,"ready_seconds":2});
+        temp.config("tcl.json", &value)?;
+        let result = power::cast_wake(&mut TclManager::open(&path)?, power::Outcome::new(true))?;
+        assert_eq!(result["verified"], true);
+        assert_eq!(result["wake_packet_sent"], true);
+        assert_eq!(result["cast_command_sent"], false);
+        assert_eq!(result["command_sent"], false);
+        let mut bytes = [0; 128];
+        assert_eq!(udp.recv(&mut bytes)?, 102);
+        assert!(
+            udp.recv(&mut bytes).is_err(),
+            "network wake must not be replayed"
+        );
+        worker.join().expect("remote server")?;
+        Ok(())
+    }
+    #[test]
+    fn tcl_cast_lost_launch_reply_is_verified_without_replay_or_network_fallback() -> Result<()> {
+        use std::net::UdpSocket;
+        let temp = support::Directory::new()?;
+        let (address, remote_worker, pin) = server_control(
+            true,
+            Some(TestControl::NoKey),
+            "Smart TV",
+            "TCL",
+            true,
+            true,
+        )?;
+        let (cast_address, cast_worker, cast_pin) = crate::cast::tests::server(
+            Some(json!({"action":"wake","standby":true,"disconnect_launch":true})),
+            false,
+        )?;
+        let udp = UdpSocket::bind("127.0.0.1:0")?;
+        udp.set_read_timeout(Some(Duration::from_millis(100)))?;
+        let path = tcl_config(&temp, address, pin)?;
+        let mut value: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+        value["host"] = json!("127.0.0.1");
+        value["cast_wake"] = json!({"server_cert_sha256":cast_pin,
+            "port":cast_address.port(),"timeout_seconds":2});
+        value["wake"] = json!({"mac":"02:00:00:00:00:40",
+            "wake_address":udp.local_addr()?,"ready_seconds":2});
+        temp.config("tcl.json", &value)?;
+        let result = power::cast_wake(&mut TclManager::open(&path)?, power::Outcome::new(true))?;
+        assert_eq!(result["verified"], true);
+        assert_eq!(result["outcome"], "confirmed");
+        assert!(result["cast_command_sent"].is_null());
+        assert_eq!(result["wake_packet_sent"], false);
+        assert_eq!(result["command_sent"], false);
+        let mut bytes = [0; 128];
+        assert!(udp.recv(&mut bytes).is_err());
+        cast_worker.join().expect("Cast server")?;
+        remote_worker.join().expect("remote server")?;
+        Ok(())
+    }
+    #[test]
+    fn tcl_cast_identity_protocol_and_uncertain_launch_errors_never_trigger_network_fallback()
+    -> Result<()> {
+        use std::net::UdpSocket;
+        for mode in ["pin", "standby", "launch"] {
+            let temp = support::Directory::new()?;
+            let mut expected = json!({"action":"wake","standby":true});
+            if mode == "standby" {
+                expected["omit_standby"] = json!(true);
+            }
+            if mode == "launch" {
+                expected["disconnect_launch"] = json!(true);
+            }
+            let (address, worker, pin) = crate::cast::tests::server(Some(expected), false)?;
+            let udp = UdpSocket::bind("127.0.0.1:0")?;
+            udp.set_read_timeout(Some(Duration::from_millis(100)))?;
+            let path = tcl_config(&temp, address, pin.clone())?;
+            let mut value: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+            value["host"] = json!("127.0.0.1");
+            value["cast_wake"] = json!({"server_cert_sha256":if mode=="pin" {"00".repeat(32)} else {pin},
+                "port":address.port(),"timeout_seconds":2});
+            value["wake"] = json!({"mac":"02:00:00:00:00:40",
+                "wake_address":udp.local_addr()?,"ready_seconds":1});
+            temp.config("tcl.json", &value)?;
+            let mut manager = TclManager::open(&path)?;
+            let result = power::cast_wake(&mut manager, power::Outcome::new(true))?;
+            assert_eq!(result["verified"], false);
+            assert_eq!(result["wake_packet_sent"], false);
+            assert_eq!(result["command_sent"], false);
+            let mut bytes = [0; 128];
+            assert!(
+                udp.recv(&mut bytes).is_err(),
+                "no network fallback after {mode}"
+            );
+            let state: ShutdownMemory =
+                serde_json::from_slice(&std::fs::read(path.with_extension("power.state.json"))?)?;
+            assert_eq!(state.attempt.is_some(), mode == "launch");
+            if mode == "launch" {
+                assert!(result["cast_command_sent"].is_null());
+                assert!(power::cast_wake(&mut manager, power::Outcome::new(true)).is_err());
+            } else {
+                assert_eq!(result["cast_command_sent"], false);
+            }
+            let served = worker.join().expect("Cast server");
+            if mode == "pin" {
+                assert!(served.is_err());
+            } else {
+                served?;
+            }
+        }
+        Ok(())
+    }
+    #[test]
     fn tcl_shutdown_persistence_failure_sends_no_key() -> Result<()> {
         let temp = support::Directory::new()?;
         let (address, worker, pin) = server_control(
