@@ -30,6 +30,13 @@ pub(crate) fn server(
     expected: Option<Value>,
     has_media: bool,
 ) -> Result<(SocketAddr, thread::JoinHandle<Result<()>>, String)> {
+    server_at(expected, has_media, "127.0.0.1:0".parse()?)
+}
+pub(crate) fn server_at(
+    expected: Option<Value>,
+    has_media: bool,
+    address: SocketAddr,
+) -> Result<(SocketAddr, thread::JoinHandle<Result<()>>, String)> {
     let certificate =
         CertificateDer::from_pem_slice(include_bytes!("../../tests/fixtures/media/test-cert.pem"))?;
     let key =
@@ -43,7 +50,7 @@ pub(crate) fn server(
             .with_safe_default_protocol_versions()?
             .with_no_client_auth()
             .with_single_cert(vec![certificate], key)?;
-    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let listener = TcpListener::bind(address)?;
     let address = listener.local_addr()?;
     let worker = thread::spawn(move || -> Result<()> {
         let (socket, _) = listener.accept()?;
@@ -118,6 +125,14 @@ pub(crate) fn server(
                     "existing default receiver must be stopped before replacing URL"
                 );
                 launched = true;
+                if expected
+                    .as_ref()
+                    .is_some_and(|e| e["disconnect_launch"] == true)
+                {
+                    // The launch was consumed, but its acknowledgement is lost.
+                    // A reconnect/replay would produce a second actuation.
+                    return Ok(());
+                }
                 if expected.as_ref().is_some_and(|e| e["action"] == "wake") {
                     control_count += 1;
                     done = true;
@@ -252,6 +267,28 @@ pub(crate) fn server(
 }
 
 #[test]
+fn cast_wake_connection_and_tls_obey_the_outer_recovery_deadline() -> Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let address = listener.local_addr()?;
+    let worker = thread::spawn(move || -> Result<()> {
+        let (_socket, _) = listener.accept()?;
+        thread::sleep(Duration::from_millis(250));
+        Ok(())
+    });
+    let wake: Wake = serde_json::from_value(json!({"server_cert_sha256":"00".repeat(32),
+        "port":address.port(),"timeout_seconds":8}))?;
+    let started = Instant::now();
+    let failure = match wake.activate(address.ip(), started + Duration::from_millis(80)) {
+        Ok(_) => panic!("stalled TLS must fail"),
+        Err(failure) => failure,
+    };
+    assert_eq!(failure.command_sent, Some(false));
+    assert!(started.elapsed() < Duration::from_secs(1));
+    worker.join().expect("stalled TLS server")?;
+    Ok(())
+}
+
+#[test]
 fn cast_wake_launches_once_without_loading_content_and_preserves_active_apps() -> Result<()> {
     for (standby, has_media) in [(true, false), (true, true), (false, false), (false, true)] {
         let (address, worker, pin) =
@@ -260,7 +297,9 @@ fn cast_wake_launches_once_without_loading_content_and_preserves_active_apps() -
             json!({"server_cert_sha256":pin,"port":address.port(),"timeout_seconds":2}),
         )?;
         wake.validate()?;
-        let activated = wake.activate(address.ip()).map_err(|e| e.cause)?;
+        let activated = wake
+            .activate(address.ip(), Instant::now() + Duration::from_secs(3))
+            .map_err(|e| e.cause)?;
         assert_eq!(activated, standby);
         worker.join().expect("Cast wake server")?;
     }
@@ -277,7 +316,7 @@ fn cast_wake_rejects_unknown_standby_and_does_not_launch_after_failed_stop() -> 
         let wake: Wake = serde_json::from_value(
             json!({"server_cert_sha256":pin,"port":address.port(),"timeout_seconds":2}),
         )?;
-        let failure = match wake.activate(address.ip()) {
+        let failure = match wake.activate(address.ip(), Instant::now() + Duration::from_secs(3)) {
             Ok(_) => panic!("wake must fail"),
             Err(e) => e,
         };

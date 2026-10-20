@@ -64,7 +64,11 @@ impl Wake {
         media::valid_endpoint(self.port, None, self.timeout_seconds)?;
         media::hex::<32>(&self.server_cert_sha256).map(|_| ())
     }
-    pub(crate) fn activate(&self, host: IpAddr) -> std::result::Result<bool, WakeFailure> {
+    pub(crate) fn activate(
+        &self,
+        host: IpAddr,
+        deadline: Instant,
+    ) -> std::result::Result<bool, WakeFailure> {
         let config = Config {
             name: "tv_wake".into(),
             host,
@@ -75,7 +79,7 @@ impl Wake {
         };
         let mut sent = Some(false);
         (|| -> Result<bool> {
-            let mut channel = Channel::open(&config)?;
+            let mut channel = Channel::open_until(&config, deadline)?;
             let receiver = channel.receiver()?;
             // Do not interrupt an already active receiver merely because its
             // Android remote interface is temporarily unavailable.
@@ -104,6 +108,12 @@ struct Channel {
 }
 impl Channel {
     fn open(config: &Config) -> Result<Self> {
+        Self::open_until(
+            config,
+            Instant::now() + Duration::from_secs(config.timeout_seconds),
+        )
+    }
+    fn open_until(config: &Config, deadline: Instant) -> Result<Self> {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let verifier = Arc::new(Pinned {
             fingerprint: media::hex::<32>(&config.server_cert_sha256)?,
@@ -123,7 +133,7 @@ impl Channel {
             config
                 .connect
                 .unwrap_or(SocketAddr::new(config.host, config.port)),
-            Instant::now() + Duration::from_secs(config.timeout_seconds),
+            deadline.min(Instant::now() + Duration::from_secs(config.timeout_seconds)),
         )?;
         let mut channel = Self {
             stream: StreamOwned::new(conn, socket),

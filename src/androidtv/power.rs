@@ -238,27 +238,92 @@ pub(super) fn cast_wake<const TCL: bool>(
         .cast_wake
         .as_ref()
         .expect("configured Cast wake");
-    match wake.activate(manager.config.host) {
-        Ok(sent) => {
-            result.cast_command_sent = Some(sent);
-            result.applied = sent;
-            if !sent {
-                guard.cancel_unsent()?;
+    // The TV may temporarily drop both TCP services while entering standby.
+    // Share one total recovery/activation/verification deadline. Only failures
+    // known to precede any Cast STOP/LAUNCH may reconnect or send network wake.
+    let ready = manager.config.wake.as_ref().map_or(45, |w| w.ready_seconds);
+    let deadline = Instant::now() + Duration::from_secs(ready);
+    let timeout = Duration::from_secs(manager.config.timeout_seconds);
+    loop {
+        result.phase = "cast_activation";
+        match wake.activate(manager.config.host, deadline) {
+            Ok(sent) => {
+                result.cast_command_sent = Some(sent);
+                result.applied |= sent;
+                break;
+            }
+            Err(failure) => {
+                result.cast_command_sent = failure.command_sent;
+                result.applied |= failure.command_sent != Some(false);
+                let recoverable =
+                    failure.command_sent == Some(false) && unavailable(failure.cause.as_ref());
+                if failure.command_sent != Some(false) && unavailable(failure.cause.as_ref()) {
+                    // Standby exit may tear down Cast before LAUNCH replies.
+                    // Verify the pinned power on read-only connections; never
+                    // resend activation or substitute a network wake here.
+                    break;
+                }
+                if !recoverable || Instant::now() >= deadline {
+                    result.outcome = if result.applied {
+                        "unknown"
+                    } else {
+                        "not_sent"
+                    };
+                    if !result.applied {
+                        guard.cancel_unsent()?;
+                    }
+                    return result.failure(failure.cause.as_ref());
+                }
+                if let Some(network) = manager.config.wake.as_ref()
+                    && !result.wake_packet_sent
+                {
+                    result.phase = "network_wake";
+                    result.applied = true;
+                    result.outcome = "unknown";
+                    if let Err(failure) =
+                        crate::wol::send(crate::wol::mac_bytes(&network.mac)?, network.wake_address)
+                    {
+                        return result.failure(failure.as_ref());
+                    }
+                    result.wake_packet_sent = true;
+                }
+                result.phase = "cast_recovery";
+                // A network wake may already have powered the TV on. Check its
+                // pinned identity/state before considering a Cast launch.
+                if result.wake_packet_sent {
+                    match manager
+                        .config
+                        .remote::<TCL>(deadline.min(Instant::now() + timeout))
+                    {
+                        Ok(mut remote) if remote.status.as_ref().is_some_and(|s| s.power) => {
+                            guard.confirmed(true)?;
+                            return result.confirmed(remote.status.take());
+                        }
+                        Ok(_) => {}
+                        Err(failure) if unavailable(failure.as_ref()) => {}
+                        Err(failure) => return result.failure(failure.as_ref()),
+                    }
+                }
+                if Instant::now() >= deadline {
+                    result.outcome = if result.applied {
+                        "unknown"
+                    } else {
+                        "not_sent"
+                    };
+                    if !result.applied {
+                        guard.cancel_unsent()?;
+                    }
+                    return result
+                        .failure(&"TCL Cast recovery was not confirmed before its deadline");
+                }
+                std::thread::sleep(
+                    Duration::from_secs(2).min(deadline.saturating_duration_since(Instant::now())),
+                );
             }
         }
-        Err(failure) => {
-            result.cast_command_sent = failure.command_sent;
-            result.applied = failure.command_sent != Some(false);
-            result.outcome = if result.applied {
-                "unknown"
-            } else {
-                "not_sent"
-            };
-            if !result.applied {
-                guard.cancel_unsent()?;
-            }
-            return result.failure(failure.cause.as_ref());
-        }
+    }
+    if !result.applied {
+        guard.cancel_unsent()?;
     }
     result.phase = "verify_cast_wake";
     result.outcome = if result.applied {
@@ -266,9 +331,6 @@ pub(super) fn cast_wake<const TCL: bool>(
     } else {
         "not_sent"
     };
-    let ready = manager.config.wake.as_ref().map_or(45, |w| w.ready_seconds);
-    let deadline = Instant::now() + Duration::from_secs(ready);
-    let timeout = Duration::from_secs(manager.config.timeout_seconds);
     // Only read-side connections are retried. No LAUNCH, magic packet or key
     // is repeated, and Cast's own flags never substitute for the pinned power.
     loop {

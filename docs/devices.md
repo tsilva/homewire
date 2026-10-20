@@ -486,10 +486,23 @@ interface; identity errors abort. If that interface is unavailable or reports
 off, the independently pinned Cast interface must explicitly report standby.
 An active Cast receiver is left alone. A standby receiver launches the Default
 Media Receiver once, stopping an existing instance first if necessary; it never
-loads media. Only subsequent pinned Android TV power-on confirmation counts as
-success, within `wake.ready_seconds` or 45 seconds. This path takes precedence
-over magic packets and power keys and never falls back to another control after
-an uncertain result. No standby setting is changed automatically. Validate this
+loads media. Connection failures known to precede any STOP/LAUNCH receive
+bounded read-side recovery. If `wake` is also configured, one magic packet may
+restore connectivity; pinned remote power is checked before considering a Cast
+launch. If that packet already woke the TV, no Cast launch is sent. Pin,
+identity and protocol errors never trigger this fallback, and any attempted
+STOP/LAUNCH ends connection retries and network fallback, even if its reply is
+lost. An already active receiver is never interrupted to compensate for a
+missing remote report.
+If a Cast activation reply is lost, remaining time is used only for pinned
+remote power verification. A confirmed on report completes the request even
+when `cast_command_sent` remains null; an unconfirmed request stays guarded.
+
+Recovery, activation and subsequent pinned Android TV power-on confirmation
+share one total deadline of `wake.ready_seconds` or 45 seconds, including each
+Cast TCP/TLS exchange. An early connection timeout is therefore not the end of
+the operation. Only the remote power confirmation counts as success. This path
+never sends a remote power key. No standby setting is changed automatically. Validate this
 option across standby cycles and idle periods on the actual TV before relying
 on it; simulated protocol checks do not establish firmware reliability.
 
@@ -507,7 +520,11 @@ means an attempt was made, not that the screen changed. `verified:true` requires
 the pinned remote power report to match the request. When verification expires,
 report the request as incomplete. An unreachable TV, a sent packet or Cast
 availability alone never establishes screen power. Only read-side recovery is
-retried; device-changing writes are never replayed after transport errors.
+retried; device-changing writes are never replayed after transport errors. The
+`cast_recovery` phase identifies transient connectivity recovery. A sent magic
+packet without power confirmation remains an unknown attempt protected by the
+persistent guard; a recovery timeout before any device-changing write is
+`not_sent` and does not leave a new attempt guard behind.
 
 The remote keys, app-link launch and focused-field text settings described for
 DIGI below also apply; key/app/text delivery remains unverified. Normal commands

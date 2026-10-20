@@ -96,7 +96,9 @@ uncertain power command when its guard expires.
 TCL power results distinguish confirmed state, an unsent command and an uncertain
 attempt. Optional [integrated wake settings](docs/devices.md#tcl-power-and-network-standby)
 keep recovery and bounded verification inside one power-on operation. Cast wake
-is experimental and disabled by default; validate it on the actual firmware
+can recover from a transient standby connection loss and optionally send one
+configured network-wake packet before Cast activation. It never replays an
+uncertain activation. It is opt-in; validate it on the actual firmware
 before relying on it. Packet delivery or Cast availability alone never proves
 the screen is on. Generated agent instructions keep short follow-ups focused on
 the selected device and report incomplete requests without reviving unrelated tasks.

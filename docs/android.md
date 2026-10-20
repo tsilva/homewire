@@ -242,6 +242,9 @@ grants. Generic targets send one packet without verifying wake; generated agent
 instructions require a fresh media status before claiming the TV is on and
 prohibit automatic replay or substituting wake after an uncertain power command.
 Configured TCL integrated recovery stays inside one `media_power` operation.
+It can reconnect before any Cast activation and use one configured network-wake
+packet, then verify power within the same bounded operation. The agent must not
+duplicate that recovery with separate controls after a timeout.
 The agent inspects its structured verification result instead of treating a
 successful tool call as a successful power change. Expired verification is an
 incomplete request; instructions prohibit invented recovery times and promises
