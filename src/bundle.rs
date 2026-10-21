@@ -8,7 +8,6 @@ use crate::{
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use std::{
-    fs::File,
     net::SocketAddr,
     path::{Path, PathBuf},
 };
@@ -31,7 +30,7 @@ struct Document {
 pub struct Bundle {
     path: PathBuf,
     document: Document,
-    lock: File,
+    lock: crate::config::FileLock,
 }
 impl Bundle {
     /// Detect the legacy Meaco schema without resolving secrets twice.
@@ -190,7 +189,7 @@ impl Bundle {
             .transpose()
     }
     /// Drop all temporary JSON while keeping exclusive root ownership.
-    pub fn into_lock(self) -> File {
+    pub fn into_lock(self) -> crate::config::FileLock {
         self.lock
     }
 }

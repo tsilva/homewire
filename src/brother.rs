@@ -8,7 +8,6 @@ use crate::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
-    fs::File,
     net::{IpAddr, SocketAddr, UdpSocket},
     path::Path,
     time::Duration,
@@ -37,7 +36,7 @@ fn timeout() -> u64 {
 }
 pub struct Manager {
     config: Config,
-    _lock: File,
+    _lock: crate::config::FileLock,
 }
 fn tlv(tag: u8, body: &[u8]) -> Vec<u8> {
     let mut v = vec![tag];

@@ -5,7 +5,6 @@ use ring::signature::{ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
-    fs::File,
     net::{SocketAddr, UdpSocket},
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -96,7 +95,7 @@ pub struct Manager {
     mac: [u8; 6],
     wake_address: SocketAddr,
     timeout: Duration,
-    _lock: File,
+    _lock: crate::config::FileLock,
 }
 impl Manager {
     pub fn validate_shutdown(&self) -> Result<Value> {
@@ -535,6 +534,21 @@ mod tests {
     use super::*;
     fn client(address: SocketAddr) -> Manager {
         let (server, signer, _, _) = fixture();
+        let mut nonce = [0; 8];
+        getrandom::getrandom(&mut nonce).expect("nonce");
+        let lock_path =
+            std::env::temp_dir().join(format!("hw-computer-{:016x}", u64::from_ne_bytes(nonce)));
+        let lock = crate::config::lock_file(
+            crate::config::private_options()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(&lock_path)
+                .expect("lock file"),
+            "test fixture lock",
+        )
+        .expect("lock");
+        std::fs::remove_file(lock_path).expect("remove fixture lock");
         Manager {
             name: "workstation".into(),
             address,
@@ -549,7 +563,7 @@ mod tests {
             mac: [2, 0, 0, 0, 0, 1],
             wake_address: "127.0.0.1:9".parse().expect("wake"),
             timeout: Duration::from_secs(1),
-            _lock: File::open(std::env::current_exe().expect("test binary")).expect("file"),
+            _lock: lock,
         }
     }
     #[test]

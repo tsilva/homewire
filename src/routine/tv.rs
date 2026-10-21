@@ -8,7 +8,6 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    fs::File,
     path::{Path, PathBuf},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -64,7 +63,7 @@ pub struct Manager {
     path: PathBuf,
     memory: Memory,
     timings: Timings,
-    _lock: File,
+    _lock: crate::config::FileLock,
 }
 // Internal seam for real I/O and simulated sequences; no dynamic dispatch.
 trait Control {

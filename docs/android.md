@@ -34,12 +34,10 @@ installation without a profile retains the primary-user Termux layout.
   listener. IPv6 remains denied by the sandbox. Private/special network denials
   remain compiled security policy; the profile does not allow arbitrary LAN rules.
 
-The profile is bounded to 8192 bytes and read by host-side setup tools. Generated
-launch scripts, firewall rules, MCP URL and native probe arguments use the same
-validated values. Homewire still loads only its own typed adapter settings once
-at startup. Device credentials stay in their existing configs, not this profile.
-On the phone the resolved profile is retained as a root-only policy snapshot.
-Private profiles and automation settings must not be committed to Git.
+The host reads this profile (maximum 8192 bytes) to generate consistent paths,
+launchers, firewall rules, MCP URL and probe arguments. A root-only policy snapshot
+is retained on the phone. Keep profiles private; credentials stay in adapter
+configs. Homewire discards host-only deployment data after startup.
 
 Install and update validate the prepared policy through the pinned ZeroClaw CLI
 before changing the active policy; an update fails before stopping the agent if
@@ -52,19 +50,16 @@ switching or restoring permissive grants. Changing DNS/provider/tool subsets
 uses the normal sandbox update. Alias changes require the selected agent to
 already exist in the active policy, and its workspace/mount is prepared by update.
 
-For existing configs, explicitly add Meaco presets/schedule, curve/outside target
-to any enabled light automation, and TV timings before installing the new binary.
-Preserve current schedule flags and HA ownership. Back up settings, replace private
-files atomically and restart the owner to load changes; no hot reload or control
-replay occurs. Restart isolation through its operator helper to remount policy.
-
+Before upgrading older schemas, explicitly configure Meaco presets/schedule,
+light curves/outside targets and TV timings as needed. Back up and replace private
+files atomically, preserve saved flags and HA ownership, then restart the owner.
+Isolation policy changes require the operator helper to remount policy.
 
 Host requirements: ADB, Python 3.11+, rustup with Rust 1.95.0 and
 `aarch64-linux-android` installed, and Android NDK **30.0.16248370**. Install the
 Rust target with `rustup target add --toolchain 1.95.0 aarch64-linux-android`.
 Set `HOMEWIRE_NDK` to the extracted NDK directory. Build scripts accept macOS
-and Linux hosts and use Android API 28; this is an Android/Bionic executable,
-not a generic Linux or macOS binary. NDK host tools run only on the build host.
+and Linux hosts and use Android API 28; the output is an Android/Bionic executable.
 
 ```sh
 scripts/android/build.sh
@@ -80,8 +75,7 @@ python3 scripts/android/phone.py --config .local/home.json --serial "$HOMEWIRE_A
 
 Set `HOMEWIRE_ADB_SERIAL` to the target shown by `adb devices` and choose an existing
 agent alias. Unlock Android before installation or verification after a reboot.
-The Python script runs on the host, never on the deployed runtime. It requires the installed
-Termux app to permit `run-as com.termux` and already have `termux-services` with a
+The host Python helper requires Termux to permit `run-as com.termux` and already have `termux-services` with a
 running supervisor. It fails early without that access; arbitrary release Termux
 installations may require a separate SSH/root installation route. Homewire itself
 runs unprivileged as Termux's user. Root is not a runtime requirement.
@@ -92,13 +86,10 @@ API level and tool versions.
 Installer compares host and phone hashes and checks the executable before
 switching the active version. Executables live in `~/homewire/releases/HASH/`;
 `current` and `previous` links select versions. Configs, state and locks stay in
-`~/homewire/config/`, independently of executable updates. This is a local build
-and installation procedure, not a package publication or GitHub Release workflow.
+`~/homewire/config/`, independently of executable updates.
 
-The migration helper, file transfer allowlist and legacy launcher share
-`scripts/android/catalog.json`; Rust tests check it against the compiled catalog.
-Legacy hardware inputs include `wol.json` and `computer.json`. Migrate optional
-`computer-routine.json` into unified configuration to enable computer sequencing.
+Migration/transfers use `scripts/android/catalog.json`, checked against the Rust
+catalog. Migrate optional `computer-routine.json` for computer sequencing.
 
 `--config` imports one runtime `home.json` plus known certificate/key files;
 the host-only deployment block is omitted. Legacy `--configs` imports known separate files;
@@ -110,8 +101,7 @@ its token and exact tool scope remain unchanged. An explicit endpoint overrides 
 and removal of the API service removes the frontend. Certificate
 and TV child paths should be relative to the config directory. Subsequent installs
 use a legacy deployment-only profile and omit `--configs` to retain target configs.
-With unified `--config`, installation also updates runtime settings. A TV config owns its Samsung, DIGI and entire plug
-manager, so the generated service does not load those separately.
+With unified `--config`, installation also updates runtime settings.
 
 The installer writes an enabled `termux-services` service at
 `$PREFIX/var/service/homewire`. It waits for shutdown, removes the stale socket,
@@ -138,9 +128,8 @@ that bundle only to the selected existing agent. It preserves other config value
 compares the original config before writing, keeps a `config.toml.before-homewire`
 backup and restarts ZeroClaw to pick up the grant. Repeating the command is a no-op
 when already configured; differing existing Homewire definitions fail for review.
-The server launches the same executable as `bridge` with absolute paths and a
-300-second tool timeout. Tools appear as `homewire__entity_list`, etc. A working
-model provider is separately required for agent inference.
+The server launches `bridge` with absolute paths and a 300-second tool timeout.
+Tools appear as `homewire__entity_list`, etc.
 
 Termux:Boot can start the existing service supervisor from `~/.termux/boot/`.
 Open the Boot app once after installation; its script can acquire a wake lock and
@@ -203,53 +192,38 @@ no agent-administration grant. Existing peer IDs, channel enablement, paired
 clients and encrypted model keys are preserved. Installation does not enable
 Telegram or send messages; validate delivery separately when it is enabled.
 
-The trusted local assistant gateway allows explicitly selected Homewire tools; discovery
-omits tools whose adapters are absent. It cannot call
-`entity_configure`. Telegram can use these read tools: `entity_list`,
-`entity_status`, `entity_options`, `routine_list`, `routine_plan`, `alert_list`,
-`history_series`, `history_query`, `weather_status`, `shopping_list`, `radio_search`,
-`tts_media` and `wake_list`. With no control grant it cannot change devices, run routines,
-play media or edit shopping items. Supported opt-in write tools are `light_set`,
-`switch_set`, `media_power`, `remote_key`, `media_launch`, `media_text`, `routine_run`, `media_play`,
-`media_command`, `shopping_update` and `wake_on_lan`; each must also be in the agent's tool scope.
-Grants apply to whole tools, so `switch_set` permits all eligible configured
-switches, with Homewire's identity checks and device guards still enforced.
-`media_launch` and `media_text` are limited to media remotes advertising app/text
-support. They do not grant `entity_configure`. Link/text delivery is unverified;
-never automatically replay a failed or uncertain control or claim playback from
-delivery alone. Generated instructions ask for screen confirmation after an
-unverified shutdown and attribute visual confirmation to the user, retaining
-the backend's separate verification status and attempt guard. The user's latest
-correction replaces earlier visual reports. Guard expiry never triggers an
-automatic retry; another attempt requires a new explicit request and fresh state
-accepted by the adapter. Unreachable readings remain unknown, and unrelated
-remembered tasks are not new requests. Short follow-ups retain the last device
-selected by the user; an unsolicited assistant mention does not switch focus.
-Generated instructions avoid repeated permission for an already authorized
-control, unrelated discovery and unsupported tool arguments. Replies report the
-outcome briefly. No extra TV polling, screen capture, ADB
-or wake lock is added.
-Android TV extensions use separate `media_activity`, `remote_hold` and
-`media_voice` write grants. Activities send one named app/input/navigation action
-and distinguish fresh app reports from unverified playback or screen changes.
-Holds are limited to 2000 ms. Voice accepts at most 3 seconds of supplied base64
-PCM and does not add microphone access to the agent. Configured Cast entities
-use the existing `media_play` and `media_command` grants. Operator updates must
-add requested tools to the API and agent scopes and, when desired, the explicit
-Telegram controls; unrelated denials and disabled channels remain in force.
-Network wake uses separate `wake_list` discovery and opt-in `wake_on_lan` control
-grants. Generic targets send one packet without verifying wake; generated agent
-instructions require a fresh media status before claiming the TV is on and
-prohibit automatic replay or substituting wake after an uncertain power command.
-Configured TCL integrated recovery stays inside one `media_power` operation.
-It can reconnect before any Cast activation and use one configured network-wake
-packet, then verify power within the same bounded operation. The agent must not
-duplicate that recovery with separate controls after a timeout.
-The agent inspects its structured verification result instead of treating a
-successful tool call as a successful power change. Expired verification is an
-incomplete request; instructions prohibit invented recovery times and promises
-of unscheduled background checks. Experimental Cast wake is disabled unless
-the operator explicitly configures it after firmware validation.
+The assistant gateway exposes only tools selected by the operator, omits absent
+adapters, and never grants `entity_configure`. Telegram reads include discovery,
+status/options, routine previews, alerts/history, weather, shopping, radio/TTS
+and wake discovery. Writes require explicit grants in both agent scope and
+`telegram_control_tools`:
+
+| Control group | Tools |
+| --- | --- |
+| Devices/routines | `dehumidifier_set`, `light_set`, `switch_set`, `media_power`, `routine_run`, `wake_on_lan` |
+| Remote input | `remote_key`, `media_launch`, `media_text`, `media_activity`, `remote_hold`, `media_voice` |
+| Playback/list | `media_play`, `media_command`, `shopping_update` |
+
+Use only tools supported by the pinned policy. Whole-tool grants cover all
+eligible configured entities; Homewire identity checks, ownership and attempt
+guards still apply. Media launch/text/activity/holds/voice have separate grants;
+see [Android TV controls](devices.md#android-tv-activities) for limits. Voice uses
+supplied audio and grants no microphone access. Add tools to API/agent scopes
+and, if desired, Telegram controls through an operator update. Disabled channels
+and unrelated denials remain unchanged.
+
+Generated instructions keep short follow-ups on the user's selected device,
+avoid unrelated tasks/discovery and report structured verification results.
+They request screen confirmation for unverified shutdown, attribute observations
+to the user and retain the backend's separate status; the latest correction
+replaces earlier reports. Guard expiry never initiates a retry. A new attempt
+requires an explicit request and fresh state accepted by the adapter. Packet,
+key or app delivery does not prove screen power or playback. TCL integrated wake
+recovery remains within one `media_power` operation; agents must not duplicate it
+after timeout. Expired verification means an incomplete request, without invented
+recovery times or promises of unscheduled checks. These instructions add no TV
+polling, screen capture, ADB or wake lock.
+
 A compromised allowed Telegram identity could use the explicitly granted controls, read household state
 and use the capped model account. This is a reduction in privileges, not protection
 against a compromised root user or kernel. The provider key necessarily exists in
@@ -363,14 +337,9 @@ keys from root: they must be readable to automate before unlock. The supervisor
 rotates two small logs and restarts only the owner after failure. Do not treat an
 installed boot script as proof of before-unlock operation; validate with a reboot.
 
-An ARM64 Android 15 sample with monitors enabled measured 5,260 KiB owner RSS /
-5,852 KiB process high-water RSS, three threads and one CPU tick over ten idle
-seconds. ZeroClaw separately measured 23,968 KiB RSS. The companion measured
-6,534 KiB proportional memory and about 78 MiB RSS, including shared Android
-runtime pages; its APK was about 21 KiB. The native executable was about 3.4 MiB.
-These are short platform observations, not worst-case memory or battery budgets
-and not a statement about any installation. Measure the target workload yourself.
-Updates and ZeroClaw configuration still require Android unlock.
+See [historical validation](validation.md#android-15-sample) for a short Android
+memory sample; measure the actual target workload. Updates and ZeroClaw
+configuration still require Android unlock.
 
 Before replacing another controller, validate exclusive scheduler ownership,
 a full TV cycle, companion notifications/recovery, Cast controls, actual timed runs, power/network

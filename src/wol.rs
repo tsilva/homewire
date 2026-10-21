@@ -8,10 +8,7 @@ use crate::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{
-    fs::File,
-    net::{SocketAddr, UdpSocket},
-};
+use std::net::{SocketAddr, UdpSocket};
 
 pub(crate) fn mac_bytes(text: &str) -> Result<[u8; 6]> {
     crate::media::hex::<6>(&text.replace(':', ""))
@@ -74,7 +71,7 @@ struct EndpointConfig {
 }
 pub struct Manager {
     devices: Vec<EndpointConfig>,
-    _lock: File,
+    _lock: crate::config::FileLock,
 }
 impl Adapter for Manager {
     const TOOLS: &'static [Tool] = &[];

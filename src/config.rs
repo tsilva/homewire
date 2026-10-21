@@ -159,7 +159,20 @@ pub(crate) fn save_private_bounded(
     result
 }
 
-pub(crate) fn lock_configuration(path: &Path) -> Result<File> {
+/// Exclusive ownership, explicitly released on drop even if an unrelated
+/// forked child temporarily retains a duplicate of the file descriptor.
+pub struct FileLock(File);
+
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        #[cfg(target_os = "android")]
+        let _ = android_flock(&self.0, 8); // LOCK_UN
+        #[cfg(not(target_os = "android"))]
+        let _ = self.0.unlock();
+    }
+}
+
+pub(crate) fn lock_configuration(path: &Path) -> Result<FileLock> {
     let lock = private_options()
         .read(true)
         .write(true)
@@ -167,36 +180,38 @@ pub(crate) fn lock_configuration(path: &Path) -> Result<File> {
         .truncate(false)
         .open(path.with_extension("json.lock"))?;
     lock_file(
-        &lock,
+        lock,
         "Another Homewire instance owns this device configuration",
-    )?;
-    Ok(lock)
+    )
 }
 
-/// Rust 1.95's standard File lock is unsupported on Android. Use the same
-/// kernel flock operation directly there; retaining the File retains ownership.
-pub(crate) fn lock_file(file: &File, conflict: &str) -> Result<()> {
+// Rust 1.95's standard File locking is unsupported on Android. Use matching
+// kernel flock operations for both acquisition and explicit release there.
+#[cfg(target_os = "android")]
+fn android_flock(file: &File, operation: std::ffi::c_int) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    unsafe extern "C" {
+        fn flock(fd: std::ffi::c_int, operation: std::ffi::c_int) -> std::ffi::c_int;
+    }
+    // SAFETY: fd is a live File descriptor and operation is a Linux/Bionic
+    // flock constant. flock retains no Rust pointers or borrowed storage.
+    if unsafe { flock(file.as_raw_fd(), operation) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+pub(crate) fn lock_file(file: File, conflict: &str) -> Result<FileLock> {
     #[cfg(target_os = "android")]
-    let result = {
-        use std::os::fd::AsRawFd;
-        unsafe extern "C" {
-            fn flock(fd: std::ffi::c_int, operation: std::ffi::c_int) -> std::ffi::c_int;
-        }
-        // SAFETY: fd is a live File descriptor; Linux/Bionic LOCK_EX|LOCK_NB
-        // constants are 2|4. flock retains no Rust pointers or borrowed storage.
-        if unsafe { flock(file.as_raw_fd(), 2 | 4) } == 0 {
-            Ok(())
-        } else {
-            Err(std::io::Error::last_os_error())
-        }
-    };
+    let result = android_flock(&file, 2 | 4); // LOCK_EX | LOCK_NB
     #[cfg(not(target_os = "android"))]
     let result = file.try_lock().map_err(|e| match e {
         std::fs::TryLockError::WouldBlock => std::io::Error::from(std::io::ErrorKind::WouldBlock),
         std::fs::TryLockError::Error(e) => e,
     });
     match result {
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(FileLock(file)),
         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Err(error(conflict)),
         Err(e) => Err(e.into()),
     }
@@ -290,7 +305,7 @@ pub struct Memory {
 pub struct Store {
     path: PathBuf,
     device_id: String,
-    _lock: File,
+    _lock: crate::config::FileLock,
 }
 impl Store {
     pub fn open(config_path: &Path, device_id: &str) -> Result<Self> {
@@ -417,5 +432,32 @@ mod secret_reference_tests {
             "env:HOMEWIRE_SECRET_PRIVATE_KEY"
         )));
         assert!(!environment_secret_path(Path::new("env:OTHER_VARIABLE")));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod lock_tests {
+    use super::*;
+    mod support {
+        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/mod.rs"));
+    }
+
+    #[test]
+    fn dropping_owner_releases_lock_even_with_a_duplicated_descriptor() -> Result<()> {
+        let directory = support::Directory::new()?;
+        let path = directory.0.join("device.json");
+        let owner = lock_configuration(&path)?;
+        // dup and fork share the same open file description. Keep a duplicate
+        // alive to deterministically model a concurrent child before exec.
+        let inherited = owner.0.try_clone()?;
+        assert!(lock_configuration(&path).is_err());
+        drop(owner);
+        let replacement = lock_configuration(&path)?;
+        // Closing the old duplicate must not release the new owner's lock.
+        drop(inherited);
+        assert!(lock_configuration(&path).is_err());
+        drop(replacement);
+        let _next = lock_configuration(&path)?;
+        Ok(())
     }
 }

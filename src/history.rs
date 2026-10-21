@@ -9,7 +9,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, VecDeque},
-    fs::{File, OpenOptions},
+    fs::OpenOptions,
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
@@ -33,7 +33,7 @@ pub struct Manager {
     pub config: Config,
     directory: PathBuf,
     sequences: Vec<u64>,
-    _lock: File,
+    _lock: crate::config::FileLock,
 }
 impl Manager {
     pub fn open(path: &Path) -> Result<Self> {

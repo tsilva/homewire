@@ -7,7 +7,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{fs::File, path::PathBuf};
+use std::path::PathBuf;
 #[derive(Default, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Memory {
@@ -26,7 +26,7 @@ struct Item {
 pub struct Manager {
     path: PathBuf,
     memory: Memory,
-    _lock: File,
+    _lock: crate::config::FileLock,
 }
 impl Adapter for Manager {
     const CONFIG_SECTION: &'static str = "services";

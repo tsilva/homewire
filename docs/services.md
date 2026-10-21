@@ -4,12 +4,10 @@
 
 ## Household services
 
-Use `--adapter FAMILY=PATH` for the following statically compiled adapters. The
-single catalog in `device.rs` generates storage, discovery and dispatch; no
-plugin loader, retained schemas, dynamic registry or interpreter is deployed.
-Optional autonomous reads declare their next deadline in the adapter. These run
-in the existing device owner, independently of an AI session. HTTP messages,
-SOAP XML, SNMP packets, disk state and queries have explicit bounds.
+In unified configuration, put hardware adapters under `adapters` and services
+under `services`; see [configuration](configuration.md#unified-configuration).
+Legacy files use `--adapter FAMILY=PATH`. All run inside the existing device owner
+with bounded messages/state and adapter-owned deadlines.
 
 | Config example / family | Required fields and defaults |
 | --- | --- |
@@ -33,8 +31,6 @@ inspects first-use identity without saving or trusting it in any adapter. Verify
 the endpoint before copying its pin; normal adapters reject changed certificates.
 Cast launches the standard media receiver when needed. Controls are never replayed
 on a timeout; results distinguish sent from confirmed playback.
-Authenticated dashboard/agent voice requests may use up to 64 KiB; other API
-request bodies retain their 8 KiB limit. TV audio is supplied as bounded raw PCM.
 
 ### Typed settings
 
@@ -80,9 +76,8 @@ its authenticated Android companions. Add `battery_monitor` to `services.mobile`
 `devices` is a nonempty subset of the configured paired devices, at most 8 unique
 names. The percentage and interval fields default to the values shown. Require
 `1 <= low_percent < recovery_percent <= 100`; polling supports 15–3600 seconds.
-Omitting `battery_monitor` disables the job. It owns its deadline in the existing
-serve/daemon event loop, uses existing companion telemetry, and adds no thread,
-resident process, platform permission or device-state cache.
+Omitting `battery_monitor` disables the job. It uses existing companion telemetry
+and the serve/daemon event loop.
 
 The first check runs at startup, then every `poll_seconds`; an accepted report
 from a monitored device also brings its check deadline forward. A fresh percentage
@@ -94,24 +89,18 @@ Missing, future-dated or stale reports cancel pending confirmation and never
 establish recovery; `max_age_seconds` defines freshness. Charging does not
 suppress a low warning; its state remains available through the existing sensor.
 
-The shared monitor persists confirmed state separately in
-`mobile.battery.state.json`; the optional alert ledger reconciles it under
-`battery.NAME`. Low and recovered messages stay constant within an episode, so
-percentage changes and normal restarts do not resend an unchanged warning.
-Configure `services.alerts` for outbound delivery and add `battery.NAME` to a
-channel's exact `keys` allowlist if one exists. The existing ledger handles
-retries, per-channel receipts and resolved messages. Delivery remains at least
-once: a crash between remote acceptance and local receipt persistence can still
-duplicate a message. Host suspension, stopped companion reporting or lack of
-network can delay detection/delivery. Examples use synthetic names; target
-settings and deployment logs stay private.
+Confirmed state persists in `mobile.battery.state.json`. Configure `services.alerts`
+for delivery under `battery.NAME`; include that key in any channel allowlist.
+Messages stay constant within an episode, so changing percentages/restarts do not
+resend unchanged warnings. Suspension, stopped reporting and network loss can
+delay detection/delivery. Ledger retry/receipt semantics apply below.
 
 ### Alerts, history and convenience tools
 
 `--watch-meaco`, `--watch-printers`, `--watch-lights` and `--watch-plugs` enable
 independent debounced monitoring. Meaco tracks tank-full/problem, printer reasons
 track hardware faults, and printer supplies at <=15% emit separate low-supply
-warnings. Existing 3-second fault / 30-second recovery confirmation remains.
+warnings. Faults need 3-second confirmation; recovery needs 30 seconds.
 Missing readings do not clear confirmed faults. Schedule and standard control
 failures also enter the optional ledger. Events still go to stderr.
 
@@ -137,9 +126,7 @@ Telegram delivery requires both HTTP success and `ok: true` with a message ID;
 response bodies and token-bearing URLs are never included in delivery errors.
 Messages use plain text. `tank_full` becomes a request to empty the dehumidifier
 tank, and confirmed recovery sends an explicit resolved message. This is outbound
-notification only; it does not enable an agent's Telegram input channel. Telegram
-may accept a message before a connection or local persistence failure, so retries
-can still duplicate it; recipient reading and phone display are not guaranteed.
+notification only; it does not enable an agent's Telegram input channel. Recipient reading and phone display are not guaranteed.
 See [Telegram's sendMessage contract](https://core.telegram.org/bots/api#sendmessage).
 
 `history_series {}` lists configured entities/retention. `history_query` accepts
@@ -148,9 +135,7 @@ fixed 32-byte CRC record lives in an on-disk ring; maximum disk storage is
 32 × 16384 × 32 bytes (16 MiB). It retains counters rather than JSON snapshots in
 RAM. Raw samples and UTC hourly/daily min/max/mean are available. The dashboard
 plots raw values or bucket maxima. Missing periods are not interpolated, and a
-daily energy counter's observed maximum may miss use before midnight. This is
-not a migration/import of HA's existing statistics database. Preserve that archive
-before deleting the VM.
+daily energy counter's observed maximum may miss use before midnight. HA statistics are not imported; preserve that archive before retiring its host.
 
 `shopping_list {}` and `shopping_update` support add (name), check (id/complete),
 remove (id) and clear_completed. Names are limited to 128 bytes; 64 items fit a
@@ -158,13 +143,11 @@ private 32 KiB state file. Duplicate incomplete names are suppressed.
 `weather_status {}` returns MET measurements/forecast with timestamps.
 `radio_search {"name":"..."}` returns up to 8 resolved station URLs.
 `tts_media {"text":"..."}` accepts 1–200 characters and returns a public MP3 URL
-for `media_play`. Google receives that text when playback fetches the URL. These
-public services require Internet and are best effort; no VM service is involved.
+for `media_play`. Google receives that text when playback fetches the URL. These public services require Internet and are best effort.
 
 ## Native Android companion
 
-The platform Java app in `companion/android` uses no Gradle runtime, framework,
-WebView, bundled model key or third-party app dependencies. Build with JDK 17,
+The platform Java app in `companion/android` has no third-party app dependencies. Build with JDK 17,
 Android API 35 platform and build-tools 35, setting `HOMEWIRE_ANDROID_PLATFORM`,
 `HOMEWIRE_ANDROID_BUILD_TOOLS`, `HOMEWIRE_SIGNING_KEY` and
 `HOMEWIRE_SIGNING_PASSWORD_FILE`, then run `companion/android/build.sh`.
@@ -176,9 +159,8 @@ schema: LAN listen address, a random 64-hex-character dashboard token, up to 8
 clients with distinct name/token, certificate PEM and private-key PEM paths
 (relative to config). LAN access requires TLS; unencrypted HTTP is restricted to
 loopback. Generate independent tokens (e.g. `openssl rand -hex 32`), replace all
-example values, and protect config/key files with mode 600. The frontend handles
-one bounded connection at a time on a 256 KiB-stack thread and forwards device
-operations to the existing private IPC owner. It creates no second scheduler.
+example values, and protect config/key files with mode 600. The frontend handles one bounded connection at a time on a 256 KiB-stack thread
+and forwards device operations to the existing IPC owner.
 
 Install the signed APK on a compatible Android phone and enter the server HTTPS
 URL, certificate SHA-256
@@ -205,9 +187,8 @@ clients. Set `assistant:true` only for clients allowed to use that agent, then
 import the updated API config using the normal installer. The frontend proxies
 only its configured loopback ZeroClaw webhook. Agent calls are sent once, even after
 an uncertain response. A 90-second wait can delay other frontend connections;
-the independent device owner/scheduler continues. Faster-whisper pipelines
-are not implemented. Supplied Android TV voice audio uses the separate bounded
-`media_voice` tool; this companion voice path does not capture or forward TV audio.
+the independent device owner/scheduler continues. TV audio uses the separate [media_voice](devices.md#android-tv-extended-input)
+tool; companion voice does not capture or forward it.
 
 Remote access can use a Cloudflare One client and a tunnel private IP route
 to the Homewire server's HTTPS port. Include that IP in WARP routing and

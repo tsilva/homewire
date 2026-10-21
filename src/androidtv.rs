@@ -20,7 +20,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    fs::File,
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     sync::Arc,
@@ -564,7 +563,7 @@ impl ShutdownGuard {
 pub struct RemoteManager<const TCL: bool> {
     config: Config,
     shutdown_guard: Option<ShutdownGuard>,
-    _lock: File,
+    _lock: crate::config::FileLock,
 }
 impl<const TCL: bool> RemoteManager<TCL> {
     pub fn open(path: &Path) -> Result<Self> {

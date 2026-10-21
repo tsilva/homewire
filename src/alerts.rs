@@ -12,7 +12,6 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
-    fs::File,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -83,7 +82,7 @@ pub struct Manager {
     config: Config,
     memory: Memory,
     path: PathBuf,
-    _lock: File,
+    _lock: crate::config::FileLock,
     next_attempt: i64,
     retry_at: BTreeMap<(String, String), i64>,
 }

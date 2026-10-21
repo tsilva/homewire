@@ -7,7 +7,7 @@ use crate::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{fs::File, path::Path, time::Duration};
+use std::{path::Path, time::Duration};
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -22,7 +22,7 @@ fn timeout() -> u64 {
 }
 pub struct Manager {
     config: Config,
-    _lock: File,
+    _lock: crate::config::FileLock,
 }
 struct Services {
     av: String,

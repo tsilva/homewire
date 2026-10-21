@@ -2,7 +2,7 @@
 use crate::{Result, error, mcp};
 use serde_json::Value;
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::{self, BufRead, BufReader, Read, Write},
     os::unix::{
         fs::{FileTypeExt, OpenOptionsExt, PermissionsExt},
@@ -26,7 +26,7 @@ pub const DEVICE_QUEUE_CAPACITY: usize = 4;
 pub struct Server {
     pub incoming: Receiver<Pending>,
     path: PathBuf,
-    _lock: File,
+    _lock: crate::config::FileLock,
     stopped: Arc<AtomicBool>,
     worker: Option<thread::JoinHandle<()>>,
 }
@@ -88,7 +88,7 @@ impl Server {
             .truncate(false)
             .mode(0o600)
             .open(path.with_extension("socket.lock"))?;
-        crate::config::lock_file(&lock, "Another daemon owns this socket")?;
+        let lock = crate::config::lock_file(lock, "Another daemon owns this socket")?;
         if let Ok(metadata) = fs::symlink_metadata(path) {
             if !metadata.file_type().is_socket() {
                 return Err(error("Refusing to replace a non-socket path"));

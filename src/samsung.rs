@@ -11,7 +11,6 @@ use cipher::{BlockEncrypt, KeyInit};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    fs::File,
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -71,7 +70,7 @@ pub struct Manager {
     config: Config,
     path: PathBuf,
     memory: Memory,
-    _lock: File,
+    _lock: crate::config::FileLock,
 }
 impl Config {
     fn validate(&self) -> Result<()> {

@@ -14,7 +14,6 @@ use rustls::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
-    fs::File,
     io::{Read, Write},
     net::{IpAddr, SocketAddr},
     path::Path,
@@ -100,7 +99,7 @@ impl Wake {
 }
 pub struct Manager {
     config: Config,
-    _lock: File,
+    _lock: crate::config::FileLock,
 }
 struct Channel {
     stream: StreamOwned<ClientConnection, Timed>,
