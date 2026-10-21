@@ -4,10 +4,6 @@
 
 ## Unified configuration
 
-Computer sequencing uses `adapters.computer` plus `routines.computer`; see
-[computer setup](devices.md#computer-shutdown-service). Its outlet may share the plugs
-adapter with TV but cannot be the outlet owned by the TV routine.
-
 The primary input is `homewire --config .local/home.json COMMAND`.
 Copy [examples/home.json](../examples/home.json) into ignored `.local/`,
 protect it with `chmod 600`, replace the synthetic values and remove unused
@@ -15,31 +11,25 @@ families. The file is bounded to 64 KiB and requires `version: 1`.
 
 | Section | Contents |
 | --- | --- |
-| `adapters` | `meaco`, `printers`, `awair`, `lights`, `plugs`, `samsung`, `digi`, `tcl`, `brother`, `cast`, `dlna`, `wol`, `computer`; objects use the existing adapter schemas below |
+| `adapters` | `meaco`, `printers`, `awair`, `lights`, `plugs`, `samsung`, `digi`, `tcl`, `brother`, `cast`, `dlna`, `wol`, `computer`; see [device guides](devices.md) |
 | `routines.meaco` | Day/night presets, previously `meaco.json`'s `presets` |
 | `routines.tv` | `plug`, `shutdown_policy`, `timings`; its children are the configured Samsung, DIGI and plugs adapters, without file references |
 | `automations.meaco` | `timezone`, `day`, `night`, previously Meaco `schedule` |
 | `automations.lights` | L900 curve/location/timezone settings, previously lights `automation` |
-| `services` | `api`, `alerts`, `history`, `mobile`, `weather`, `shopping`, `radio`, `speech`; objects use the service schemas below |
-| `deployment` | Host-only Android installation profile described under Android deployment |
+| `services` | `api`, `alerts`, `history`, `mobile`, `weather`, `shopping`, `radio`, `speech`; see [services](services.md) |
+| `deployment` | [Host-only Android installation profile](android.md#private-installation-profile) |
 
-Sections are optional, but enabled routines and automations require their
-adapters. Unknown root keys, misplaced families, unsupported versions and
-conflicting routine/automation declarations fail loading. Each statically
-compiled adapter decodes and validates its own typed settings through
-`config::Source`; the catalog declares whether it belongs to `adapters` or
-`services`. A new adapter needs no additional loader switch. The TV routine
-composes typed child managers and retains their existing ownership safeguards.
+Sections are optional; routines/automations require their adapters. Unknown keys,
+misplaced families, unsupported versions and conflicting declarations fail loading.
+Computer sequencing uses `adapters.computer` plus `routines.computer`; see
+[computer setup](devices.md#computer-shutdown-service). It may share the plugs
+adapter with TV, but cannot own the TV outlet.
 
-The file is read once at startup. Temporary JSON, including the host-only
-`deployment` block, is discarded before serving; there is no configuration
-service, dynamic module loader or JSON cache. `${HOMEWIRE_SECRET_NAME}` and
-PEM `env:HOMEWIRE_SECRET_NAME` references work as before. Relative certificate
-and history paths resolve beside `home.json`. Runtime state and locks keep
-canonical filenames such as `meaco.state.json`, `lights.state.json` and
-`tv.state.json`, including `FAMILY.json.lock`, beside the unified file. The root
-also has an exclusive `home.json.lock`. Keep one config directory per
-installation and use the daemon bridge for additional clients.
+Configuration is read once at startup. Relative certificate/history paths resolve
+beside `home.json`; runtime state and locks also live there (`meaco.state.json`,
+`lights.state.json`, `tv.state.json`, `FAMILY.json.lock`, plus `home.json.lock`).
+Use one config directory per installation and [daemon/bridge](automation.md#persistent-daemon-and-mcp-bridge)
+for additional clients. Temporary JSON and host-only `deployment` data are discarded.
 
 Router login, status, client-based presence and administrative controls are no
 longer supported. Remove `adapters.router` from older unified files; the runtime
@@ -58,11 +48,8 @@ availability. Configuration presence alone does not enable controls or
 schedules: `--allow-control`, `--schedule`, `--light-schedule` and watch flags
 remain explicit runtime grants. Android updates preserve saved grants.
 
-Optional TCL `wake`, `cast_wake` and `power_on_key` fields are described in
-[TCL power and network standby](devices.md#tcl-power-and-network-standby).
-Defaults retain the existing WAKEUP key with no integrated network/Cast wake.
-Cast wake requires its own certificate pin and firmware validation; adding a
-separate Cast playback adapter does not enable it.
+TCL recovery is opt-in; see [power and network standby](devices.md#tcl-power-and-network-standby).
+A separate Cast playback adapter does not enable it.
 
 To migrate existing private files in place:
 
@@ -82,25 +69,19 @@ before installation; backups provide recovery if adapter validation fails.
 
 Legacy separate-file flags and legacy Meaco `--config` remain supported.
 Do not mix unified `--config` with `--adapter`, `--api` or per-family config
-flags. Adapter examples and the older command snippets below also document
-those compatibility interfaces. A previous executable that predates unified
+flags. [Device guides](devices.md) document the per-family interfaces. A previous executable that predates unified
 configuration requires restoration of the backed-up separate configs and
 launcher; binary-only rollback cannot reverse a configuration format migration.
 
 ## Configuration
 
-Tracked JSON files under `examples/` are synthetic templates. They contain
-placeholder credentials, sample names and documentation-only `192.0.2.x` addresses.
-They do not represent any installation. Copy the templates into ignored `.local/`
-files, replace all placeholders, and protect real configurations with mode 600.
-Weather/mobile coordinates of `0.0, 0.0` must be replaced with your chosen location.
-Keep device serials, household inventories, pairing material, status captures and
-deployment/migration records in private storage. Public documentation describes
-capabilities and procedures rather than a particular household.
+Templates under `examples/` use synthetic names, placeholder credentials and
+`192.0.2.x` documentation addresses. Copy needed sections to ignored `.local/`,
+replace placeholders (including zero coordinates), and use mode 600. Keep device
+serials, inventories, pairing material and deployment records private.
 
 The local key and device ID come from your existing Tuya-local setup. Only
-protocol `3.3` is supported in this first module. Pairing, discovery, cloud API
-access, other Tuya versions, and additional Tuya device families are not implemented.
+Tuya protocol `3.3` is supported; pairing, discovery and cloud API access are absent.
 
 Resetting or re-pairing a device changes its local key. If a reachable device
 rejects a Tuya command, retrieve its current local key, update the corresponding
@@ -114,11 +95,9 @@ and `settle_seconds` (20; range 1–60). Optional `presets` and `schedule` conta
 installation behavior; neither supplies an implicit household default.
 Do not put device credentials in tracked files or tool arguments.
 
-Homewire stores confirmed base mode and schedule attempts alongside the config
-as `meaco.state.json`; `meaco.json.lock` serializes ownership. Use the same config
-path for all clients of one device. A running server holds the lock; access it
-through MCP instead of starting a concurrent CLI instance. This lock cannot
-coordinate with Home Assistant or the manufacturer's app.
+Meaco confirmed mode and schedule attempts persist in `meaco.state.json`.
+The configuration lock excludes concurrent owners; use MCP/bridge while an owner
+is running. Locks cannot coordinate with Home Assistant or manufacturer apps.
 
 ## Command-line usage
 
@@ -130,8 +109,6 @@ target/release/homewire --help
 target/release/homewire --config .local/home.json status
 target/release/homewire --config .local/home.json plan night
 target/release/homewire --config .local/home.json apply day
-target/release/homewire --config .local/home.json apply night
-target/release/homewire --config .local/home.json apply off
 target/release/homewire --config .local/home.json printer-status brother
 target/release/homewire --config .local/home.json awair-status
 target/release/homewire --config .local/home.json light-status led_strip
@@ -141,36 +118,27 @@ target/release/homewire --config .local/home.json plug-set relay off
 target/release/homewire --config .local/home.json tv-status
 ```
 
-`status`, `plan`, and `apply` address Meaco; `plan` queries live state without
-controls. `apply`, `light-set`, and `plug-set` change devices. CLI command metadata supplies help, argument counts and adapter requirements.
-Legacy names translate at the boundary into canonical commands. CLI controls are
-explicit commands; `--allow-control` gates MCP writes. Results are JSON on stdout;
-failures go to stderr with a nonzero exit code. Meaco sleep is a toggle and is
-never automatically resent. Keep the Meaco settling delay at 20 seconds.
+`status`, `plan` and `apply` address Meaco; `plan` reads live state without
+controls, and `apply day|night|off` runs the corresponding routine. CLI control
+commands are explicit; `--allow-control` gates MCP writes. Results are JSON on
+stdout; failures go to stderr with a nonzero exit code. Use `--help` for the full
+command list and adapter requirements.
 
 Use `watch-printers`, `watch-lights` or `watch-plugs` for continuous fault/recovery
 events. Monitoring retains confirmed faults across restarts; unknown readings
 never prove recovery. [The optional alert ledger](services.md#alerts-history-and-convenience-tools)
 adds HTTPS/Telegram delivery and companion notifications with persisted receipts.
 
-Legacy per-family examples remain below; do not combine their configuration
-flags with a unified `--config`. Use one config path per device across clients;
-access an existing owner through [MCP or bridge](automation.md#persistent-daemon-and-mcp-bridge).
-
 ## Device controls
-
-```sh
-target/release/homewire --config .local/meaco.json status
-target/release/homewire --config .local/meaco.json plan night
-target/release/homewire --config .local/meaco.json apply day
-target/release/homewire --config .local/meaco.json apply night
-target/release/homewire --config .local/meaco.json apply off
-```
 
 - **Day/night:** apply the explicitly configured preset: power on if needed,
   clear sleep once if necessary, verify the optional humidity and base mode,
   then enable sleep only when requested. Confirmed matching settings are skipped.
 - **Off:** switch off and verify that the device remains off; no preset required.
+
+In a legacy Meaco file, presets and schedule use the following shape. In unified
+configuration, place their contents under `routines.meaco` and
+`automations.meaco`, respectively.
 
 ```json
 "presets": {
@@ -193,9 +161,8 @@ failed verification, or uncertain result stops execution. Sleep is a toggle and
 is never automatically resent. Confirmed mode assumptions are invalidated before
 controls and restored only after the entire sequence succeeds.
 
-`status` and `plan` send status queries but no device controls. Plans are
-provisional: the runner rechecks state after each step. CLI commands print JSON
-results on stdout; failures go to stderr with a nonzero exit code.
+Plans are provisional: execution rechecks state after each step. Keep the
+settling delay at 20 seconds.
 
 For testing through a TCP tunnel, `--connect 127.0.0.1:PORT` overrides only the
 connection address. The device identity and key remain in the private config.

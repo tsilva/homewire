@@ -7,17 +7,13 @@
 Start a local stdio MCP server:
 
 ```sh
-target/release/homewire --config .local/meaco.json serve
+target/release/homewire --config .local/home.json serve
 ```
 
 ### Standard entities and routines
 
-The default MCP interface follows Home Assistant's separation of protocol
-integrations, capability entities and household scripts. It uses a static Rust
-catalog and typed adapters; there is no retained entity-state database or
-allocated entity registry. Category tools are selected from adapters' static
-`Support` flags. New adapters can reuse an existing category without adding MCP
-routing branches.
+The standard interface exposes configured capability entities and household
+routines. Writes require `--allow-control`; read-only is the default.
 
 | Tool | Arguments | Availability |
 | --- | --- | --- |
@@ -34,7 +30,7 @@ routing branches.
 | `wake_list` | `{}` | Configured Samsung or generic WoL targets; no network I/O |
 | `wake_on_lan` | `{"device":"wol.workstation"}` | Known wake targets + control flag; TV ownership requires maintenance |
 | `remote_key` | `{"entity":"media_player.samsung","key":"hdmi"}` | Media + control flag |
-| `routine_list` | `{}` | Configured Meaco/TV routines |
+| `routine_list` | `{}` | Configured routines |
 | `routine_plan` | `{"routine":"meaco_night"}` | Configured routines; no controls |
 | `routine_run` | `{"routine":"tv_on"}` | Configured routines + control flag |
 
@@ -46,23 +42,18 @@ Awair contributes six sensor entities: `sensor.awair_temperature`,
 `awair_humidity`, `awair_co2`, `awair_tvoc`, `awair_pm25`, `awair_score` (each with
 `sensor.` prefix). P110 adds `<label>_power`, `_voltage`, `_current`,
 `_today_energy`, `_month_energy`, `_total_energy` under `sensor.`. Their units are
-explicit. A physical `device` groups all its entities; adding entities does not
-create connections, threads, copies of credentials or separate managers.
+explicit. A physical `device` groups its entities. Discovery reports capability
+ranges, remote keys and routine ownership; live constraints are checked before
+controls. See [typed settings](services.md#typed-settings) and the
+[device guides](devices.md) for family-specific behavior.
 
-Discovery reports model capability envelopes, remote-key choices and power
-ownership. Light temperature ranges are model envelopes; actual live ranges
-are checked before controls. Light settings can disable or restore the device's stored effect; L900 fixed
-settings still require effects/music mode confirmed off. Meaco also exposes typed
-humidity, modes, child lock and timer settings. The narrower `dehumidifier_set`
-accepts only `purification` and `sleep` booleans: turning purification off restores
-normal dehumidification; omitted modes, power and humidity target are preserved.
-While asleep, changing purification clears sleep once, verifies the underlying
-mode, changes it if necessary, and restores sleep. Uncertain controls stop without
-retries. Status reports `sleep` and `purification`; purification is null while
-sleep hides its underlying mode. This tool can be granted to an assistant without
-granting `entity_configure` or access to timers and other device settings. `meaco_day`, `meaco_night` and
-`meaco_off` retain the deterministic household sequences.
-TV routines are `tv_on` and `tv_off`.
+`dehumidifier_set` accepts only `purification` and `sleep` booleans, preserving
+omitted modes, power and humidity. Turning purification off restores normal
+dehumidification. While asleep it clears sleep once, verifies/changes the base
+mode, then restores sleep. Uncertain controls stop without replay. Purification
+status is null while sleep hides the underlying mode. Grant this narrower tool
+when timers/other `entity_configure` settings are unnecessary. Meaco routines are
+`meaco_day`, `meaco_night`, `meaco_off`; TV routines are `tv_on`, `tv_off`.
 
 Status accepts 1–32 unique IDs, resolves the entire batch before I/O, and reads
 each physical device once per request. Results preserve input order and include
@@ -85,61 +76,45 @@ and the TV's selected outlet are blocked in CLI and both MCP interfaces.
 and verification still enforced. Other outlets, reads and navigation keys remain
 available. MCP writes also require `--allow-control`.
 
-Existing CLI commands are preserved. Existing MCP consumers should add
-`--legacy-tools` to their server arguments until migrated. Standard mode
-advertises only capabilities supported by loaded adapters; tool availability follows the configured
-adapters and enabled controls. It rejects legacy tool names.
-Legacy mode retains family lists/status/check/apply/key commands.
-Fault monitoring remains available through the existing watch flags; it reports
-events to stderr instead of adding monitoring checks to the normal agent tool set.
+Standard mode rejects legacy tool names. Existing consumers can use
+`--legacy-tools` until migrated. Monitoring uses the watch flags and writes events
+to stderr, keeping MCP stdout clean.
 
 ### Legacy adapter tools
 
 Add `serve --legacy-tools` for the original interface described below.
 
-With `--config` it exposes `meaco_status` and `meaco_plan`. Add `--allow-control`
-to expose `meaco_apply`. Plan/apply take `{"operation":"day"}`, `night`, or `off`.
-With `--printers` it exposes `printer_list`, `printer_status` (takes
-`{"printer":"brother"}` or `hp`), and `printer_check` (takes no arguments).
-With `--awair` it exposes `awair_status` (takes no arguments).
-With `--bulbs` it exposes `bulb_list` and `bulb_check` (no arguments), plus
-`bulb_status` (`{"bulb":"bulb_1"}`). Add `--allow-control` for `bulb_apply`,
-which takes `{"bulb":"bulb_1","settings":{"power":true,"brightness_percent":10}}`.
-With `--lights`, the same tools are advertised as `light_list`, `light_status`,
-`light_check` and `light_apply` (control flag required). For example,
-`{"light":"led_strip","settings":{"brightness_percent":10}}` applies to the strip.
-With `--samsung` or `--digi`, the corresponding `_status` tool takes no arguments;
-`--allow-control` adds `_apply` (`{"power":BOOL}`) and `_key` (`{"key":"home"}`).
-With `--tv`, `tv_status` is read-only and `tv_apply` requires the control flag;
-the underlying Samsung, DIGI and plug tools are also advertised. Their direct
-power commands remain subject to routine ownership; `--legacy-tools` does not
-bypass it.
-Only configured device tools are advertised. Printer and Awair tools remain read-only.
+Only loaded families appear; all writes also require `--allow-control`.
+
+| Family | Read tools | Write tools / example arguments |
+| --- | --- | --- |
+| Meaco | `meaco_status`, `meaco_plan` | `meaco_apply {"operation":"day"}` (`night` / `off` also accepted); plan uses the same argument |
+| Printers | `printer_list`, `printer_status {"printer":"brother"}`, `printer_check` | None |
+| Awair | `awair_status` | None |
+| Bulbs | `bulb_list`, `bulb_status {"bulb":"bulb_1"}`, `bulb_check` | `bulb_apply {"bulb":"bulb_1","settings":{"power":true,"brightness_percent":10}}` |
+| Lights | `light_list`, `light_status`, `light_check` | `light_apply`; uses `light` instead of `bulb` |
+| Samsung / DIGI | `samsung_status` / `digi_status` | Family `_apply {"power":true}` and `_key {"key":"home"}` |
+| TV | `tv_status`, plus child tools | `tv_apply {"power":false}`; direct child power still requires maintenance |
+
+Per-family loading flags remain supported; do not combine them with unified
+`--config`. For example:
 
 ```sh
-# Printers only; no Meaco key needed:
-target/release/homewire --printers .local/printers.json serve
-# Both families, with automatic printer monitoring:
-target/release/homewire --config .local/meaco.json --printers .local/printers.json serve --watch-printers
-# All adapters in one process, read-only by default:
-target/release/homewire --config .local/meaco.json --printers .local/printers.json --awair .local/awair.json --lights .local/lights.json serve --watch-printers --watch-lights
+target/release/homewire --printers .local/printers.json serve --legacy-tools --watch-printers
 ```
 
-Repeated `printer_check` calls in the same server confirm and deduplicate events.
-`--watch-printers` polls automatically and writes events/diagnostics to stderr,
-keeping stdout clean. Automatic polling/scheduling begins after the initialized
-notification; the first automatic printer poll occurs within the configured
-interval. Device queries are sequential: allow client timeouts for multiple
-printer requests and Meaco's 20-second settling delay per step. Cancellation
-notifications do not abort an in-flight sequence.
-`--watch-bulbs` follows the same initialization and stderr behavior for
-overheating events. Its first poll occurs within the bulb poll interval.
-`--watch-lights` is the shared alias for bulbs and the L900 strip.
+Repeated check calls in one server confirm/deduplicate events. Automatic watch
+jobs begin after MCP initialization and first poll within their configured
+interval. `--watch-lights` covers bulbs/L900; `--watch-bulbs` remains an alias.
+Queries are sequential: allow client timeouts for multiple devices and Meaco's
+20-second settling delay per step. Cancellation does not abort an in-flight sequence.
 
 The server implements initialization, ping, tool listing and tool calls for
 MCP 2024-11-05, 2025-03-26, 2025-06-18, and 2025-11-25. Messages are newline-delimited JSON-RPC,
 limited to 64 KiB. Device operations run sequentially; stdout contains only
-protocol messages. It does not implement HTTP transport or agent inference.
+protocol messages. For authenticated HTTP MCP, use the
+[agent endpoint](android.md#trusted-homewire-mcp-endpoint). Model inference is
+separate.
 
 For ZeroClaw 0.8.x, add a server to an MCP bundle, then reference that bundle
 from the appropriate agent. Use absolute executable and config paths; start
@@ -149,26 +124,27 @@ for the exact schema supported by your installed version.
 
 ## Scheduling
 
-The native scheduler reads the Meaco JSON's explicit `schedule` and `presets`.
+The scheduler uses `automations.meaco` and `routines.meaco` in unified config
+(legacy `schedule` and `presets`).
 The timezone is parsed once at startup; day/night times have minute resolution
 and follow that timezone's daylight-saving rules. Missing schedule settings cause
 an enabling command to fail at startup, before any device controls.
 
 ```sh
 # Standalone scheduler:
-target/release/homewire --config .local/meaco.json schedule
+target/release/homewire --config .local/home.json schedule
 
 # Or one process combining MCP and scheduling:
-target/release/homewire --config .local/meaco.json serve --allow-control --schedule
+target/release/homewire --config .local/home.json serve --allow-control --schedule
 ```
 
 Disable the corresponding Home Assistant rules before enabling this scheduler.
 Starting it outside a scheduled minute does not change the device or catch up
 missed runs. It attempts each rule once per local date, persists that attempt
 before control, and does not replay failed or interrupted runs after restart.
-Failures are logged to stderr; independent push notification delivery is not
-implemented yet. The MCP server exits on stdin EOF; its MCP client must keep
-stdin open. Supervise the standalone scheduler when running without an MCP client.
+Failures go to stderr and, when configured, the
+[alert ledger](services.md#alerts-history-and-convenience-tools). The MCP client
+must keep stdin open; EOF stops `serve`. Supervise the standalone scheduler when running without an MCP client.
 
 ## Persistent daemon and MCP bridge
 
@@ -178,7 +154,7 @@ Use `daemon SOCKET` for an independent device owner:
 ```sh
 mkdir -p .local/run
 chmod 700 .local/run
-target/release/homewire --config .local/meaco.json daemon .local/run/homewire.sock
+target/release/homewire --config .local/home.json daemon .local/run/homewire.sock
 # In another terminal; no device configs or credentials needed by the client:
 target/release/homewire bridge .local/run/homewire.sock
 ```
@@ -191,21 +167,16 @@ notifications receive a private acknowledgement and produce no MCP response.
 Multiple clients share one device owner and serialized controls. One malformed
 or disconnected client cannot stop it. Scheduled jobs continue after client EOF.
 
-The socket parent must be an existing real directory with no group/other
-permissions (700); the socket and lock use 600. This grants access to processes
-running as the same OS user. No HTTP port, TLS endpoint, token service or additional
-runtime dependencies are added. An OS lock serializes socket ownership, allows
-stale-socket recovery after a crash, and refuses replacing regular files/symlinks.
-Android uses Bionic `flock` directly because Rust 1.95's `File::try_lock` returns
-unsupported there. Desktop uses the standard-library lock. Other lock errors
-retain their real cause rather than pretending another instance owns the config.
+The socket parent must be a real directory with mode 700; socket/lock use 600.
+Access is limited to the same OS user. The ownership lock permits stale-socket
+recovery after crashes and refuses replacing regular files/symlinks. Android
+uses Bionic `flock` because Rust 1.95's `File::try_lock` is unsupported there;
+desktop uses the standard-library lock. Other lock failures preserve their cause.
 
-The daemon has one 512 KiB accept thread and one device/job thread. The existing
-accept thread validates frames and answers initialization, ping and tool discovery
-without waiting for device polling. Scoped agent MCP metadata uses the same path,
-with its configured tool allowlist and control permissions preserved. This confirms
-protocol responsiveness; it does not prove that a physical device is reachable or
-that an in-flight device operation has finished.
+One 512 KiB-stack accept thread validates frames and serves initialization,
+ping and discovery while the device/job thread is busy. Scoped agent discovery
+preserves its allowlist and control permissions. Metadata responsiveness does
+not establish device availability or completion of in-flight work.
 
 Device calls, mobile reports/acknowledgements and schedules remain serialized on
 the device owner. Up to four device requests can wait in the bounded queue, accommodating both API

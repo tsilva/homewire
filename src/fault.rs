@@ -7,7 +7,6 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
-    fs::File,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -245,7 +244,7 @@ pub(crate) trait Target {
 
 pub(crate) struct Store {
     state_path: PathBuf,
-    _lock: File,
+    _lock: crate::config::FileLock,
     started: Instant,
 }
 impl Store {

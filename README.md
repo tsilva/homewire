@@ -5,17 +5,17 @@
   <!-- repo-tagline:end -->
 </p>
 
-Homewire is for people who want to read and control home devices on their local
-network, preview changes, and run daily automations from a terminal. One Rust
-executable contains the device adapters and routines; it needs no Home Assistant,
-Docker, Python, Node, or model runtime. Agents such as ZeroClaw can use the same
-devices through MCP (Model Context Protocol), with controls enabled explicitly.
+Homewire reads and controls home devices on your local network and runs daily
+automations from a terminal. One Rust executable contains the adapters and
+routines, with no Home Assistant, container or interpreter required at runtime.
+Agents can use the same devices through MCP (Model Context Protocol); controls
+and schedules are opt-in.
 
 ## Quickstart
 
-Requires **Rust 1.89 or newer**, Git, and network access to a supported device.
-This first example reads a Brother HL-L2350DW or HP DeskJet 3630 over IPP without
-credentials or print jobs. Queries can wake a sleeping printer.
+Requires **Rust 1.89+**, Git, and network access to a supported device. This
+example reads a Brother HL-L2350DW or HP DeskJet 3630 over IPP without credentials
+or print jobs. Queries can wake a sleeping printer.
 
 ```sh
 git clone https://github.com/tsilva/homewire.git
@@ -25,8 +25,8 @@ mkdir -p .local
 chmod 700 .local
 ```
 
-Create `.local/home.json` with the following content, replacing `192.0.2.10` with
-your printer's LAN IP address. The address below is a documentation placeholder.
+Create `.local/home.json`, replacing the documentation address with your printer's
+LAN IP:
 
 ```json
 {
@@ -37,7 +37,7 @@ your printer's LAN IP address. The address below is a documentation placeholder.
 }
 ```
 
-Protect the file, validate it without contacting devices, then read live status:
+Validate without contacting devices, then read live status:
 
 ```sh
 chmod 600 .local/home.json
@@ -45,99 +45,61 @@ target/release/homewire --config .local/home.json config-check
 target/release/homewire --config .local/home.json printer-status printer
 ```
 
-Validation returns `{"device_io":false,"valid":true}`. The status command returns
-JSON with `printer`, `state`, `reasons` and `supplies`; an idle printer reports
-`"state":"idle"`. Missing supply readings remain unknown. Failures go to stderr
-with a nonzero exit code.
+Validation returns `{"device_io":false,"valid":true}`. Status returns JSON with
+`printer`, `state`, `reasons` and `supplies`; an idle printer reports
+`"state":"idle"`. Missing readings remain unknown. Failures go to stderr with a
+nonzero exit code.
 
-For another device, follow its setup guide below. Add only the sections you need
-from [the unified configuration example](examples/home.json); replace all
-credential, address and location placeholders. There is no automatic discovery.
-Keep real settings in ignored `.local/` files and credentials in
-[Infisical references](docs/configuration.md#infisical-configuration-references).
-See [configuration and migration](docs/configuration.md#unified-configuration) for
-schemas, state files and legacy installations.
+For other devices, copy only the sections you need from
+[examples/home.json](examples/home.json) and follow the setup guides below.
+Replace all placeholders, keep real settings in ignored `.local/` files, and use
+[Infisical references](docs/configuration.md#infisical-configuration-references)
+for credentials. There is no automatic discovery.
 
 ## Devices and routines
 
-| Device / setup guide | What you can do |
+| Setup guide | Capabilities |
 | --- | --- |
-| [Meaco Arete Two](docs/configuration.md#configuration) | Read status; independently set purification and sleep; run configured day, night and off routines |
-| [Brother HL-L2350DW / HP DeskJet 3630](docs/devices.md#printers) | Read status and supplies; monitor confirmed faults and low-supply warnings |
-| [Awair Element](docs/devices.md#awair-element) | Read fresh temperature, humidity, CO₂, TVOC, PM2.5 and score |
-| [Tapo L430C / L900](docs/devices.md#l900-led-strip) | Set power, brightness, colour and white temperature; monitor overheating |
-| [Tapo P100 / P110](docs/devices.md#tapo-p100p110-plugs) | Control relays; read P110 energy and monitor overloads |
-| [Samsung UE40H6200 / DIGI R2A](docs/devices.md#samsung-tv-and-digi-r2a) | Use paired remotes and coordinated shared-outlet TV routines |
-| [TCL Android / Google TV](docs/devices.md#tcl-android--google-tv) | Read power, volume/mute and current app; use extended buttons, HDMI keys, bounded holds, voice audio, app links and text; add Cast for playback and exact volume |
-| [Computers](docs/devices.md#computer-shutdown-service) | Wake configured targets; use authenticated shutdown and optional metered outlet cutoff |
+| [Meaco Arete Two](docs/configuration.md#configuration) | Status, purification/sleep controls and day/night/off routines |
+| [Brother HL-L2350DW / HP DeskJet 3630](docs/devices.md#printers) | Status, supplies and confirmed fault warnings |
+| [Awair Element](docs/devices.md#awair-element) | Fresh temperature, humidity, CO₂, TVOC, PM2.5 and score |
+| [Tapo L430C / L900](docs/devices.md#tapo-l430c-bulbs) | Light controls, overheating monitoring and opt-in L900 schedules |
+| [Tapo P100 / P110](docs/devices.md#tapo-p100p110-plugs) | Relay control, P110 metering and overload monitoring |
+| [Samsung UE40H6200 / DIGI R2A](docs/devices.md#samsung-tv-and-digi-r2a) | Paired remotes and shared-outlet TV routines |
+| [TCL Android / Google TV](docs/devices.md#tcl-android--google-tv) | Power, keys, app links, text and supplied voice audio; optional Cast playback |
+| [Computers](docs/devices.md#computer-shutdown-service) | Wake, authenticated shutdown and optional metered outlet cutoff |
 
-Controls check identity where supported and verify reported outcomes; uncertain
-results stop execution. Generic [Wake-on-LAN](docs/devices.md#wake-on-lan)
-cannot confirm a successful wake, and Samsung shutdown may remain unverified.
-Each adapter guide explains its prerequisites and limits.
-Paired Android TV remote keys service incoming messages for up to 500 ms after
-sending and close TLS cleanly; delivery still does not confirm a screen change.
-TCL controls first wait for negotiated initial input/volume reports, because the
-power report can arrive before its input receiver is ready.
-
-Android TV app links and focused-field text have separate `media_launch` and
-`media_text` grants. Agents can open titles or type into search without receiving
-general device-settings access. App delivery does not confirm movie playback.
-`media_activity` opens named apps, searches, titles, Home, settings or inputs with
-one command. It reports fresh app confirmation separately from playback; see
-[activity parameters](docs/devices.md#android-tv-activities).
-Android TV also offers `remote_hold` (1–2000 ms) and `media_voice` (up to
-3 seconds of supplied raw PCM audio). Live voice support is reported by
-`entity_options`. [Google Cast setup](docs/devices.md#tcl-google-cast) adds a
-separate playback entity with absolute volume/mute, seeking and media URLs.
-Agents ask for screen confirmation after an unverified shutdown, distinguish the
-user's observation from adapter verification, and never automatically retry an
-uncertain power command when its guard expires.
-TCL power results distinguish confirmed state, an unsent command and an uncertain
-attempt. Optional [integrated wake settings](docs/devices.md#tcl-power-and-network-standby)
-keep recovery and bounded verification inside one power-on operation. Cast wake
-can recover from a transient standby connection loss and optionally send one
-configured network-wake packet before Cast activation. It never replays an
-uncertain activation. It is opt-in; validate it on the actual firmware
-before relying on it. Packet delivery or Cast availability alone never proves
-the screen is on. Generated agent instructions keep short follow-ups focused on
-the selected device and report incomplete requests without reviving unrelated tasks.
+Controls verify identity where supported and check reported outcomes. Uncertain
+results stop execution; packet or key delivery alone does not prove a device
+changed state. Each guide describes its verification limits.
 
 ## Agents and automation
 
-The Meaco is exposed as `dehumidifier.meaco`; humidity and tank sensors retain
-their `sensor.meaco_*` IDs. The previous `humidifier.meaco` ID remains accepted
-for existing clients. After re-pairing, [refresh its local key](docs/configuration.md#configuration)
-before retrying status or controls.
-
-Start a read-only MCP server for your client:
+Start a read-only MCP server:
 
 ```sh
 target/release/homewire --config .local/home.json serve
 ```
 
 Only configured capabilities appear. Add `--allow-control` to expose write tools.
-[MCP and ZeroClaw setup](docs/automation.md#mcp-and-zeroclaw) covers discovery,
-fresh reads, routine previews and execution. For persistent ownership across
-client sessions, use [daemon and bridge](docs/automation.md#persistent-daemon-and-mcp-bridge).
-Daemon pings, initialization and tool discovery remain responsive during device
-polling. Device work stays serialized; a full queue rejects new work explicitly.
-Isolated Android agents keep Telegram read-only by default. Operators can grant
-specific controls with [`deployment.agent.telegram_control_tools`](docs/android.md#zeroclaw-isolation);
-printer outlet power uses `switch_set`.
+See [MCP and ZeroClaw](docs/automation.md#mcp-and-zeroclaw) for discovery, fresh
+reads and routine previews, or [daemon and bridge](docs/automation.md#persistent-daemon-and-mcp-bridge)
+for a persistent owner shared by clients.
 
-[Schedules](docs/automation.md#scheduling) and
-[L900 curves / sunset rules](docs/devices.md#l900-scheduling) are opt-in.
-**Disable corresponding Home Assistant rules before enabling replacement controls.**
-Keep one configuration path per device; Homewire's locks cannot coordinate with
-manufacturer apps or other controllers. Use a trusted LAN.
+[Meaco schedules](docs/automation.md#scheduling) and
+[L900 curves/sunset rules](docs/devices.md#l900-scheduling) require explicit
+runtime flags. **Disable corresponding Home Assistant rules before enabling
+replacement controls.** Use one configuration path per device and a trusted LAN;
+Homewire's locks cannot coordinate with manufacturer apps or other controllers.
+Ownership locks are explicitly released when their owner is dropped, even
+during concurrent child-process startup.
 
 ## Further reading
 
-- [CLI usage](docs/configuration.md#command-line-usage): status, plans and explicit controls.
-- [Household services](docs/services.md#household-services): Cast/DLNA playback, alerts, history, weather and shopping.
-- [Android deployment](docs/android.md#android-deployment): Termux installation, supervision, verification and rollback.
-- [Dashboard and native companion](docs/services.md#native-android-companion): HTTPS controls, telemetry and notifications.
-- [Implementation and development](docs/development.md#implementation-and-validation): adapter design, checks and measured memory limits.
+- [Configuration and CLI](docs/configuration.md): schemas, commands, credentials and migration.
+- [Household services](docs/services.md): playback, alerts, history, dashboard and Android companion.
+- [Android deployment](docs/android.md): installation, isolation, verification and rollback.
+- [Development](docs/development.md): architecture, required checks and memory measurement.
+- [Reference index](docs/reference.md): all guide sections.
 
 [MIT license](LICENSE)

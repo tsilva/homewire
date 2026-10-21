@@ -9,7 +9,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
-    fs::File,
     path::{Path, PathBuf},
 };
 #[derive(Deserialize)]
@@ -62,7 +61,7 @@ pub struct Manager {
     config: Config,
     state: BTreeMap<String, Report>,
     path: PathBuf,
-    _lock: File,
+    _lock: crate::config::FileLock,
     battery_monitor: Option<crate::battery::Monitor>,
 }
 impl Manager {

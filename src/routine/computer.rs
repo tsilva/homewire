@@ -9,7 +9,6 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    fs::File,
     path::PathBuf,
     time::{Duration, Instant},
 };
@@ -61,7 +60,7 @@ pub struct Manager {
     settings: Settings,
     memory: Memory,
     path: PathBuf,
-    _lock: File,
+    _lock: crate::config::FileLock,
 }
 impl Manager {
     pub(crate) fn open(source: &Source<'_>) -> Result<Self> {
