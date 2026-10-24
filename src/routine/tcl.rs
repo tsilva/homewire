@@ -149,7 +149,7 @@ impl Control for Equipment<'_> {
             .devices
             .plugs()
             .ok_or_else(|| error("Missing TV outlet"))?
-            .status(self.plug)?
+            .relay_status(self.plug)?
             .power)
     }
     fn set_outlet(&mut self, power: bool) -> Result<()> {
