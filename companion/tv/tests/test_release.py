@@ -130,6 +130,35 @@ class ReleaseTests(unittest.TestCase):
             self.assertEqual(receipt['failed_gate'], 'building')
             self.assertEqual(injected.call_count, 1)
 
+    def test_connection_failure_retains_candidate_but_uncertain_install_blocks_reuse(self):
+        receipt = {'phase': 'connecting'}
+        release.failure(receipt, release.GateError('offline'))
+        self.assertEqual(receipt['phase'], 'built')
+        self.assertEqual(receipt['failed_gate'], 'connecting')
+        receipt['phase'] = 'deploying'
+        release.failure(receipt, release.GateError('response lost'))
+        self.assertEqual(receipt['phase'], 'failed')
+        self.assertEqual(receipt['failed_gate'], 'deploying')
+
+    def test_full_pipeline_separates_signing_and_runtime_and_records_verification(self):
+        folders = []
+        def injected(binding, command, env, gate):
+            folders.append(binding['folder'])
+            if binding['folder'] == '/tv/signing':
+                return self.signed_build(binding, command, env, gate)
+            directory = Path(command[command.index('--deploy-child') + 1])
+            install.save_json(directory / 'installation.json', dict(checks={'pinned_https': True}))
+        with patch.object(release.shutil, 'which', return_value='/fixture/tool'), \
+                patch.object(build, 'environment', return_value={'HOMEWIRE_ANDROID_BUILD_TOOLS': '/fixture/tools'}), \
+                patch.object(build, 'apk_identity', return_value=dict(version='0.1.1', version_code=1001, signer_sha256='c' * 64)), \
+                patch.object(release, 'checks'), patch.object(release, 'run', return_value=b'commit'), \
+                patch.object(release, 'injected', side_effect=injected), patch.object(release, 'connect_adb'):
+            directory = release.release(self.args(build_only=False))
+            receipt = release.private_json(directory / 'receipt.json')
+            self.assertEqual(receipt['phase'], 'verified')
+            self.assertEqual(folders, ['/tv/signing', '/tv/runtime'])
+            self.assertTrue(receipt['installation']['checks']['pinned_https'])
+
     def test_certificate_mismatch_sends_no_credentials(self):
         with patch.object(verify.socket, 'create_connection'), patch.object(verify.ssl, 'SSLContext') as context:
             tls = context.return_value.wrap_socket.return_value.__enter__.return_value

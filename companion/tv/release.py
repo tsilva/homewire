@@ -249,12 +249,14 @@ def deploy_child(config_path, directory, reboot=False):
 
 
 def deploy(config_path, settings, directory, receipt, env, reboot):
-    receipt['phase'] = 'deploying'
+    receipt['phase'] = 'connecting'
     install.save_json(directory / 'receipt.json', receipt)
     print('Checking the existing pairing, installing once, then verifying pinned HTTPS...', flush=True)
     with route(config_path, settings, env) as (routed_path, routed_settings):
         serial = routed_settings['serial']
         connect_adb(serial, env)
+        receipt['phase'] = 'deploying'
+        install.save_json(directory / 'receipt.json', receipt)
         command = [sys.executable, ROOT / 'release.py', '--config', routed_path, '--deploy-child', directory]
         if reboot:
             command.append('--verify-reboot')
@@ -262,6 +264,15 @@ def deploy(config_path, settings, directory, receipt, env, reboot):
     receipt['phase'] = 'verified'
     receipt['installation'] = private_json(directory / 'installation.json')
     install.save_json(directory / 'receipt.json', receipt)
+
+
+def failure(receipt, error):
+    gate = receipt['phase']
+    receipt['failed_gate'] = gate
+    if isinstance(error, GateError):
+        receipt['failure_reason'] = str(error)
+    # Transport setup has no installer/control child. Manual reconnection is safe.
+    receipt['phase'] = 'built' if gate == 'connecting' else 'failed'
 
 
 def connect_adb(serial, env):
@@ -295,8 +306,8 @@ def deploy_existing(args):
         raise ValueError('Saved release APK identity changed')
     try:
         deploy(args.config.resolve(), settings, directory, receipt, env, args.verify_reboot)
-    except Exception:
-        receipt.update(failed_gate=receipt['phase'], phase='failed')
+    except Exception as error:
+        failure(receipt, error)
         install.save_json(directory / 'receipt.json', receipt)
         raise
     print('Deployed and verified: ' + str(directory))
@@ -352,10 +363,7 @@ def release(args):
             deploy(config_path, settings, directory, receipt, env, args.verify_reboot)
         install.save_json(directory / 'receipt.json', receipt)
     except Exception as error:
-        receipt['failed_gate'] = receipt['phase']
-        if isinstance(error, GateError):
-            receipt['failure_reason'] = str(error)
-        receipt['phase'] = 'failed'
+        failure(receipt, error)
         install.save_json(directory / 'receipt.json', receipt)
         raise
     print(('Built' if args.build_only else 'Deployed and verified') + ': ' + str(directory), flush=True)

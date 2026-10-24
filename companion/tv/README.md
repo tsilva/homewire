@@ -97,6 +97,11 @@ boot identity changes and the API returns without opening the app, append `--ver
 command. This interrupts viewing. If ADB does not reconnect or boot/API verification
 fails, the release remains failed; the command never reboots a second time.
 
+A connection failure before the installer starts leaves the candidate `built`,
+with the failed connection gate recorded. Restore TV/network access and use
+`--deploy-existing` for those exact bytes. This retries connection setup only.
+Once the installer starts, an uncertain result blocks redeployment of that candidate.
+
 A failed install or post-install check stops immediately, retains the APK,
 source, old pairing config and backup, and never reports a verified release.
 Inspect the failed gate and the device before taking another action. There is
