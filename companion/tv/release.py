@@ -276,19 +276,53 @@ def failure(receipt, error):
 
 
 def connect_adb(serial, env):
-    if ':' in serial:
-        run(['adb', 'connect', serial], env, gate='TV ADB connection', timeout=20)
-    # adb connect can return before the transport is ready. Retry only state reads.
-    deadline = time.monotonic() + 10
-    while True:
-        result = subprocess.run(['adb', '-s', serial, 'get-state'], env=env, capture_output=True, timeout=5)
-        if result.returncode == 0 and result.stdout.strip() == b'device':
-            return
-        if b'unauthorized' in result.stderr:
+    network = ':' in serial
+    deadline = time.monotonic() + (35 if network else 10)
+
+    def command(arguments, maximum):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        try:
+            result = subprocess.run(['adb', *arguments], env=env, capture_output=True,
+                                    timeout=min(maximum, remaining))
+        except subprocess.TimeoutExpired:
+            return None
+        # adb connect may exit zero even when it failed. Its text and get-state,
+        # rather than process success, establish authorization and readiness.
+        output = (result.stdout + result.stderr).lower()
+        if b'unauthorized' in output or b'failed to authenticate' in output:
             raise GateError('Authorize this ADB host on the TV before deployment')
+        return result
+
+    for attempt in range(3 if network else 1):
+        if network:
+            if attempt:
+                # Drop only this failed serial. No global reconnect/kill-server,
+                # installation, application start or device control is replayed.
+                disconnected = command(['disconnect', serial], 3)
+                if disconnected is None or disconnected.returncode:
+                    break
+            connected = command(['connect', serial], 12)
+            # A registered connection can take a moment to become ready. A failed
+            # registration must be recreated instead of only polling it offline.
+            ready_until = min(deadline, time.monotonic() + 2)
+            if connected is not None and b'failed to connect' in connected.stdout.lower():
+                ready_until = time.monotonic()
+        else:
+            ready_until = deadline
+        while True:
+            result = command(['-s', serial, 'get-state'], 3)
+            if result is not None and result.returncode == 0 and result.stdout.strip() == b'device':
+                return
+            if time.monotonic() >= ready_until:
+                break
+            time.sleep(min(0.25, max(0, ready_until - time.monotonic())))
         if time.monotonic() >= deadline:
-            raise GateError('TV ADB transport unavailable; no installation attempted')
-        time.sleep(0.25)
+            break
+        if network and attempt < 2:
+            time.sleep(min(1, max(0, deadline - time.monotonic())))
+    raise GateError('TV ADB transport unavailable after bounded connection setup; no installation attempted')
 
 
 def deploy_existing(args):
