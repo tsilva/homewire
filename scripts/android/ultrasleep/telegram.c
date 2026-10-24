@@ -36,7 +36,8 @@ static int decrypt(const char *config, char *value, size_t capacity) {
     strcpy(base+1, ".secret_key");
     int fd = open(keyfile, O_RDONLY|O_NOFOLLOW); if (fd < 0) return -1;
     ssize_t n = read(fd, keytext, sizeof(keytext)-1); close(fd);
-    if (n < 0) return -1; keytext[n] = 0;
+    if (n < 0) return -1;
+    keytext[n] = 0;
     unsigned char key[32], blob[512], plain[512];
     int length = hex(value+5, blob, sizeof(blob));
     if (hex(trim(keytext), key, sizeof(key)) != 32 || length < 29) return -1;
