@@ -111,7 +111,14 @@ to inspect the pause or resume the current target now.
 ## TCL companion releases
 
 After the private toolchain and Infisical bindings are configured, build, sign,
-install and verify an update with `python3 companion/tv/release.py --version 0.1.1`.
+install and verify an update from the repository root:
+
+```sh
+python3 companion/tv/release.py --version 0.1.5
+```
+
+Choose an unused version greater than the installed version. Add `--verify-reboot`
+to deliberately reboot once and verify automatic startup.
 The command preserves pairing and saves versioned artifacts and previous-APK
 backups. See the [one-time setup, verification and recovery guide](companion/tv/README.md#one-command-releases).
 
