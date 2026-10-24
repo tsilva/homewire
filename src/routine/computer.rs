@@ -262,7 +262,7 @@ fn watts(reading: Reading) -> Result<f64> {
         })
 }
 trait Control {
-    fn outlet(&mut self) -> Result<Reading>;
+    fn outlet(&mut self, metering: bool) -> Result<Reading>;
     fn set_outlet(&mut self, power: bool) -> Result<()>;
     fn running(&mut self) -> bool;
     fn unreachable(&mut self) -> Result<bool>;
@@ -278,12 +278,16 @@ struct Equipment<'a> {
     started: Instant,
 }
 impl Control for Equipment<'_> {
-    fn outlet(&mut self) -> Result<Reading> {
-        let status = self
+    fn outlet(&mut self, metering: bool) -> Result<Reading> {
+        let plugs = self
             .devices
             .plugs()
-            .ok_or_else(|| error("Missing outlet"))?
-            .status(self.plug)?;
+            .ok_or_else(|| error("Missing outlet"))?;
+        let status = if metering {
+            plugs.status(self.plug)?
+        } else {
+            plugs.relay_status(self.plug)?
+        };
         Ok(Reading {
             power: status.power,
             power_w: status.energy.and_then(|e| e.power_w),
@@ -354,7 +358,7 @@ fn verify_shutdown(control: &mut impl Control, policy: Verification) -> Result<V
     let mut samples = 0u32;
     let mut max_standby_w: f64 = 0.0;
     loop {
-        let power_w = watts(control.outlet()?)?;
+        let power_w = watts(control.outlet(true)?)?;
         let unreachable = control.unreachable()?;
         let now = control.elapsed();
         if now >= until {
@@ -395,7 +399,7 @@ fn sequence(
     resume: bool,
     progress: &mut impl FnMut(Progress) -> Result<()>,
 ) -> Result<Value> {
-    let outlet = control.outlet()?;
+    let outlet = control.outlet(!power && verification.is_some())?;
     if power {
         if !outlet.power {
             control.set_outlet(true)?;
@@ -443,6 +447,7 @@ mod tests {
         unreachable: bool,
         fail_shutdown: bool,
         fail_read: bool,
+        fail_metering: bool,
         fail_auth: bool,
         readings: VecDeque<Option<f64>>,
         reachability: VecDeque<bool>,
@@ -461,6 +466,7 @@ mod tests {
                 unreachable: true,
                 fail_shutdown: false,
                 fail_read: false,
+                fail_metering: false,
                 fail_auth: false,
                 readings: VecDeque::new(),
                 reachability: VecDeque::new(),
@@ -470,10 +476,13 @@ mod tests {
         }
     }
     impl Control for Fake {
-        fn outlet(&mut self) -> Result<Reading> {
+        fn outlet(&mut self, metering: bool) -> Result<Reading> {
             self.steps.push("read");
             if self.fail_read {
                 return Err(error("read failed"));
+            }
+            if metering && self.fail_metering {
+                return Err(error("get_energy_usage rejected (code -1003)"));
             }
             if let Some(value) = self.readings.pop_front() {
                 self.reading.power_w = value;
@@ -554,6 +563,26 @@ mod tests {
             c.steps,
             ["read", "outlet_on", "wait", "running", "wake", "ready"]
         );
+    }
+    #[test]
+    fn startup_and_leave_on_shutdown_do_not_require_energy_statistics() {
+        let mut c = Fake {
+            fail_metering: true,
+            ..Fake::default()
+        };
+        // The shutdown policy must not introduce metering into startup.
+        sequence(&mut c, true, 5, 120, Some(policy()), false, &mut |_| Ok(()))
+            .expect("startup without energy statistics");
+        assert_eq!(
+            c.steps,
+            ["read", "outlet_on", "wait", "running", "wake", "ready"]
+        );
+        c.steps.clear();
+        off(&mut c, None, false).expect("leave-on shutdown without energy statistics");
+        assert_eq!(c.steps, ["read", "shutdown"]);
+        c.steps.clear();
+        assert!(off(&mut c, Some(policy()), false).is_err());
+        assert_eq!(c.steps, ["read"]);
     }
     #[test]
     fn leave_on_remains_supported() {

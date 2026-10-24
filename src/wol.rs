@@ -17,7 +17,7 @@ pub(crate) fn mac_bytes(text: &str) -> Result<[u8; 6]> {
 /// Sends exactly once. UDP delivery is not evidence of a successful wake.
 pub(crate) fn send(mac: [u8; 6], destination: SocketAddr) -> Result<()> {
     let mut packet = [0xff; 102];
-    for block in packet[6..].chunks_exact_mut(6) {
+    for block in packet[6..].as_chunks_mut::<6>().0 {
         block.copy_from_slice(&mac);
     }
     let bind = if destination.is_ipv4() {

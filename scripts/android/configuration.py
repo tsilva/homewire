@@ -39,8 +39,10 @@ def validate(value):
         if family in value.get(section, {}):
             if family not in adapters or field in adapters[family]:
                 raise ValueError('Orphaned or duplicate routine/automation')
-    if 'tv' in value.get('routines', {}) and not {'samsung', 'digi', 'plugs'} <= set(adapters):
-        raise ValueError('TV requires Samsung, DIGI and plugs')
+    if 'tv' in value.get('routines', {}):
+        required = {'tcl', 'plugs'} if value['routines']['tv'].get('target') == 'tcl' else {'samsung', 'digi', 'plugs'}
+        if not required <= set(adapters):
+            raise ValueError('TV requires its configured media adapters and plugs')
     if 'computer' in value.get('routines', {}) and not {'computer', 'plugs'} <= set(adapters):
         raise ValueError('Computer routine requires computer and plugs')
     return value

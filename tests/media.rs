@@ -129,7 +129,7 @@ impl Samsung {
                             serde_json::from_str(value["args"][0]["body"].as_str().expect("body"))?;
                         assert_eq!(b.len() % 16, 0);
                         let cipher = Aes128::new_from_slice(&[0; 16]).expect("key");
-                        for block in b.chunks_exact_mut(16) {
+                        for block in b.as_chunks_mut::<16>().0 {
                             cipher.decrypt_block(
                                 cipher::generic_array::GenericArray::from_mut_slice(block),
                             );
@@ -234,8 +234,8 @@ fn samsung_wake_magic_packet_and_identity_guard() -> Result<()> {
         let n = socket.recv(&mut packet)?;
         assert_eq!(n, 102);
         assert_eq!(packet[..6], [255; 6]);
-        for block in packet[6..102].chunks_exact(6) {
-            assert_eq!(block, [0, 17, 34, 51, 68, 85]);
+        for block in packet[6..102].as_chunks::<6>().0 {
+            assert_eq!(*block, [0, 17, 34, 51, 68, 85]);
         }
         power.store(true, Ordering::Relaxed);
         Ok(())

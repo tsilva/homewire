@@ -174,6 +174,16 @@ that built-in sandbox as inactive. The native launcher enforces the boundary.
   separate processes, ptrace/process-memory access, namespace/mount changes,
   privilege changes and kernel-management calls. Ordinary worker threads remain
   available. Setup failure stops the agent; there is no permissive fallback.
+- Android's libc `realpath()` normally resolves paths through `/proc/self/fd`.
+  The same preload library provides a fallback only for `/bin/web` dashboard
+  paths when procfs is absent and libc returns `ENOENT`. It walks directory
+  descriptors without following symlinks, accepts only root-owned regular files
+  and directories on read-only mounts, and rejects traversal and path aliases.
+  All other paths retain libc behavior. This keeps host procfs and descriptors
+  hidden while allowing ZeroClaw's existing static-file containment checks.
+  Dashboard assets must be installed under the jail's `root/bin/web`; the daemon
+  detects them at startup. `dashboard-probe` checks positive paths and operator
+  symlink fixtures alongside the existing negative sandbox probe.
 - Only agent-owned state/temp files are writable. Configuration, its encryption
   key and `TOOLS.md` are read-only bind mounts. The parent state directory cannot
   be renamed to substitute a different configuration. Homewire's private Unix IPC
@@ -212,6 +222,9 @@ supplied audio and grants no microphone access. Add tools to API/agent scopes
 and, if desired, Telegram controls through an operator update. Disabled channels
 and unrelated denials remain unchanged.
 
+Generated instructions route TV power through `tv_on`/`tv_off` when discovery
+reports routine ownership; direct media power applies to unowned devices.
+TCL outlet sequencing uses the unified `routines.tv` configuration.
 Generated instructions keep short follow-ups on the user's selected device,
 avoid unrelated tasks/discovery and report structured verification results.
 They request screen confirmation for unverified shutdown, attribute observations
@@ -348,3 +361,107 @@ the phone's device config, state/history, media certificates and APK signing key
 Samsung pairing is still imported/backed up; fresh H-series pairing has no native
 setup helper. `pair_digi.py` is an independent host-only PIN pairing helper for
 Android TV and requires the displayed code and a reachable LAN endpoint.
+
+
+## Offline ultrasleep
+
+The optional root-only controller for Android user 0 parks the phone's configured workloads and
+Termux services, releases the Termux wake lock, disables cellular/Wi-Fi/Bluetooth
+and scanning, enables battery saver, switches the screen off and forces deep
+Doze. It restores the saved radio settings, wake lock and previously running
+services at 07:00. Existing disabled services remain disabled. Homewire device
+states and schedules are preserved; its scheduler skips missed jobs. Android
+itself remains running and may briefly wake for essential system work.
+
+The daily window is 22:00–07:00 **Europe/Lisbon**, including daylight-saving
+changes. A native `CLOCK_REALTIME_ALARM` timer wakes the kernel; an
+`EPOLLWAKEUP` event keeps it awake during each transition. The controller blocks
+between deadlines instead of polling. No network, remote host, Termux wake lock,
+or agent is needed to resume. An operator wake bypasses only the current night.
+
+Requirements: rooted Android with Magisk, `CAP_WAKE_ALARM` and
+`CAP_BLOCK_SUSPEND`, Termux clang/runit/curl and OpenSSL development files, managed SSH, a working ingress-guard
+`check` command, NFC already off, and no pre-existing forced Doze. Host tests require a C compiler
+and OpenSSL discoverable through `pkg-config`. Keep private
+inventory under ignored `.local/`, with profile permissions `600`. For example:
+
+```json
+{
+  "ssh": "phone-admin",
+  "su": "/debug_ramdisk/su",
+  "prefix": "/data/data/com.termux/files/usr",
+  "homewire": "/data/user_de/0/com.termux/files/homewire",
+  "guard": "/data/adb/example-ingress/guard.sh",
+  "units": [
+    {
+      "pidfile": "/data/adb/homewire-supervisor.pid",
+      "marker": "/data/adb/service.d/homewire.sh",
+      "launcher": "/data/adb/service.d/homewire.sh"
+    },
+    {
+      "pidfile": "/data/adb/zeroclaw-sandbox.pid",
+      "marker": "/data/adb/service.d/zeroclaw-sandbox.sh",
+      "launcher": "/data/adb/service.d/zeroclaw-sandbox.sh"
+    }
+  ],
+  "freeze_executables": [],
+  "resume_services_first": ["tailscaled", "sshd", "ssh-unix-bridge"],
+  "telegram_config": "/data/data/com.termux/files/home/zeroclaw-sandbox/policy/config.toml",
+  "telegram_section": "[channels.telegram.synthetic]"
+}
+```
+
+List every root workload supervisor, including any keep-unlocked helper.
+`freeze_executables` optionally parks native workloads that lack a compatible
+stop/start supervisor, preserving their in-memory state; resume verifies each
+PID's executable and start time. The phone's ingress guards remain active.
+All currently running Termux runit services are parked through their supervisors.
+The controller is outside those services. When `telegram_config` and `telegram_section` are explicitly configured, nightly
+resume clears that enabled bot's pending Telegram updates before launching the
+agent. Its token is read from the existing protected configuration, with authenticated
+`enc2:` decryption using the adjacent protected `.secret_key`, and passed to curl
+through an anonymous pipe. No credential is stored or placed in argv. The
+five-minute test preserves the daytime queue. Other application queues remain
+owned by those applications. Services listed in `resume_services_first` resume after the ingress check and
+before queue clearing, allowing administration during recovery. Only services
+that were previously running are restored. If queue clearing fails, the recovery
+journal stays and the agent remains parked, preventing delayed command execution.
+
+The queue clear uses Telegram's documented negative-offset/confirmation behavior
+([getUpdates](https://core.telegram.org/bots/api#getupdates)). It clears the bot's
+pending queue at resume, including any older unprocessed updates. It sends no
+messages and changes no channel enablement.
+
+```sh
+python3 scripts/android/ultrasleep.py --profile .local/ultrasleep.json stage
+python3 scripts/android/ultrasleep.py --profile .local/ultrasleep.json test
+# Wait for the full five-minute offline interval and managed SSH reconnection.
+python3 scripts/android/ultrasleep.py --profile .local/ultrasleep.json status
+python3 scripts/android/ultrasleep.py --profile .local/ultrasleep.json enable
+```
+
+Staging builds a versioned native executable on the phone, verifies transferred
+SHA-256 hashes and probes the wake alarm before touching services. `test` arms
+an independent recovery alarm before entry, then measures 300 seconds using
+`CLOCK_BOOTTIME_ALARM`. Status records actual kernel suspend time as elapsed
+boottime minus monotonic time. Enabling requires a successful test with at least
+180 seconds of actual suspend. Inspect restoration of the original services and
+radios before enabling. A high-frequency wake alarm in another watchdog can
+prevent kernel suspend; use its supported recovery or sleep-compatible mode
+while preserving active ingress protection. Do not disable firewall rules to
+pass the test. The nightly boot wrapper is installed only by `enable`.
+
+Transitions persist a root-only recovery journal before changing services.
+Failures and controller exit trigger restoration; a failed restoration retains
+the journal for another attempt. Records and the status file are bounded and
+contain no application credentials. Versions and the previous boot wrapper stay
+under `/data/adb/homewire-ultrasleep` for operator rollback. Use the operator `recover` command to retry a failed restoration. Never remove a
+recovery journal before restoring its saved state.
+
+While reachable, `wake` sends an absolute wake request. During full offline sleep,
+use a local root terminal to send `kill -USR1` to the PID in
+`/data/adb/homewire-ultrasleep/controller.pid`; waking the screen alone does not
+resume the parked services. Use the operator `disable` command to remove the nightly boot wrapper and send
+`SIGTERM` to the controller, then verify that the recovery journal clears. For rollback, stop the controller
+first, restore the saved previous boot wrapper if present, and launch it. No
+wireless debugging or security-policy relaxation is required.

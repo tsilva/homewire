@@ -213,3 +213,173 @@ fn cli_unified_validation_and_discovery_need_no_network_and_reject_mixed_inputs(
     assert!(String::from_utf8_lossy(&output.stderr).contains("cannot be combined"));
     Ok(())
 }
+
+#[test]
+fn brightness_entities_resolve_capabilities_and_reject_duplicate_physical_devices() -> Result<()> {
+    let t = support::Directory::new()?;
+    t.certs()?;
+    let mut value = fixture()?;
+    value["adapters"]["tcl"]["companion"] = json!({
+        "server_cert_sha256":"00".repeat(32), "token":"a".repeat(64),
+        "fingerprint":"fixture-build", "incremental":"fixture-revision"
+    });
+    for (targets, legacy_tv, valid) in [
+        (json!(["light.bulb_1", "media_player.tcl"]), false, true),
+        (json!(["media_player.tcl"]), true, false),
+        (json!(["light.led_strip"]), false, false),
+        (json!(["light.bulb_1", "light.bulb_1"]), false, false),
+        (json!(["media_player.digi"]), false, false),
+        (json!(["light.missing"]), false, false),
+    ] {
+        value["automations"]["lights"]["brightness_entities"] = targets;
+        value["automations"]["lights"]["follow_tv_backlight"] = json!(legacy_tv);
+        let path = t.config("home.json", &value)?;
+        let output = Command::new(env!("CARGO_BIN_EXE_homewire"))
+            .arg("--config")
+            .arg(&path)
+            .arg("config-check")
+            .output()?;
+        assert_eq!(
+            output.status.success(),
+            valid,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn per_device_brightness_override_tools_are_private_persistent_and_control_gated() -> Result<()> {
+    use homewire::device::Adapter;
+    let t = support::Directory::new()?;
+    t.certs()?;
+    let path = t.config("home.json", &fixture()?)?;
+    let bundle = Bundle::load(&path)?.expect("fixture");
+    let mut devices = bundle.open_devices(None)?;
+    let coordinator = homewire::routine::brightness::Coordinator::from_devices(&mut devices)?;
+    let control = devices
+        .bulbs
+        .as_ref()
+        .expect("lights")
+        .brightness_control(2)
+        .expect("primary");
+    control.manual(35, chrono::Utc::now())?;
+    let args = json!({"entity":"light.led_strip"});
+    let before = entity::call(&mut devices, "brightness_schedule_status", &args)?;
+    assert_eq!(before["brightness_schedule"]["paused"], true);
+    let request = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"brightness_schedule_resume","arguments":args}});
+    let denied = homewire::mcp::handle_entities(request, &mut devices, false).expect("response");
+    assert!(denied.get("error").is_some() || denied["result"]["isError"] == true);
+    assert_eq!(
+        entity::call(&mut devices, "brightness_schedule_status", &args)?["brightness_schedule"]["paused"],
+        true
+    );
+    let resumed = entity::call(&mut devices, "brightness_schedule_resume", &args)?;
+    assert_eq!(resumed["brightness_schedule"]["paused"], false);
+    assert_eq!(resumed["brightness_schedule"]["resume_requested"], true);
+    assert!(coordinator.as_ref().expect("schedule").wake_requested());
+    assert!(
+        entity::call(
+            &mut devices,
+            "brightness_schedule_resume",
+            &json!({"entity":"light.bulb_1"})
+        )
+        .is_err()
+    );
+    assert!(
+        entity::call(
+            &mut devices,
+            "brightness_schedule_resume",
+            &json!({"entity":"media_player.digi"})
+        )
+        .is_err()
+    );
+    drop(coordinator);
+    let coordinator = homewire::routine::brightness::Coordinator::from_devices(&mut devices)?;
+    assert_eq!(
+        entity::call(&mut devices, "brightness_schedule_status", &args)?["brightness_schedule"]["resume_requested"],
+        true
+    );
+    assert!(coordinator.expect("schedule").wake_requested());
+    Ok(())
+}
+
+#[test]
+fn tcl_routine_discovers_order_and_owns_only_its_tv_and_outlet() -> Result<()> {
+    let t = support::Directory::new()?;
+    t.certs()?;
+    let mut value = fixture()?;
+    value["routines"]["tv"] =
+        json!({"target":"tcl","plug":"tv","startup_seconds":5,"ready_seconds":120});
+    let path = t.config("home.json", &value)?;
+    let bundle = Bundle::load(&path)?.expect("bundle");
+    let mut devices = bundle.open_devices(None)?;
+    let list = entity::list(&devices);
+    for id in ["media_player.tcl", "switch.tv"] {
+        let row = list["entities"]
+            .as_array()
+            .expect("entity list")
+            .iter()
+            .find(|e| e["entity"] == id)
+            .expect("owned entity");
+        assert_eq!(row["power_owner"], "tv_on/tv_off");
+        let (tool, args) = if id.starts_with("media") {
+            ("media_power", json!({"entity":id,"power":false}))
+        } else {
+            ("switch_set", json!({"entity":id,"power":false}))
+        };
+        assert!(
+            entity::call(&mut devices, tool, &args)
+                .expect_err("routine must own power")
+                .to_string()
+                .contains("TV routine")
+        );
+    }
+    assert!(
+        devices
+            .call("plug_apply", &json!({"plug":"tv","power":false}))
+            .expect_err("routine must own power")
+            .to_string()
+            .contains("TV routine")
+    );
+    let routines = homewire::routine::call(&mut devices, "routine_list", &json!({}))?;
+    assert!(routines.to_string().contains("tv_on"));
+    for name in ["tv_on", "tv_off"] {
+        let plan = homewire::routine::call(&mut devices, "routine_plan", &json!({"routine":name}))?;
+        assert_eq!(plan["result"]["target"], "tcl");
+    }
+    assert!(devices.tcl_routine.is_some());
+    assert!(devices.samsung.is_some() && devices.digi.is_some() && devices.plugs.is_some());
+    Ok(())
+}
+
+#[test]
+fn tcl_only_installation_exposes_standard_routine_tools() -> Result<()> {
+    let t = support::Directory::new()?;
+    t.certs()?;
+    let mut value = fixture()?;
+    value["adapters"]
+        .as_object_mut()
+        .expect("adapters")
+        .retain(|name, _| matches!(name.as_str(), "tcl" | "plugs"));
+    value["services"] = json!({});
+    value["automations"] = json!({});
+    value["routines"] =
+        json!({"tv":{"target":"tcl","plug":"tv","startup_seconds":5,"ready_seconds":120}});
+    let path = t.config("home.json", &value)?;
+    let bundle = Bundle::load(&path)?.expect("bundle");
+    let mut devices = bundle.open_devices(None)?;
+    let routines = entity::call(&mut devices, "routine_list", &json!({}))?;
+    assert_eq!(routines["routines"].as_array().expect("routines").len(), 2);
+    let plan = entity::call(&mut devices, "routine_plan", &json!({"routine":"tv_off"}))?;
+    assert_eq!(
+        plan["result"]["steps"],
+        json!([
+            "read_outlet",
+            "if_outlet_on_tcl_off_verify",
+            "outlet_off_verify"
+        ])
+    );
+    Ok(())
+}

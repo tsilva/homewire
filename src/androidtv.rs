@@ -26,6 +26,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 mod activity;
+pub mod companion;
 mod input;
 mod power;
 use input::{KEYS, key_code};
@@ -38,7 +39,7 @@ fn timeout() -> u64 {
 fn verify() -> u64 {
     20
 }
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub host: IpAddr,
@@ -62,6 +63,12 @@ pub struct Config {
     pub power_on_key: power::PowerOnKey,
     #[serde(default)]
     pub connect: Option<SocketAddr>,
+    #[serde(default)]
+    pub companion: Option<companion::Config>,
+    #[serde(skip)]
+    gate: crate::transport::Gate,
+    #[serde(skip)]
+    schedule: Option<crate::brightness::Control>,
 }
 #[derive(Debug)]
 pub(crate) struct Pinned {
@@ -123,6 +130,10 @@ pub struct Status {
     pub power: bool,
     pub current_app: Option<String>,
     pub volume: Option<Volume>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub picture: Option<companion::Status>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub picture_error: Option<String>,
 }
 #[derive(Debug, Serialize)]
 pub struct Volume {
@@ -131,6 +142,7 @@ pub struct Volume {
     pub muted: bool,
 }
 struct Remote<'a> {
+    _lease: crate::transport::Lease,
     expected_model: &'a str,
     expected_manufacturer: &'static str,
     stream: StreamOwned<ClientConnection, Timed>,
@@ -146,6 +158,12 @@ struct Remote<'a> {
 }
 impl Config {
     fn validate<const TCL: bool>(&self) -> Result<()> {
+        if let Some(companion) = &self.companion {
+            if !TCL {
+                return Err(error("Picture companion is TCL-only"));
+            }
+            companion.validate()?;
+        }
         if TCL {
             if !self.model.as_deref().is_some_and(|m| {
                 !m.trim().is_empty() && m.len() <= 128 && !m.chars().any(char::is_control)
@@ -186,6 +204,7 @@ impl Config {
         self.remote_input::<TCL>(deadline, false)
     }
     fn remote_input<const TCL: bool>(&self, deadline: Instant, voice: bool) -> Result<Remote<'_>> {
+        let lease = self.gate.enter()?;
         private_permissions(&self.client_cert)?;
         private_permissions(&self.client_key)?;
         let cert = CertificateDer::from_pem_slice(&read_bounded(
@@ -220,6 +239,7 @@ impl Config {
             deadline,
         )?;
         let mut remote = Remote {
+            _lease: lease,
             expected_model: self.model.as_deref().unwrap_or("DIGI R2A"),
             expected_manufacturer: if TCL { "TCL" } else { "ZTE" },
             stream: StreamOwned::new(connection, socket),
@@ -290,6 +310,8 @@ impl Remote<'_> {
                 power: false,
                 current_app: None,
                 volume: None,
+                picture: None,
+                picture_error: None,
             });
             let mut info = Vec::new();
             pb::integer(3, 1, &mut info);
@@ -596,13 +618,42 @@ impl<const TCL: bool> RemoteManager<TCL> {
             _lock: lock,
         })
     }
+    pub fn backlight_schedule_identity(&self) -> Result<String> {
+        let companion = self
+            .config
+            .companion
+            .as_ref()
+            .filter(|_| TCL)
+            .ok_or_else(|| error("TV curve follower requires a configured TCL companion"))?;
+        let identity = format!(
+            "{}:{}:{}:{}:{}:{}:{}",
+            self.config.host,
+            self.config.port,
+            self.config.server_cert_sha256,
+            companion.port,
+            companion.server_cert_sha256,
+            companion.fingerprint,
+            companion.incremental
+        );
+        Ok(Sha256::digest(identity.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect())
+    }
     pub fn status(&self) -> Result<Status> {
         let deadline = Instant::now() + Duration::from_secs(self.config.timeout_seconds);
         let mut remote = self.config.remote::<TCL>(deadline)?;
         remote.read_details(deadline)?;
-        remote
+        let mut status = remote
             .status
-            .ok_or_else(|| error("Missing Android TV power state"))
+            .ok_or_else(|| error("Missing Android TV power state"))?;
+        if let Some(companion) = &self.config.companion {
+            match companion.status(self.config.host, &status.model) {
+                Ok(picture) => status.picture = Some(picture),
+                Err(e) => status.picture_error = Some(e.to_string()),
+            }
+        }
+        Ok(status)
     }
     pub fn apply(&mut self, power: bool) -> Result<Value> {
         if TCL {
@@ -641,9 +692,30 @@ impl<const TCL: bool> RemoteManager<TCL> {
         )
     }
     fn configure(&mut self, settings: &Value) -> Result<Value> {
-        crate::settings::validate(SETTINGS, settings)?;
+        crate::settings::validate(self.settings(), settings)?;
         if settings.as_object().is_none_or(|s| s.len() != 1) {
-            return Err(error("Send app launch or text separately"));
+            return Err(error("Send one Android TV setting at a time"));
+        }
+        if let Some(level) = settings["backlight_level"].as_u64() {
+            if let Some(control) = &self.config.schedule {
+                control.manual(level as u8, chrono::Utc::now())?;
+            }
+            let deadline = Instant::now() + Duration::from_secs(self.config.timeout_seconds);
+            let mut remote = self.config.remote::<TCL>(deadline)?;
+            remote.read_details(deadline)?;
+            if !remote.status.as_ref().is_some_and(|s| s.power) {
+                return Err(error("TV must be confirmed on for picture controls"));
+            }
+            return self
+                .config
+                .companion
+                .as_ref()
+                .ok_or_else(|| error("TV companion is not configured"))?
+                .set(
+                    self.config.host,
+                    self.config.model.as_deref().unwrap_or(""),
+                    level as u8,
+                );
         }
         if let Some(link) = settings["app_link"].as_str() {
             validate_app_link(link)?;
@@ -684,6 +756,13 @@ impl<const TCL: bool> RemoteManager<TCL> {
         Ok(
             json!({"sent":true,"verified":false,"note":"Android remote does not acknowledge app/text controls; never replay automatically"}),
         )
+    }
+    fn settings(&self) -> &'static [crate::settings::Setting] {
+        if TCL && self.config.companion.is_some() {
+            PICTURE_SETTINGS
+        } else {
+            SETTINGS
+        }
     }
 }
 fn validate_app_link(link: &str) -> Result<()> {
@@ -734,6 +813,11 @@ const SETTINGS: &[crate::settings::Setting] = &[
         kind: crate::settings::Kind::Text { max: 512 },
     },
 ];
+const PICTURE_SETTINGS: &[crate::settings::Setting] = &[
+    SETTINGS[0],
+    SETTINGS[1],
+    crate::settings::Setting::integer("backlight_level", 0, 100, 1),
+];
 const KEY: Input = Input::Field {
     field: Field {
         name: "key",
@@ -744,6 +828,34 @@ const KEY: Input = Input::Field {
     shape_error: "Expected only key",
 };
 impl<const TCL: bool> Adapter for RemoteManager<TCL> {
+    fn brightness_control(&self, index: usize) -> Option<&crate::brightness::Control> {
+        if index == 0 {
+            self.config.schedule.as_ref()
+        } else {
+            None
+        }
+    }
+    fn set_brightness_control(
+        &mut self,
+        index: usize,
+        control: crate::brightness::Control,
+    ) -> Result<()> {
+        if !TCL || index != 0 || self.config.companion.is_none() {
+            return Err(error("Unsupported brightness schedule"));
+        }
+        self.config.schedule = Some(control);
+        Ok(())
+    }
+    fn brightness_device(&self, index: usize) -> Result<Option<crate::device::BrightnessDevice>> {
+        if !TCL || index != 0 || self.config.companion.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(crate::device::BrightnessDevice::Tv(Scheduled {
+            config: Arc::new(self.config.clone()),
+            identity: self.backlight_schedule_identity()?,
+        })))
+    }
+
     const SUPPORT: crate::entity::Support = crate::entity::Support::MEDIA
         .union(crate::entity::Support::CONFIGURE)
         .union(crate::entity::Support::APP_INPUT)
@@ -751,7 +863,7 @@ impl<const TCL: bool> Adapter for RemoteManager<TCL> {
         .union(crate::entity::Support::VOICE)
         .union(crate::entity::Support::ACTIVITY)
         .union(if TCL {
-            crate::entity::Support::WAKE
+            crate::entity::Support::WAKE.union(crate::entity::Support::ROUTINES)
         } else {
             crate::entity::Support::NONE
         });
@@ -794,7 +906,7 @@ impl<const TCL: bool> Adapter for RemoteManager<TCL> {
                     activities: activity::NAMES,
                 },
             )
-            .configurable(SETTINGS),
+            .configurable(self.settings()),
         );
     }
     fn read_device(&mut self, index: usize) -> Result<Value> {
@@ -840,7 +952,7 @@ impl<const TCL: bool> Adapter for RemoteManager<TCL> {
         let mut remote = self.config.remote::<TCL>(deadline)?;
         remote.read_details(deadline)?;
         Ok(
-            json!({"app_link":remote.features&512!=0,"text":remote.features&4!=0,"voice":remote.supported_features&8!=0,"volume_supported":remote.features&64!=0,"current_app":remote.status.as_ref().and_then(|s|s.current_app.as_deref()),"volume":remote.status.as_ref().and_then(|s|s.volume.as_ref()),"remote_hold_max_ms":crate::media_input::MAX_HOLD_MS,"hdmi_keys_require_firmware_validation":true,"activity_parameters":activity::options()}),
+            json!({"app_link":remote.features&512!=0,"text":remote.features&4!=0,"voice":remote.supported_features&8!=0,"volume_supported":remote.features&64!=0,"current_app":remote.status.as_ref().and_then(|s|s.current_app.as_deref()),"volume":remote.status.as_ref().and_then(|s|s.volume.as_ref()),"remote_hold_max_ms":crate::media_input::MAX_HOLD_MS,"hdmi_keys_require_firmware_validation":true,"activity_parameters":activity::options(),"settings":crate::settings::schema(self.settings())}),
         )
     }
 
@@ -885,6 +997,102 @@ impl<const TCL: bool> Adapter for RemoteManager<TCL> {
             "digi_key" => self.key(args["key"].as_str().ok_or_else(|| error("Expected key"))?),
             _ => Err(error("Unknown Android TV operation")),
         }
+    }
+}
+
+/// Protocol-owning payload for a generic brightness lane.
+pub struct Scheduled {
+    config: Arc<Config>,
+    identity: String,
+}
+impl Scheduled {
+    pub(crate) fn state_key(&self) -> String {
+        "schedule.state.backlight.json".into()
+    }
+    pub(crate) fn identity(&self) -> String {
+        self.identity.clone()
+    }
+    pub(crate) fn run(
+        &self,
+        state: &mut crate::brightness::State,
+        cycle: &crate::brightness::Cycle,
+    ) -> Result<bool> {
+        Ok(state
+            .tick(
+                cycle,
+                &mut ScheduledIo {
+                    config: &self.config,
+                    deadline: cycle
+                        .deadline
+                        .min(Instant::now() + Duration::from_secs(self.config.timeout_seconds)),
+                },
+            )?
+            .is_some())
+    }
+}
+struct ScheduledIo<'a> {
+    config: &'a Config,
+    deadline: Instant,
+}
+impl crate::brightness::Io for ScheduledIo<'_> {
+    type Applied = ();
+    fn read(&mut self) -> Result<crate::brightness::Observation> {
+        let mut remote = self.config.remote::<true>(self.deadline)?;
+        remote.read_details(self.deadline)?;
+        let status = remote
+            .status
+            .as_ref()
+            .ok_or_else(|| error("Unknown TV power"))?;
+        if !status.power {
+            return Ok(crate::brightness::Observation {
+                power: false,
+                brightness: 0,
+                temperature: None,
+            });
+        }
+        let picture = self
+            .config
+            .companion
+            .as_ref()
+            .ok_or_else(|| error("Missing TV companion"))?
+            .status_until(self.config.host, &status.model, self.deadline)?;
+        Ok(crate::brightness::Observation {
+            power: true,
+            brightness: picture.backlight_level,
+            temperature: None,
+        })
+    }
+    fn apply(
+        &mut self,
+        change: &crate::bulb::Change,
+        permit: &crate::brightness::Permit,
+    ) -> Result<()> {
+        if change.power.is_some() || change.color_temperature_k.is_some() {
+            return Err(error(
+                "TV brightness lane cannot change power or temperature",
+            ));
+        }
+        let mut remote = self.config.remote::<true>(self.deadline)?;
+        remote.read_details(self.deadline)?;
+        let status = remote
+            .status
+            .as_ref()
+            .filter(|s| s.power)
+            .ok_or_else(|| error("TV must be confirmed on for brightness controls"))?;
+        self.config
+            .companion
+            .as_ref()
+            .ok_or_else(|| error("Missing TV companion"))?
+            .set_scheduled_until(
+                self.config.host,
+                &status.model,
+                change
+                    .brightness_percent
+                    .ok_or_else(|| error("Missing brightness"))?,
+                self.deadline,
+                permit,
+            )?;
+        Ok(())
     }
 }
 
@@ -1489,7 +1697,7 @@ mod tests {
         let len = udp.recv(&mut bytes)?;
         assert_eq!(len, 102);
         assert_eq!(&bytes[..6], &[0xff; 6]);
-        for block in bytes[6..len].chunks_exact(6) {
+        for block in bytes[6..len].as_chunks::<6>().0 {
             assert_eq!(block, &[2, 0, 0, 0, 0, 64]);
         }
         drop(manager);
@@ -2108,6 +2316,48 @@ mod tests {
                     .contains("does not support")
             );
             worker.join().expect("server")?;
+        }
+        Ok(())
+    }
+    #[test]
+    fn backlight_discovery_is_opt_in_and_mcp_write_is_guarded() -> Result<()> {
+        use crate::{device::Devices, entity, mcp};
+        let temp = support::Directory::new()?;
+        let path = tcl_config(&temp, "127.0.0.1:1".parse()?, "00".repeat(32))?;
+        let mut config: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+        for enabled in [false, true] {
+            if enabled {
+                config["companion"] = json!({"server_cert_sha256":"00".repeat(32),
+                    "token":"ab".repeat(32),"fingerprint":"fixture-build","incremental":"fixture"});
+                temp.config("tcl.json", &config)?;
+            }
+            let mut devices = Devices {
+                tcl: Some(TclManager::open(&path)?),
+                ..Devices::default()
+            };
+            let listing =
+                entity::call(&mut devices, "entity_list", &json!({"details":true}))?.to_string();
+            assert_eq!(listing.contains("backlight_level"), enabled);
+            let reply = mcp::handle_entities(
+                json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+                "params":{"name":"entity_configure","arguments":{"entity":"media_player.tcl",
+                    "settings":{"backlight_level":50}}}}),
+                &mut devices,
+                false,
+            )
+            .expect("reply");
+            assert_eq!(reply["result"]["isError"], true);
+            assert!(reply.to_string().contains("Device control is disabled"));
+            for invalid in [json!(101), json!(-1), json!(0.5), json!("50")] {
+                assert!(
+                    entity::call(
+                        &mut devices,
+                        "entity_configure",
+                        &json!({"entity":"media_player.tcl","settings":{"backlight_level":invalid}})
+                    )
+                    .is_err()
+                );
+            }
         }
         Ok(())
     }

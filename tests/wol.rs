@@ -72,8 +72,8 @@ fn known_targets_are_discoverable_and_mcp_sends_once_only_with_permission() -> R
     assert_eq!(result["verified"], false);
     assert_eq!(socket.recv(&mut packet)?, 102);
     assert_eq!(packet[..6], [255; 6]);
-    for block in packet[6..102].chunks_exact(6) {
-        assert_eq!(block, [2, 0, 0, 0, 0, 1]);
+    for block in packet[6..102].as_chunks::<6>().0 {
+        assert_eq!(*block, [2, 0, 0, 0, 0, 1]);
     }
     assert!(socket.recv(&mut packet).is_err(), "no replay");
     Ok(())

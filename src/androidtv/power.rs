@@ -19,7 +19,7 @@ fn ready_seconds() -> u64 {
     45
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Wake {
     pub(super) mac: String,

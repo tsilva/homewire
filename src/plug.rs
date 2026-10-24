@@ -264,8 +264,21 @@ impl NetworkDevice<'_> {
     fn status(&mut self) -> Result<Status> {
         let mut status = self.read()?;
         if status.model == Model::P110 {
+            let usage = match self.client.read("get_energy_usage") {
+                Ok(usage) => usage,
+                // Some firmware rejects calendar statistics while its clock is
+                // uninitialized. Read the independent live meter once; never
+                // invent daily/monthly totals or change the device's clock.
+                Err(e)
+                    if e.downcast_ref::<klap::RejectedRequest>()
+                        .is_some_and(|e| e.method == "get_energy_usage" && e.code == -1003) =>
+                {
+                    json!({})
+                }
+                Err(e) => return Err(e),
+            };
             status.energy = Some(Energy::from_readings(
-                self.client.read("get_energy_usage")?,
+                usage,
                 self.client.read("get_emeter_data")?,
             )?);
         }
@@ -357,6 +370,15 @@ impl Manager {
                 Duration::ZERO,
             )?
             .status()
+    }
+    /// Read verified relay/protection state without requiring energy statistics.
+    pub fn relay_status(&self, name: &str) -> Result<Status> {
+        self.endpoint(name)?
+            .connect(
+                Duration::from_secs(self.config.timeout_seconds),
+                Duration::ZERO,
+            )?
+            .read()
     }
     pub fn apply(&self, name: &str, power: bool) -> Result<Applied> {
         let mut device = self.endpoint(name)?.connect(

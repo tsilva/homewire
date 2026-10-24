@@ -25,6 +25,8 @@ routines. Writes require `--allow-control`; read-only is the default.
 | `entity_status` | `{"entities":["light.bulb_1","sensor.awair_co2"]}` | Fresh batched reads |
 | `dehumidifier_set` | `{"entity":"dehumidifier.meaco","settings":{"purification":true,"sleep":false}}` | Independent mode booleans + control flag |
 | `light_set` | `{"entity":"light.led_strip","settings":{"power":true,"brightness_percent":30}}` | Lights + control flag |
+| `brightness_schedule_status` | `{"entity":"light.led_strip"}` | Configured brightness target; no device I/O |
+| `brightness_schedule_resume` | `{"entity":"media_player.tcl"}` | Configured brightness target + control flag; clear its manual pause and request the current target |
 | `switch_set` | `{"entity":"switch.tv","power":false}` | Plugs + control flag; TV outlet requires maintenance |
 | `media_power` | `{"entity":"media_player.digi","power":true}` | Media + control flag; routine-owned power requires maintenance |
 | `wake_list` | `{}` | Configured Samsung or generic WoL targets; no network I/O |
@@ -68,7 +70,12 @@ sequence without querying devices and report `live_state_checked:false`;
 neither plan guarantees the subsequent outcome. Runs preserve existing durable
 attempt guards and control verification.
 
-When `--tv` is configured, its Samsung, DIGI and entire plug adapter are borrowed
+For a configured TCL TV routine, use `routine_run` with `tv_on` or `tv_off`.
+The routine owns TCL and its selected outlet: startup powers the outlet first;
+shutdown verifies TCL power-off before cutting the outlet. An uncertain TV result
+leaves the outlet on. Agent channels need an explicit `routine_run` grant.
+
+When legacy `--tv` is configured, its Samsung, DIGI and entire plug adapter are borrowed
 from one owner. Loading separate adapters for those families is rejected, even
 with different config paths. Direct power commands for the two media devices
 and the TV's selected outlet are blocked in CLI and both MCP interfaces.

@@ -5,9 +5,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     net::{IpAddr, SocketAddr},
-    path::Path,
+    path::{Path, PathBuf},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -31,7 +31,7 @@ impl Model {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Endpoint {
     pub name: String,
@@ -44,6 +44,10 @@ pub struct Endpoint {
     pub port: u16,
     #[serde(default)]
     pub connect: Option<SocketAddr>,
+    #[serde(skip)]
+    gate: crate::transport::Gate,
+    #[serde(skip)]
+    schedule: Option<crate::brightness::Control>,
 }
 fn port() -> u16 {
     80
@@ -141,15 +145,21 @@ impl Endpoint {
         }
     }
     fn connect(&self, timeout: Duration) -> Result<NetworkDevice<'_>> {
+        self.connect_until(Instant::now() + timeout)
+    }
+    fn connect_until(&self, deadline: Instant) -> Result<NetworkDevice<'_>> {
+        let lease = self.gate.enter()?;
         let address = SocketAddr::new(self.host, self.port);
         Ok(NetworkDevice {
             endpoint: self,
+            _lease: lease,
+            expires: deadline,
             delay: Duration::ZERO,
-            client: klap::Client::connect(
+            client: klap::Client::connect_until(
                 self.connect.unwrap_or(address),
                 address.to_string(),
                 &self.key()?,
-                timeout,
+                deadline,
             )?,
         })
     }
@@ -326,6 +336,8 @@ pub trait Device {
     fn settle(&mut self) -> Result<()>;
 }
 struct NetworkDevice<'a> {
+    _lease: crate::transport::Lease,
+    expires: Instant,
     endpoint: &'a Endpoint,
     client: klap::Client,
     delay: Duration,
@@ -340,6 +352,9 @@ impl Device for NetworkDevice<'_> {
         )
     }
     fn set(&mut self, change: &Change) -> Result<()> {
+        if Instant::now() >= self.expires {
+            return Err(error("Expired light cycle; no command sent"));
+        }
         self.client
             .query("set_device_info", Some(change.params()))?;
         Ok(())
@@ -355,10 +370,20 @@ pub struct Applied {
     pub status: Status,
 }
 pub fn apply(device: &mut impl Device, change: &Change) -> Result<Applied> {
+    apply_with_permit(device, change, None)
+}
+fn apply_with_permit(
+    device: &mut impl Device,
+    change: &Change,
+    permit: Option<&crate::brightness::Permit>,
+) -> Result<Applied> {
     change.validate()?;
     let before = device
         .read()
         .map_err(|e| error(format!("Light pre-control read failed: {e}")))?;
+    if let Some(permit) = permit {
+        permit.check(before.brightness_percent)?;
+    }
     if before.model == Model::L900
         && before.effect_active != Some(false)
         && (change.brightness_percent.is_some()
@@ -386,6 +411,9 @@ pub fn apply(device: &mut impl Device, change: &Change) -> Result<Applied> {
         return Err(error(
             "Bulb reports overheating or its fault status is unknown; only power-off is allowed",
         ));
+    }
+    if let Some(permit) = permit {
+        permit.check(before.brightness_percent)?;
     }
     device
         .set(change)
@@ -422,8 +450,7 @@ pub struct Manager {
     pub config: Config,
     pub monitor: fault::Monitor,
     store: fault::Store,
-    pub scheduler: Option<light_schedule::Controller>,
-    brightness_schedulers: Vec<light_schedule::Controller>,
+    pub schedule_source: PathBuf,
 }
 pub type Check = fault::Check<Status, Unavailable>;
 #[derive(Serialize)]
@@ -439,43 +466,10 @@ impl Manager {
         let path = source.path();
         let config = Config::from_source(source)?;
         let (store, monitor) = fault::Store::open(path, &config.bulbs)?;
-        let scheduler = if let Some(automation) = &config.automation {
-            let endpoint = config
-                .bulbs
-                .iter()
-                .find(|b| b.name == automation.light)
-                .ok_or_else(|| error("Missing scheduled light"))?;
-            Some(light_schedule::Controller::open(
-                automation.clone(),
-                &path.with_extension("schedule.state.json"),
-                &endpoint.identity(),
-                chrono::Utc::now(),
-            )?)
-        } else {
-            None
-        };
-        let mut brightness_schedulers = Vec::new();
-        if let Some(automation) = &config.automation {
-            for name in &automation.brightness_lights {
-                let endpoint = config
-                    .bulbs
-                    .iter()
-                    .find(|b| b.name == *name)
-                    .ok_or_else(|| error("Missing brightness follower light"))?;
-                brightness_schedulers.push(light_schedule::Controller::open_brightness(
-                    automation.clone(),
-                    name,
-                    &path.with_extension(format!("schedule.{name}.state.json")),
-                    &endpoint.identity(),
-                    chrono::Utc::now(),
-                )?);
-            }
-        }
         Ok(Self {
             background: crate::fault::Background::default(),
             config,
-            scheduler,
-            brightness_schedulers,
+            schedule_source: path.to_owned(),
             monitor,
             store,
         })
@@ -497,49 +491,17 @@ impl Manager {
     }
     pub fn apply(&self, name: &str, change: &Change) -> Result<Applied> {
         change.validate()?;
+        let endpoint = self.endpoint(name)?;
+        if let Some(level) = change.brightness_percent
+            && let Some(control) = &endpoint.schedule
+        {
+            control.manual(level, chrono::Utc::now())?;
+        }
         let mut device = self
             .endpoint(name)?
             .connect(Duration::from_secs(self.config.timeout_seconds))?;
         device.delay = Duration::from_secs(self.config.settle_seconds);
         apply(&mut device, change)
-    }
-    pub fn schedule_tick(&mut self) -> Result<Vec<Applied>> {
-        if self.scheduler.is_none() {
-            return Err(error("No light automation configured"));
-        }
-        let mut applied = Vec::new();
-        let mut failure = None;
-        for scheduler in self
-            .scheduler
-            .iter_mut()
-            .chain(&mut self.brightness_schedulers)
-        {
-            let result = (|| {
-                let endpoint = self
-                    .config
-                    .bulbs
-                    .iter()
-                    .find(|b| b.name == scheduler.config.light)
-                    .ok_or_else(|| error("Missing scheduled light"))?;
-                let mut device =
-                    endpoint.connect(Duration::from_secs(self.config.timeout_seconds))?;
-                device.delay = Duration::from_secs(self.config.settle_seconds);
-                scheduler.tick(chrono::Utc::now(), &mut device)
-            })();
-            match result {
-                Ok(Some(result)) => applied.push(result),
-                Ok(None) => (),
-                Err(e) if failure.is_none() => {
-                    failure = Some(error(format!("{}: {e}", scheduler.config.light)))
-                }
-                Err(_) => (),
-            }
-        }
-        if let Some(e) = failure {
-            Err(e)
-        } else {
-            Ok(applied)
-        }
     }
     pub fn check(&mut self) -> Result<Check> {
         self.store.check(
@@ -582,6 +544,34 @@ impl fault::Target for Endpoint {
 }
 
 impl Adapter for Manager {
+    fn brightness_control(&self, index: usize) -> Option<&crate::brightness::Control> {
+        self.config.bulbs.get(index)?.schedule.as_ref()
+    }
+    fn set_brightness_control(
+        &mut self,
+        index: usize,
+        control: crate::brightness::Control,
+    ) -> Result<()> {
+        self.config
+            .bulbs
+            .get_mut(index)
+            .ok_or_else(|| error("Unknown light"))?
+            .schedule = Some(control);
+        Ok(())
+    }
+    fn brightness_device(&self, index: usize) -> Result<Option<crate::device::BrightnessDevice>> {
+        let endpoint = self
+            .config
+            .bulbs
+            .get(index)
+            .ok_or_else(|| error("Unknown light"))?;
+        Ok(Some(crate::device::BrightnessDevice::Light(Scheduled {
+            endpoint: endpoint.clone(),
+            timeout: Duration::from_secs(self.config.timeout_seconds),
+            settle: Duration::from_secs(self.config.settle_seconds),
+        })))
+    }
+
     crate::fault::monitored_background!("lights", "Light");
     const SUPPORT: crate::entity::Support =
         crate::entity::Support::LIGHT.union(crate::entity::Support::CONFIGURE);
@@ -872,4 +862,45 @@ fn configure_light(device: &mut NetworkDevice<'_>, settings: &Value) -> Result<V
         return Ok(json!({"verified":true,"effect_enabled":enabled}));
     }
     crate::tapo_settings::configure(&mut device.client, LIGHT_RULES, settings)
+}
+
+/// Protocol-owning worker payload. No schedule, timers or retained readings.
+pub struct Scheduled {
+    endpoint: Endpoint,
+    timeout: Duration,
+    settle: Duration,
+}
+impl Scheduled {
+    pub(crate) fn identity(&self) -> String {
+        self.endpoint.identity()
+    }
+    pub(crate) fn state_key(&self) -> String {
+        format!("schedule.{}.state.json", self.endpoint.name)
+    }
+    pub(crate) fn run(
+        &self,
+        state: &mut crate::brightness::State,
+        cycle: &crate::brightness::Cycle,
+    ) -> Result<bool> {
+        let mut device = self
+            .endpoint
+            .connect_until(cycle.deadline.min(Instant::now() + self.timeout))?;
+        device.delay = self.settle;
+        Ok(state.tick(cycle, &mut ScheduleIo(&mut device))?.is_some())
+    }
+}
+pub(crate) struct ScheduleIo<'a, D: Device>(pub &'a mut D);
+impl<D: Device> crate::brightness::Io for ScheduleIo<'_, D> {
+    type Applied = Applied;
+    fn read(&mut self) -> Result<crate::brightness::Observation> {
+        let s = self.0.read()?;
+        Ok(crate::brightness::Observation {
+            power: s.power,
+            brightness: s.brightness_percent,
+            temperature: Some(s.color_temperature_k),
+        })
+    }
+    fn apply(&mut self, change: &Change, permit: &crate::brightness::Permit) -> Result<Applied> {
+        apply_with_permit(self.0, change, Some(permit))
+    }
 }

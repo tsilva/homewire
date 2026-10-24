@@ -8,5 +8,6 @@
 .DS_Store
 
 /companion/android/build/
+/companion/tv/build/
 __pycache__/
 *.py[cod]

@@ -51,3 +51,41 @@ impl Write for Timed {
         self.socket.flush()
     }
 }
+
+/// Shared by an adapter and its I/O lane. Busy callers fail before network I/O.
+#[derive(Clone, Default)]
+pub(crate) struct Gate(std::sync::Arc<std::sync::atomic::AtomicBool>);
+pub(crate) struct Lease(std::sync::Arc<std::sync::atomic::AtomicBool>);
+impl Gate {
+    pub(crate) fn enter(&self) -> Result<Lease> {
+        self.0
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::Acquire,
+                std::sync::atomic::Ordering::Relaxed,
+            )
+            .map_err(|_| error("Device is busy; no command was sent"))?;
+        Ok(Lease(self.0.clone()))
+    }
+}
+impl Drop for Lease {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+    #[test]
+    fn cloned_device_gate_fails_fast_and_releases_on_drop() -> Result<()> {
+        let owner = Gate::default();
+        let worker = owner.clone();
+        let lease = owner.enter()?;
+        assert!(worker.enter().is_err());
+        drop(lease);
+        assert!(worker.enter().is_ok());
+        Ok(())
+    }
+}

@@ -132,7 +132,7 @@ pub fn encrypt(bytes: &[u8], key: &[u8; 16]) -> Vec<u8> {
     let mut out = bytes.to_vec();
     out.resize(bytes.len() + padding, padding as u8);
     let cipher = Aes128::new(GenericArray::from_slice(key));
-    for block in out.chunks_exact_mut(16) {
+    for block in out.as_chunks_mut::<16>().0 {
         cipher.encrypt_block(GenericArray::from_mut_slice(block));
     }
     out
@@ -143,7 +143,7 @@ pub fn decrypt(bytes: &[u8], key: &[u8; 16]) -> Result<Vec<u8>> {
     }
     let mut out = bytes.to_vec();
     let cipher = Aes128::new(GenericArray::from_slice(key));
-    for block in out.chunks_exact_mut(16) {
+    for block in out.as_chunks_mut::<16>().0 {
         cipher.decrypt_block(GenericArray::from_mut_slice(block));
     }
     let padding = usize::from(*out.last().ok_or_else(|| error("Empty encrypted payload"))?);

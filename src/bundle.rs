@@ -157,21 +157,27 @@ impl Bundle {
             return Err(error("--connect requires Meaco"));
         }
         if let Some(value) = self.document.routines.get("tv") {
-            devices.tv = Some(crate::tv::Manager::from_children(
-                &Source::section(&self.path, "tv", value),
-                devices
-                    .samsung
-                    .take()
-                    .ok_or_else(|| error("TV requires Samsung configuration"))?,
-                devices
-                    .digi
-                    .take()
-                    .ok_or_else(|| error("TV requires DIGI configuration"))?,
-                devices
-                    .plugs
-                    .take()
-                    .ok_or_else(|| error("TV requires plugs configuration"))?,
-            )?);
+            if value["target"] == "tcl" {
+                devices.tcl_routine = Some(crate::routine::tcl::Manager::open(&Source::section(
+                    &self.path, "tv", value,
+                ))?);
+            } else {
+                devices.tv = Some(crate::tv::Manager::from_children(
+                    &Source::section(&self.path, "tv", value),
+                    devices
+                        .samsung
+                        .take()
+                        .ok_or_else(|| error("TV requires Samsung configuration"))?,
+                    devices
+                        .digi
+                        .take()
+                        .ok_or_else(|| error("TV requires DIGI configuration"))?,
+                    devices
+                        .plugs
+                        .take()
+                        .ok_or_else(|| error("TV requires plugs configuration"))?,
+                )?);
+            }
         }
         if let Some(value) = self.document.routines.get("computer") {
             devices.computer_routine = Some(crate::routine::computer::Manager::open(

@@ -45,7 +45,7 @@ fn timeout() -> u64 {
 }
 /// A second, independently pinned interface on the same physical TV. This
 /// contains no media URL and cannot target a host other than its TV adapter.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Wake {
     server_cert_sha256: String,

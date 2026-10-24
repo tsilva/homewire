@@ -168,7 +168,7 @@ fn fields(bytes: &[u8]) -> Result<Vec<(u8, u32)>> {
         return Err(error("Unsupported Brother diagnostic encoding"));
     }
     let mut result = Vec::new();
-    for b in bytes.chunks_exact(7) {
+    for b in bytes.as_chunks::<7>().0 {
         if b[1] != 1 || b[2] != 4 {
             return Err(error("Unsupported Brother counter width"));
         }

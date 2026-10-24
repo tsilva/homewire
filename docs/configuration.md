@@ -13,7 +13,7 @@ families. The file is bounded to 64 KiB and requires `version: 1`.
 | --- | --- |
 | `adapters` | `meaco`, `printers`, `awair`, `lights`, `plugs`, `samsung`, `digi`, `tcl`, `brother`, `cast`, `dlna`, `wol`, `computer`; see [device guides](devices.md) |
 | `routines.meaco` | Day/night presets, previously `meaco.json`'s `presets` |
-| `routines.tv` | `plug`, `shutdown_policy`, `timings`; its children are the configured Samsung, DIGI and plugs adapters, without file references |
+| `routines.tv` | TCL outlet sequencing below, or legacy `plug`, `shutdown_policy`, `timings` for Samsung/DIGI |
 | `automations.meaco` | `timezone`, `day`, `night`, previously Meaco `schedule` |
 | `automations.lights` | L900 curve/location/timezone settings, previously lights `automation` |
 | `services` | `api`, `alerts`, `history`, `mobile`, `weather`, `shopping`, `radio`, `speech`; see [services](services.md) |
@@ -47,6 +47,30 @@ state without device requests or listener binding. It does not verify online
 availability. Configuration presence alone does not enable controls or
 schedules: `--allow-control`, `--schedule`, `--light-schedule` and watch flags
 remain explicit runtime grants. Android updates preserve saved grants.
+
+To sequence a TCL and its outlet, configure `adapters.tcl`, `adapters.plugs`
+and this unified routine (the outlet label is synthetic):
+
+```json
+"routines": {
+  "tv": {
+    "target": "tcl",
+    "plug": "tv",
+    "startup_seconds": 5,
+    "ready_seconds": 120
+  }
+}
+```
+
+`tv_on` verifies outlet power first, waits `startup_seconds` (1–60) if it changed,
+then waits up to `ready_seconds` (1–120) for pinned TCL readiness after cold
+boot before verified power-on. With the outlet already on, the TCL adapter handles
+its configured standby wake recovery. `tv_off` requires verified TCL power-off before verified outlet cutoff.
+If the outlet is already off, shutdown sends no TV control. Failed or uncertain
+TV controls leave the outlet on and retain the 180-second routine attempt guard.
+Direct TCL/outlet power and outlet auto-off changes require `--maintenance`.
+Other outlets and TCL brightness/navigation remain available. The legacy
+Samsung/DIGI routine remains supported with its explicit fixed-delay policy.
 
 TCL recovery is opt-in; see [power and network standby](devices.md#tcl-power-and-network-standby).
 A separate Cast playback adapter does not enable it.
@@ -100,6 +124,49 @@ The configuration lock excludes concurrent owners; use MCP/bridge while an owner
 is running. Locks cannot coordinate with Home Assistant or manufacturer apps.
 
 ## Command-line usage
+
+### TCL companion configuration
+
+The optional [TV APK](../companion/tv/README.md) installation helper produces
+this object for `adapters.tcl.companion` (or `companion` in a separate TCL file):
+
+```json
+{
+  "port": 8766,
+  "server_cert_sha256": "REPLACE_WITH_PAIRED_CERTIFICATE_SHA256",
+  "token": "${HOMEWIRE_SECRET_TV_API_TOKEN}",
+  "fingerprint": "REPLACE_WITH_AUDITED_BUILD_FINGERPRINT",
+  "incremental": "REPLACE_WITH_AUDITED_BUILD_INCREMENTAL",
+  "timeout_seconds": 8
+}
+```
+
+Keep its token in Infisical and pins/identities in protected private configuration.
+The optional `connect` socket address is for host-side tunnels only; deployment
+must use the TV's LAN endpoint. Port defaults to 8766; timeout defaults to 8
+seconds and is bounded to 1–30. The companion is TCL-only and adds the integer
+`backlight_level` setting, 0–100, to the existing media entity. Omit it to retain
+remote-only operation. Android deployment resolves its token reference using the
+existing protected runtime configuration workflow; it requires no new grants.
+
+To follow the existing light brightness curve, also set
+`automations.lights.follow_tv_backlight` to `true` and run the already configured
+`--light-schedule` owner with control enabled. See the
+[schedule behavior and attempt guards](devices.md#l900-scheduling).
+Alternatively, `automations.lights.brightness_entities` accepts standard entity
+IDs such as `["light.lamp_a", "media_player.tcl"]`. It defaults to an empty
+list. These targets and the legacy follower fields use one shared cycle target
+and independent bounded device I/O. Select each physical device only once;
+unsupported brightness capabilities and duplicates fail validation. The total
+limit is nine devices including the primary L900. Existing grants, opt-in flags,
+and durable per-device attempt files still apply.
+All scheduled brightness targets automatically use a fixed two-hour manual
+override, stored in private sidecars without changing configuration or attempt
+schemas. No additional flag or competing scheduler is required. Read and resume
+it through `brightness_schedule_status` / `brightness_schedule_resume`; see
+[manual brightness overrides](devices.md#manual-brightness-overrides).
+
+### Device commands
 
 Run from the repository root with your private unified configuration prepared.
 Only commands for configured adapters are available:

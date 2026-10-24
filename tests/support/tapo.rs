@@ -64,6 +64,22 @@ pub fn mock_sessions(
     initial: Value,
     energy: Option<(Value, Value)>,
 ) -> Result<(SocketAddr, thread::JoinHandle<Result<Vec<Value>>>)> {
+    mock_sessions_with_energy_replies(
+        sessions,
+        initial,
+        energy.map(|(usage, meter)| {
+            (
+                json!({"error_code":0,"result":usage}),
+                json!({"error_code":0,"result":meter}),
+            )
+        }),
+    )
+}
+pub fn mock_sessions_with_energy_replies(
+    sessions: Vec<(Vec<&'static str>, Option<usize>)>,
+    initial: Value,
+    energy: Option<(Value, Value)>,
+) -> Result<(SocketAddr, thread::JoinHandle<Result<Vec<Value>>>)> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let address = listener.local_addr()?;
     let worker = thread::spawn(move || -> Result<Vec<Value>> {
@@ -113,9 +129,9 @@ pub fn mock_sessions(
                         .extend(request["params"].as_object().expect("params").clone());
                     json!({"error_code":0})
                 } else if method == "get_energy_usage" {
-                    json!({"error_code":0,"result":energy.as_ref().expect("energy fixture").0})
+                    energy.as_ref().expect("energy fixture").0.clone()
                 } else if method == "get_emeter_data" {
-                    json!({"error_code":0,"result":energy.as_ref().expect("energy fixture").1})
+                    energy.as_ref().expect("energy fixture").1.clone()
                 } else {
                     json!({"error_code":0,"result":state})
                 };
