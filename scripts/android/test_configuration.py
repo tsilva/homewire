@@ -12,6 +12,27 @@ from test_deployment import fixture
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_explicit_shutdown_lists_keep_pc_optional_and_reject_unsafe_actions(self):
+        import copy
+        value = {'version': 1, 'adapters': {'plugs': {}, 'printers': {}, 'computer': {}},
+                 'routines': {'computer': {}, 'leave_house': {
+                     'steps': [{'action': 'printer', 'entity': 'printer.office', 'outlet': 'switch.office'}],
+                     'optional_pc': [{'action': 'routine', 'name': 'computer_off'}],
+                     'optional_kitchen': [{'action': 'outlet', 'entity': 'switch.kitchen'}]},
+                     'sleep': {'steps': [{'action': 'routine', 'name': 'computer_off'}]}}}
+        self.assertIs(configuration.validate(value), value)
+        for step in ({'action': 'routine', 'name': 'sleep'},
+                     {'action': 'routine', 'name': 'computer_off'},
+                     {'action': 'routine', 'name': 'computer_on'},
+                     {'action': 'outlet', 'entity': 'switch.a', 'power': True},
+                     {'action': [], 'entity': 'switch.a'}):
+            invalid = copy.deepcopy(value)
+            invalid['routines']['leave_house']['steps'].append(step)
+            with self.subTest(step=step), self.assertRaises(ValueError): configuration.validate(invalid)
+        invalid = copy.deepcopy(value)
+        invalid['routines']['sleep']['optional_kitchen'] = [{'action': 'outlet', 'entity': 'switch.a'}]
+        with self.assertRaises(ValueError): configuration.validate(invalid)
+
     def test_migration_preserves_state_paths_and_keeps_a_private_backup(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -27,7 +27,7 @@ def validate(value):
         if section in ('adapters', 'services'):
             misplaced = set(entries) & set(SERVICES if section == 'adapters' else ADAPTERS)
         else:
-            misplaced = set(entries) - set(('meaco', 'tv', 'computer') if section == 'routines' else ('meaco', 'lights'))
+            misplaced = set(entries) - set(('meaco', 'tv', 'computer', 'leave_house', 'sleep') if section == 'routines' else ('meaco', 'lights'))
         if misplaced:
             raise ValueError('Misplaced family or unknown routine/automation')
     if 'deployment' in value and not isinstance(value['deployment'], dict):
@@ -45,7 +45,46 @@ def validate(value):
             raise ValueError('TV requires its configured media adapters and plugs')
     if 'computer' in value.get('routines', {}) and not {'computer', 'plugs'} <= set(adapters):
         raise ValueError('Computer routine requires computer and plugs')
+    for name in ('leave_house', 'sleep'):
+        if name in value.get('routines', {}):
+            validate_shutdown(name, value['routines'][name], value.get('routines', {}), adapters)
     return value
+
+
+def validate_shutdown(name, settings, routines, adapters):
+    allowed = {'steps', 'optional_pc', 'optional_kitchen'}
+    if set(settings) - allowed or not settings.get('steps') or any(
+            not isinstance(settings.get(key, []), list) for key in allowed):
+        raise ValueError('Invalid explicit shutdown lists')
+    total = sum(len(settings.get(key, [])) for key in allowed)
+    if total > 16 or name == 'sleep' and (settings.get('optional_pc') or settings.get('optional_kitchen')):
+        raise ValueError('Shutdown list exceeds 16 steps')
+    for group in allowed:
+        for step in settings.get(group, []):
+            if not isinstance(step, dict):
+                raise ValueError('Invalid shutdown step')
+            action = step.get('action')
+            if not isinstance(action, str):
+                raise ValueError('Invalid shutdown action')
+            keys = {'routine': {'action', 'name'}, 'outlet': {'action', 'entity'},
+                    'printer': {'action', 'entity', 'outlet'}}.get(action)
+            if keys is None or set(step) != keys or any(
+                    not isinstance(step[key], str) or not 1 <= len(step[key]) <= 96 for key in keys):
+                raise ValueError('Invalid shutdown step schema')
+            if action == 'routine':
+                child = step['name']
+                if child not in ('tv_off', 'computer_off') or child.removesuffix('_off') not in routines:
+                    raise ValueError('Missing or unsupported shutdown routine')
+                if child == 'tv_off' and routines['tv'].get('target') != 'tcl':
+                    raise ValueError('Shutdown list requires verified TCL TV shutdown')
+            if action in ('outlet', 'printer') and 'plugs' not in adapters:
+                raise ValueError('Shutdown outlet requires plugs')
+            if action == 'printer' and 'printers' not in adapters:
+                raise ValueError('Shutdown printer requires IPP adapter')
+            if name == 'leave_house' and (
+                    (group == 'optional_pc' and step != {'action': 'routine', 'name': 'computer_off'}) or
+                    (group != 'optional_pc' and step == {'action': 'routine', 'name': 'computer_off'})):
+                raise ValueError('leave_house PC shutdown must be in optional_pc')
 
 
 def load(path):

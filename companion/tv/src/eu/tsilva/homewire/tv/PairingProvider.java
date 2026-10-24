@@ -7,6 +7,7 @@ import android.database.MatrixCursor;
 import android.net.Uri;
 import android.os.ParcelFileDescriptor;
 import android.os.Binder;
+import android.os.Bundle;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -16,10 +17,30 @@ import org.json.JSONObject;
 public final class PairingProvider extends ContentProvider {
     private final AtomicBoolean writing = new AtomicBoolean();
     public boolean onCreate() { return true; }
-    private void operator(Uri uri) {
-        if (Binder.getCallingUid() != 2000 || !uri.getPath().equals("/config")) {
+    private void operator() {
+        if (Binder.getCallingUid() != 2000) {
             throw new SecurityException("ADB pairing only");
         }
+        getContext().enforceCallingPermission("android.permission.DUMP", "ADB operator only");
+    }
+    private void operator(Uri uri) {
+        operator();
+        if (!"/config".equals(uri.getPath())) throw new SecurityException("Invalid operator path");
+    }
+    @Override public Bundle call(String method, String arg, Bundle extras) {
+        operator();
+        if (!"standby_connection".equals(method) || (!"true".equals(arg) && !"false".equals(arg))
+            || (extras != null && !extras.isEmpty())) {
+            throw new IllegalArgumentException("Invalid standby configuration");
+        }
+        long identity = Binder.clearCallingIdentity();
+        try {
+            StandbyConnection.set(getContext(), "true".equals(arg));
+            Bundle result = new Bundle();
+            result.putBoolean("keep_network_in_standby", StandbyConnection.enabled(getContext()));
+            return result;
+        } catch (Exception e) { throw new IllegalStateException("Standby configuration failed"); }
+        finally { Binder.restoreCallingIdentity(identity); }
     }
     @Override public ParcelFileDescriptor openFile(Uri uri, String mode) throws java.io.FileNotFoundException {
         operator(uri);
@@ -41,15 +62,16 @@ public final class PairingProvider extends ContentProvider {
     @Override public Cursor query(Uri uri, String[] projection, String selection, String[] args, String sort) {
         operator(uri);
         long identity = Binder.clearCallingIdentity();
-        MatrixCursor result = new MatrixCursor(new String[]{"paired", "port", "certificate_sha256", "configured", "error", "api_state", "tls_error"}, 1);
+        MatrixCursor result = new MatrixCursor(new String[]{"paired", "port", "certificate_sha256", "configured", "error", "api_state", "tls_error", "standby_connection", "standby_lock_held"}, 1);
         boolean configured = false;
         try {
             Config config = Config.load(getContext());
             configured = true;
-            result.addRow(new Object[]{1, config.port, Credentials.pin(), 1, "", ApiServer.health, ApiServer.tlsFailure});
+            result.addRow(new Object[]{1, config.port, Credentials.pin(), 1, "", ApiServer.health, ApiServer.tlsFailure,
+                StandbyConnection.enabled(getContext()) ? 1 : 0, TvService.standbyLockHeld() ? 1 : 0});
         } catch (Exception e) {
             // Operator-only diagnostics disclose exception types, never inputs or messages.
-            result.addRow(new Object[]{0, 0, "", configured ? 1 : 0, e.getClass().getSimpleName(), ApiServer.health, ""});
+            result.addRow(new Object[]{0, 0, "", configured ? 1 : 0, e.getClass().getSimpleName(), ApiServer.health, "", 0, 0});
         } finally { Binder.restoreCallingIdentity(identity); }
         return result;
     }

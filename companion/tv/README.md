@@ -207,8 +207,40 @@ config receives its resolved value; the host config retains the reference.
 
 Open **Homewire TV** to start or stop its foreground service. It requests boot
 startup when enabled. Verify startup on the particular TV before
-depending on it. A force-stop requires opening the app again. There is no wake
-lock or periodic polling. Standby may suspend network access.
+depending on it. A force-stop requires opening the app again.
+
+### Keep the connection available in standby
+
+Some firmware suspends network access even with **Network standby** selected.
+For incoming local controls, opt in to **Keep connection available in standby**
+in Homewire TV. It defaults to off and persists independently of pairing. While
+the connection service is running, this holds one partial wake lock to keep the
+CPU available with the screen off. It increases standby energy use. Disabling
+the option, stopping the connection, or an API-worker failure releases the lock.
+There is no periodic polling or additional worker. Boot startup uses the saved
+option when the connection itself is enabled.
+
+This does not enable Screenless mode, Assistant, microphone access, or a remote
+power API. The companion requests no microphone capture permission. Keep Android
+microphone privacy enabled separately, and verify the selected paired remote
+wake key on the actual TV.
+
+After pairing, an authorized ADB operator can also set the option explicitly:
+
+```sh
+adb -s TV_ADB_TARGET shell content call \
+  --uri content://eu.tsilva.homewire.tv.pairing/config \
+  --method standby_connection --arg true
+adb -s TV_ADB_TARGET shell content query \
+  --uri content://eu.tsilva.homewire.tv.pairing/config
+```
+
+Use `--arg false` to disable it. Only shell UID 2000 with DUMP permission may
+configure it; a paired firmware match is required. The operator query reports
+`standby_connection` and `standby_lock_held`. Confirm the actual
+`homewire-tv:standby-connection` partial wake lock and an asleep display through
+`dumpsys power`, then test authenticated wake after an idle interval. The HTTPS
+status schema and existing pairing are unchanged.
 
 Use the release command for future updates and source-based recovery with the
 same signing identity; do not uninstall or clear app data during updates.

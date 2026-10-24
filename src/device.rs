@@ -226,6 +226,8 @@ macro_rules! static_adapters {
             $(pub $field: Option<$adapter>,)+
             pub computer_routine: Option<crate::routine::computer::Manager>,
             pub tcl_routine: Option<crate::routine::tcl::Manager>,
+            pub leave_house: Option<crate::routine::household::Manager>,
+            pub sleep_routine: Option<crate::routine::household::Manager>,
             /// Explicit override for direct controls owned by a routine.
             pub maintenance: bool,
         }
@@ -318,6 +320,8 @@ macro_rules! static_adapters {
                 self.validate_ownership()?;
                 if let Some(routine) = &self.computer_routine { routine.validate(self)?; }
                 if let Some(routine) = &self.tcl_routine { routine.validate(self)?; }
+                if let Some(routine) = &self.leave_house { routine.validate(self)?; }
+                if let Some(routine) = &self.sleep_routine { routine.validate(self)?; }
                 crate::wol::validate_targets(self)?;
                 let mut ambiguous = false;
                 self.entities(&mut |entity| {

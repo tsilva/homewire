@@ -501,6 +501,29 @@ infisical run --env=prod -- target/release/homewire --tcl .local/tcl.json call r
 
 ### TCL power and network standby
 
+Configure standby on the TV before relying on remote wake. On firmware with
+**Settings > System > Power and energy > Standby mode**, select **Network
+standby**. **Doze** permits intermittent background maintenance and can suspend
+the network services needed for wake, even when an older network-standby setting
+remains enabled. Confirm the selected mode in the current menu. Firmware with a
+separate **Quick start** setting also requires it enabled, as described in
+[TCL's network-wake guide](https://www.tcl.com/content/dam/brandsite/region/europe/products/tv/c-series/c745/downloads/um/tcl-mt15-en-c745.pdf).
+
+Network standby increases standby energy use. Homewire's network wake does not
+require **Screenless** mode, hands-free Assistant, or microphone access; keep
+microphone privacy configured independently. Validate a deliberate standby/wake
+cycle with the outlet left on and confirm the TV's reported power state. A cold
+boot after switching the outlet on tests a different path. The normal `tv_off`
+routine cuts the outlet after verified shutdown, while `tv_on` uses the configured
+standby recovery when the outlet is already on. A magic packet alone does not
+exercise the complete authenticated Cast recovery described below.
+
+If services still disappear between maintenance windows, the companion's
+opt-in [standby connection](../companion/tv/README.md#keep-the-connection-available-in-standby)
+keeps the CPU available for incoming requests while the screen is off. This
+uses more standby energy, preserves microphone privacy, and requires the
+connection service to remain enabled. Validate the paired wake key separately.
+
 MCP uses the same standard tools; writes require `--allow-control`. TCL has no
 additional legacy tools. `media_power` skips a matching fresh power state.
 By default, on sends one absolute WAKEUP key; off sends one POWER key only after
@@ -522,9 +545,19 @@ Optional fields under `adapters.tcl` support firmware-specific recovery:
 | `wake` | Object with verified unicast `mac`, UDP `wake_address` and `ready_seconds` (default 45, range 1–120). If the remote service is unreachable before any control, send one magic packet and attempt read-only recovery before the one power key. |
 | `cast_wake` | Object with independent `server_cert_sha256`, `port` (default 8009) and `timeout_seconds` (default 8, range 1–30). Uses the TV's configured host; no media URL or separate host is accepted. |
 
+With `cast_wake` omitted, `power_on_key` selects the paired remote wake key.
+Firmware that ignores WAKEUP can use `"power_on_key": "power"`; Homewire checks
+fresh power state before sending that one toggle. With `cast_wake` configured,
+Cast owns power-on recovery and `power_on_key` is not used for that operation.
+
 Cast wake is **experimental and opt-in**. It first reads the pinned remote
 interface; identity errors abort. If that interface is unavailable or reports
 off, the independently pinned Cast interface must explicitly report standby.
+The Cast certificate is an independent identity check: a mismatch stops wake
+and must not trigger automatic pin replacement or another control. On firmware
+where the paired Android TV Remote wake key works in network standby, omit
+`cast_wake` to use that paired wake path. Deliberately validate that configuration
+on the TV before relying on it.
 An active Cast receiver is left alone. A standby receiver launches the Default
 Media Receiver once, stopping an existing instance first if necessary; it never
 loads media. Connection failures known to precede any STOP/LAUNCH receive
