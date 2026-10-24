@@ -1,4 +1,4 @@
-//! Administrative service entrypoint. Betty uses the standard Homewire adapter.
+//! Administrative service entrypoint for the standard Homewire computer adapter.
 use homewire::{Result, computer, config::Source, device::Adapter, error};
 use std::path::Path;
 fn run() -> Result<()> {

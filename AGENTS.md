@@ -17,6 +17,23 @@ and absolute wake/sleep. The TV workflow composes those adapters and a shared pl
   documentation-only addresses and credential placeholders. Store household
   inventories, personal locations, device serials and deployment/migration logs
   in ignored `.local/` files, never in public examples or reference documentation.
+- This repository is public. Before every commit, inspect the complete staged
+  diff, filenames and proposed commit message for private household details.
+  Review code, tests, fixtures, screenshots and documentation equally: never
+  commit real device IDs/serials, MAC or LAN addresses, personal hostnames,
+  precise locations, room/device inventories, actual household schedules,
+  credentials, pairing data or deployment/cutover records. Keep those in ignored
+  `.local/` files; use documentation addresses and synthetic fixtures in Git.
+  Report findings by file/line and category without printing private values.
+- Install the privacy hooks with `python3 scripts/privacy_guard.py install`.
+  Before committing, run `python3 scripts/privacy_guard.py staged` and complete
+  the manual privacy review above. Before pushing, run
+  `python3 scripts/privacy_guard.py check HEAD`. The pre-push hook checks every
+  outgoing ref against retired commit/tree/blob hashes, including full ancestry.
+  Never bypass these checks, weaken their denylist, or restore the retired
+  history for troubleshooting/tests. Test the guard with synthetic repositories.
+  Hash checks cannot recognize newly written private details: sanitize those
+  before staging, even when the automated checks pass.
 - Keep messages, queues, caches, and retained state bounded. Measure resident memory
   on the target device before claiming a memory footprint.
 - Keep device protocol code separate from Meaco behavior, scheduling, and MCP.
@@ -70,6 +87,8 @@ and absolute wake/sleep. The TV workflow composes those adapters and a shared pl
 - Commit Cargo.lock. Avoid unnecessary dependencies and interpreter subprocesses.
 - Required checks: `cargo fmt --check`, `cargo test --locked`, and
   `cargo clippy --locked --all-targets -- -D warnings`.
+- Privacy guard changes also run
+  `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_*.py'`.
 
 - Android deployment changes also run
   `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/android -p 'test_*.py'`
@@ -81,7 +100,7 @@ and absolute wake/sleep. The TV workflow composes those adapters and a shared pl
 ## TCL companion releases
 
 For TCL companion builds, deployments, verification or recovery, use
-[$homewire_build-release](/Users/tsilva/.codex/skills/private-skills/homewire_build-release/SKILL.md).
+`$homewire_build-release`.
 It uses `companion/tv/release.py`, the protected `.local/tv-release.json` bindings,
 and the [release guide](companion/tv/README.md#one-command-releases).
 An explicit build-and-deploy request authorizes the normal update checks;

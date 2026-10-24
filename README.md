@@ -137,7 +137,8 @@ before installation, and saves versioned artifacts and previous-APK backups. See
 - [Configuration and CLI](docs/configuration.md): schemas, commands, credentials and migration.
 - [Household services](docs/services.md): playback, alerts, history, dashboard and Android companion.
 - [Android deployment](docs/android.md): installation, isolation, verification and rollback. Includes optional [offline ultrasleep](docs/android.md#offline-ultrasleep) with a local wake alarm.
-- [Development](docs/development.md): architecture, required checks and memory measurement.
+- [Development](docs/development.md): architecture, required checks, memory measurement and [privacy hooks](docs/development.md#public-repository-privacy).
+  Contributors should install the hooks before committing or pushing.
 - [Reference index](docs/reference.md): all guide sections.
 
 The isolated Android agent serves its installed ZeroClaw dashboard from read-only
