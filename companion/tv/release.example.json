@@ -1,0 +1,23 @@
+{
+  "toolchain": {
+    "JAVA_HOME": "/path/to/jdk-17",
+    "HOMEWIRE_ANDROID_PLATFORM": "/path/to/android-sdk/platforms/android-35",
+    "HOMEWIRE_ANDROID_BUILD_TOOLS": "/path/to/android-sdk/build-tools/35.0.0"
+  },
+  "signing": {
+    "project_id": "00000000-0000-4000-8000-000000000001",
+    "environment": "prod",
+    "folder": "/tv-companion/signing",
+    "domain": "https://app.infisical.com"
+  },
+  "runtime": {
+    "project_id": "00000000-0000-4000-8000-000000000001",
+    "environment": "prod",
+    "folder": "/tv-companion/runtime",
+    "domain": "https://app.infisical.com"
+  },
+  "serial": "192.0.2.40:5555",
+  "profile": "tv-profile.json",
+  "companion": "tv-companion.json",
+  "artifacts": "tv-releases"
+}
