@@ -70,6 +70,18 @@ sequence without querying devices and report `live_state_checked:false`;
 neither plan guarantees the subsequent outcome. Runs preserve existing durable
 attempt guards and control verification.
 
+Configured `leave_house` and `sleep` use [explicit shutdown lists](configuration.md#explicit-household-shutdown-lists).
+`routine_plan` and `routine_run` accept `{"routine":"leave_house"}` for the default
+list. Add `"include_pc":true` and/or `"include_kitchen":true` only when the user
+explicitly requests those groups. Both default to false; strings, unknown fields
+and optional flags on any other routine are rejected before device I/O.
+`{"routine":"sleep"}` uses its full configured list. Household plans never query
+devices. Runs preserve child shutdown-before-cutoff guards, require fresh idle
+and zero-jobs printer checks, and continue independent steps after a failure.
+Inspect `result.completed` and individual step errors; partial completion is not
+success and must never trigger an automatic retry. Writes still require
+`--allow-control` and the agent channel's `routine_run` grant.
+
 For a configured TCL TV routine, use `routine_run` with `tv_on` or `tv_off`.
 The routine owns TCL and its selected outlet: startup powers the outlet first;
 shutdown verifies TCL power-off before cutting the outlet. An uncertain TV result

@@ -58,6 +58,11 @@ for credentials. There is no automatic discovery.
 
 ## Devices and routines
 
+[Explicit household routines](docs/configuration.md#explicit-household-shutdown-lists)
+compose shutdown lists with device-before-outlet ordering and fresh idle printer
+checks. `leave_house` includes PC and kitchen only on explicit request;
+`sleep` uses its complete configured list. Preview either without device I/O.
+
 | Setup guide | Capabilities |
 | --- | --- |
 | [Meaco Arete Two](docs/configuration.md#configuration) | Status, purification/sleep controls and day/night/off routines |
@@ -74,6 +79,11 @@ results stop execution; packet or key delivery alone does not prove a device
 changed state. Each guide describes its verification limits.
 [TCL TV routines](docs/configuration.md#unified-configuration) turn the outlet on
 before the TV, and verify TV shutdown before turning the outlet off.
+Waking a powered TCL from standby also requires the TV's
+[network standby mode](docs/devices.md#tcl-power-and-network-standby);
+firmware that still suspends its network can opt in to the companion's
+[standby connection](companion/tv/README.md#keep-the-connection-available-in-standby).
+Microphone access can remain blocked.
 Computer startup requires verified outlet state, without depending on energy
 statistics; metered shutdown still requires fresh consumption readings.
 P110 live metering remains available when an uninitialized outlet clock causes

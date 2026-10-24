@@ -14,6 +14,7 @@ families. The file is bounded to 64 KiB and requires `version: 1`.
 | `adapters` | `meaco`, `printers`, `awair`, `lights`, `plugs`, `samsung`, `digi`, `tcl`, `brother`, `cast`, `dlna`, `wol`, `computer`; see [device guides](devices.md) |
 | `routines.meaco` | Day/night presets, previously `meaco.json`'s `presets` |
 | `routines.tv` | TCL outlet sequencing below, or legacy `plug`, `shutdown_policy`, `timings` for Samsung/DIGI |
+| `routines.leave_house`, `routines.sleep` | Explicit shutdown lists, with optional PC/kitchen groups for leave_house |
 | `automations.meaco` | `timezone`, `day`, `night`, previously Meaco `schedule` |
 | `automations.lights` | L900 curve/location/timezone settings, previously lights `automation` |
 | `services` | `api`, `alerts`, `history`, `mobile`, `weather`, `shopping`, `radio`, `speech`; see [services](services.md) |
@@ -30,6 +31,62 @@ beside `home.json`; runtime state and locks also live there (`meaco.state.json`,
 `lights.state.json`, `tv.state.json`, `FAMILY.json.lock`, plus `home.json.lock`).
 Use one config directory per installation and [daemon/bridge](automation.md#persistent-daemon-and-mcp-bridge)
 for additional clients. Temporary JSON and host-only `deployment` data are discarded.
+
+### Explicit household shutdown lists
+
+Configure `routines.leave_house` and `routines.sleep` independently. Each has a
+nonempty `steps` array; the combined mandatory and optional lists contain at most
+16 steps. Nothing is added from device discovery. For example, with the referenced
+adapters, TV/PC routines and synthetic outlet names already configured:
+
+```json
+"leave_house": {
+  "steps": [
+    {"action":"routine","name":"tv_off"},
+    {"action":"printer","entity":"printer.office","outlet":"switch.printer_power"},
+    {"action":"outlet","entity":"switch.heater_power"},
+    {"action":"outlet","entity":"switch.iron_power"}
+  ],
+  "optional_pc": [{"action":"routine","name":"computer_off"}],
+  "optional_kitchen": [{"action":"outlet","entity":"switch.kitchen_power"}]
+},
+"sleep": {
+  "steps": [
+    {"action":"routine","name":"tv_off"},
+    {"action":"printer","entity":"printer.office","outlet":"switch.printer_power"},
+    {"action":"outlet","entity":"switch.heater_power"},
+    {"action":"outlet","entity":"switch.iron_power"},
+    {"action":"routine","name":"computer_off"},
+    {"action":"outlet","entity":"switch.kitchen_power"}
+  ]
+}
+```
+
+`leave_house` appends `optional_pc` and `optional_kitchen` only when the caller
+explicitly passes the corresponding boolean flag. PC shutdown cannot appear in
+its mandatory list or kitchen group. `sleep` accepts no nonempty optional groups.
+Requesting an unconfigured optional group fails before device I/O.
+Only `tv_off` (verified TCL sequencing) and `computer_off` are allowed as child
+routines; arbitrary tools, power-on routines and recursive lists are rejected.
+The existing child routine owns device shutdown and dependent outlet cutoff.
+PC shutdown without configured completion evidence leaves its outlet on and
+reports the household routine incomplete.
+
+`outlet` explicitly permits direct power-off for a simple load. It cannot target
+a TV/PC-owned outlet. `printer` checks the outlet first; if it is on, a fresh
+read-only IPP result must report `idle` and exactly zero queued jobs before cutoff.
+Missing, busy, stopped, unreachable or unknown printer status leaves power on.
+This policy permits cutting power to an idle printer; it does not issue a graceful
+printer shutdown or prevent new external jobs arriving after the check.
+An already-off outlet is verified without querying its unpowered printer.
+Duplicate physical targets and unknown entities fail configuration validation.
+
+Steps run sequentially. A failed step leaves its dependent cutoff unexecuted;
+independent steps continue. Results report `completed:false` and per-step errors.
+There is no rollback or automatic replay. An attempt is saved before controls;
+partial/uncertain attempts block replay for 180 seconds, including after restart.
+Plans describe configured steps without any device I/O. These routines do not
+schedule execution or change the Android host's separate offline sleep schedule.
 
 Router login, status, client-based presence and administrative controls are no
 longer supported. Remove `adapters.router` from older unified files; the runtime

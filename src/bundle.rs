@@ -83,7 +83,12 @@ impl Bundle {
             return Err(error("Configure lights once"));
         }
         for (family, value) in &document.routines {
-            if !value.is_object() || !matches!(family.as_str(), "meaco" | "tv" | "computer") {
+            if !value.is_object()
+                || !matches!(
+                    family.as_str(),
+                    "meaco" | "tv" | "computer" | "leave_house" | "sleep"
+                )
+            {
                 return Err(error("Unknown routine or invalid section"));
             }
         }
@@ -183,6 +188,19 @@ impl Bundle {
             devices.computer_routine = Some(crate::routine::computer::Manager::open(
                 &Source::section(&self.path, "computer-routine", value),
             )?);
+        }
+        for name in ["leave_house", "sleep"] {
+            if let Some(value) = self.document.routines.get(name) {
+                let manager = crate::routine::household::Manager::open(
+                    &Source::section(&self.path, name, value),
+                    name,
+                )?;
+                if name == "leave_house" {
+                    devices.leave_house = Some(manager);
+                } else {
+                    devices.sleep_routine = Some(manager);
+                }
+            }
         }
         devices.validate()?;
         Ok(devices)

@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.content.Intent;
 import android.os.Bundle;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
@@ -17,7 +18,17 @@ public final class MainActivity extends Activity {
         try {
             Config config = Config.load(this);
             status.setText("Paired TCL TV • HTTPS port " + config.port + "\nCertificate: " + Credentials.pin()
-                + "\nBacklight controls use the current picture mode. Standby availability depends on the TV.");
+                + "\nBacklight controls use the current picture mode.");
+            CheckBox standby = new CheckBox(this);
+            standby.setText("Keep connection available in standby (uses more power)");
+            standby.setChecked(StandbyConnection.enabled(this)); layout.addView(standby);
+            standby.setOnClickListener(v -> {
+                try { StandbyConnection.set(this, standby.isChecked()); }
+                catch (Exception e) {
+                    standby.setChecked(StandbyConnection.enabled(this));
+                    status.setText("Standby connection could not be applied. Check the connection service.");
+                }
+            });
             Button start = new Button(this); start.setText("Start connection"); layout.addView(start);
             start.setOnClickListener(v -> {
                 getSharedPreferences("lifecycle", 0).edit().putBoolean("enabled", true).commit();
