@@ -77,3 +77,12 @@ and absolute wake/sleep. The TV workflow composes those adapters and a shared pl
   Sandbox changes also build the native guard and run its negative probe on the target.
   Never restore permissive agent grants on failure or enable disabled channels.
   Never copy test tunnel configs to phones.
+
+## TCL companion releases
+
+For TCL companion builds, deployments, verification or recovery, use
+[$homewire_build-release](/Users/tsilva/.codex/skills/private-skills/homewire_build-release/SKILL.md).
+It uses `companion/tv/release.py`, the protected `.local/tv-release.json` bindings,
+and the [release guide](companion/tv/README.md#one-command-releases).
+An explicit build-and-deploy request authorizes the normal update checks;
+reboot verification remains opt-in for the current run.

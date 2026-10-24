@@ -8,6 +8,11 @@ Do not provision another firmware merely because it uses the TCL brand.
 
 ## One-command releases
 
+In Codex, ask “Build and deploy a new TCL companion version” or invoke
+`$homewire_build-release`. The skill selects the next unused patch version when
+none is specified, then runs this workflow with the existing private bindings.
+Ask explicitly for reboot verification when wanted.
+
 After the one-time setup below, run from any directory:
 
 ```sh
