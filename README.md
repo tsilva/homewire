@@ -108,6 +108,13 @@ the timer on further changes and surviving restarts. Use
 `brightness_schedule_status` or `brightness_schedule_resume` with its entity ID
 to inspect the pause or resume the current target now.
 
+## TCL companion releases
+
+After the private toolchain and Infisical bindings are configured, build, sign,
+install and verify an update with `python3 companion/tv/release.py --version 0.1.1`.
+The command preserves pairing and saves versioned artifacts and previous-APK
+backups. See the [one-time setup, verification and recovery guide](companion/tv/README.md#one-command-releases).
+
 ## Further reading
 
 - [Configuration and CLI](docs/configuration.md): schemas, commands, credentials and migration.

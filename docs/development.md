@@ -24,6 +24,11 @@ to JDK 17, Python installation tests under `companion/tv/tests`, and shellcheck
 on its two shell scripts. Follow the [TV companion build and hardware checks](../companion/tv/README.md)
 for a signed installation, pinned authentication and deliberate native controls.
 
+CI also compiles the TV APK unsigned with JDK 17, API 35 and build-tools 35.0.0,
+and runs its Java/Python tests, Android deployment tests and shellcheck without
+credentials. Local signed updates use `python3 companion/tv/release.py --version VERSION`;
+see the [release setup and recovery contract](../companion/tv/README.md#one-command-releases).
+
 Sandbox changes must build the native guard and run its negative probe on the
 target. CI runs Rust checks and a release build with Rust 1.95.0 on Linux.
 Synthetic tests cover protocol framing, stale/unknown readings, identity/signature

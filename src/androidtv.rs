@@ -146,6 +146,7 @@ struct Remote<'a> {
     expected_model: &'a str,
     expected_manufacturer: &'static str,
     stream: StreamOwned<ClientConnection, Timed>,
+    frames: pb::Framed,
     status: Option<Status>,
     features: u64,
     configured: bool,
@@ -243,6 +244,7 @@ impl Config {
             expected_model: self.model.as_deref().unwrap_or("DIGI R2A"),
             expected_manufacturer: if TCL { "TCL" } else { "ZTE" },
             stream: StreamOwned::new(connection, socket),
+            frames: pb::Framed::default(),
             status: None,
             features: 0,
             configured: false,
@@ -270,7 +272,7 @@ impl Remote<'_> {
         ))
     }
     fn receive(&mut self) -> Result<()> {
-        let bytes = pb::read(&mut self.stream)?;
+        let bytes = self.frames.read(&mut self.stream)?;
         let message = Message::new(&bytes)?;
         if message.nested(3)?.is_some() {
             return Err(error("Android TV remote reported a protocol error"));
@@ -1144,7 +1146,7 @@ mod tests {
         Text(&'static str),
         NoKey,
         Details(bool),
-        Hold(bool, u64),
+        Hold(bool, u64, bool),
         Voice(&'static [u8]),
         UnsupportedVoice,
         ReadyKey(bool),
@@ -1288,7 +1290,7 @@ mod tests {
                 }
                 return Ok(());
             }
-            if let Some(TestControl::Hold(fail, ping_delay_ms)) = command {
+            if let Some(TestControl::Hold(fail, ping_delay_ms, split)) = command {
                 let key = pb::read(&mut stream)?;
                 let key = Message::new(&key)?.nested(10)?.expect("press");
                 assert_eq!(key.int(1)?, Some(23));
@@ -1300,7 +1302,18 @@ mod tests {
                     thread::sleep(Duration::from_millis(ping_delay_ms));
                     let mut ping = Vec::new();
                     pb::integer(1, 42, &mut ping);
-                    pb::write(&mut stream, 8, &ping)?;
+                    if split {
+                        use std::io::Write;
+                        let mut wire = Vec::new();
+                        pb::write(&mut wire, 8, &ping)?;
+                        stream.write_all(&wire[..3])?;
+                        stream.flush()?;
+                        thread::sleep(Duration::from_millis(120));
+                        stream.write_all(&wire[3..])?;
+                        stream.flush()?;
+                    } else {
+                        pb::write(&mut stream, 8, &ping)?;
+                    }
                 }
                 // A ping can cross the hold deadline: the one release may
                 // precede its pong. Both orders are valid on the same session.
@@ -2107,11 +2120,16 @@ mod tests {
     #[test]
     fn held_key_services_ping_and_releases_once_even_after_protocol_error() -> Result<()> {
         use crate::{device::Devices, entity};
-        for (fail, ping_delay_ms) in [(false, 0), (false, 120), (true, 0)] {
+        for (fail, ping_delay_ms, split) in [
+            (false, 0, false),
+            (false, 120, false),
+            (false, 0, true),
+            (true, 0, false),
+        ] {
             let temp = support::Directory::new()?;
             let (address, worker, pin) = server_control(
                 true,
-                Some(TestControl::Hold(fail, ping_delay_ms)),
+                Some(TestControl::Hold(fail, ping_delay_ms, split)),
                 "Smart TV",
                 "TCL",
                 true,

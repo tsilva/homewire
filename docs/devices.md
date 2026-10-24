@@ -462,6 +462,9 @@ and [power-protection module](https://github.com/python-kasa/python-kasa/blob/ma
 
 ## TCL Android / Google TV
 
+Held keys keep servicing remote keepalives when their frames overlap the release
+deadline; one bounded partial frame is retained until the session can finish it.
+
 The `tcl` adapter shares the synchronous Android TV Remote v2 transport with
 DIGI, using mutual TLS on port 6466. It requires a paired client certificate/key,
 a pinned server certificate and an exact configured `model`. Live manufacturer
