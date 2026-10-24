@@ -37,7 +37,7 @@ jobs:
         run: |
           export JAVA_HOME="$JAVA_HOME_17_X64"
           export PATH="$JAVA_HOME/bin:$PATH"
-          sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+          # These exact SDK packages ship with ubuntu-24.04; build.py verifies them.
           export HOMEWIRE_ANDROID_PLATFORM="$ANDROID_HOME/platforms/android-35"
           export HOMEWIRE_ANDROID_BUILD_TOOLS="$ANDROID_HOME/build-tools/35.0.0"
           sh companion/tv/test.sh
