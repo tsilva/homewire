@@ -1144,7 +1144,7 @@ mod tests {
         Text(&'static str),
         NoKey,
         Details(bool),
-        Hold(bool),
+        Hold(bool, u64),
         Voice(&'static [u8]),
         UnsupportedVoice,
         ReadyKey(bool),
@@ -1288,7 +1288,7 @@ mod tests {
                 }
                 return Ok(());
             }
-            if let Some(TestControl::Hold(fail)) = command {
+            if let Some(TestControl::Hold(fail, ping_delay_ms)) = command {
                 let key = pb::read(&mut stream)?;
                 let key = Message::new(&key)?.nested(10)?.expect("press");
                 assert_eq!(key.int(1)?, Some(23));
@@ -1297,19 +1297,30 @@ mod tests {
                 if fail {
                     pb::write(&mut stream, 3, &[])?;
                 } else {
+                    thread::sleep(Duration::from_millis(ping_delay_ms));
                     let mut ping = Vec::new();
                     pb::integer(1, 42, &mut ping);
                     pb::write(&mut stream, 8, &ping)?;
-                    let pong = pb::read(&mut stream)?;
-                    assert_eq!(
-                        Message::new(&pong)?.nested(9)?.expect("pong").int(1)?,
-                        Some(42)
-                    );
                 }
-                let release = pb::read(&mut stream)?;
-                let release = Message::new(&release)?.nested(10)?.expect("release");
-                assert_eq!(release.int(1)?, Some(23));
-                assert_eq!(release.int(2)?, Some(2));
+                // A ping can cross the hold deadline: the one release may
+                // precede its pong. Both orders are valid on the same session.
+                let (mut pong, mut released) = (fail, false);
+                for _ in 0..if fail { 1 } else { 2 } {
+                    let frame = pb::read(&mut stream)?;
+                    let message = Message::new(&frame)?;
+                    if let Some(reply) = message.nested(9)? {
+                        assert!(!pong, "duplicate pong");
+                        assert_eq!(reply.int(1)?, Some(42));
+                        pong = true;
+                    } else {
+                        let release = message.nested(10)?.expect("release");
+                        assert!(!released, "duplicate release");
+                        assert_eq!(release.int(1)?, Some(23));
+                        assert_eq!(release.int(2)?, Some(2));
+                        released = true;
+                    }
+                }
+                assert!(pong && released);
                 if !fail {
                     assert!(pressed_at.elapsed() >= Duration::from_millis(60));
                     let mut byte = [0];
@@ -2096,11 +2107,11 @@ mod tests {
     #[test]
     fn held_key_services_ping_and_releases_once_even_after_protocol_error() -> Result<()> {
         use crate::{device::Devices, entity};
-        for fail in [false, true] {
+        for (fail, ping_delay_ms) in [(false, 0), (false, 120), (true, 0)] {
             let temp = support::Directory::new()?;
             let (address, worker, pin) = server_control(
                 true,
-                Some(TestControl::Hold(fail)),
+                Some(TestControl::Hold(fail, ping_delay_ms)),
                 "Smart TV",
                 "TCL",
                 true,
