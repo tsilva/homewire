@@ -11,10 +11,21 @@ Do not provision another firmware merely because it uses the TCL brand.
 After the one-time setup below, run from any directory:
 
 ```sh
-python3 /path/to/homewire/companion/tv/release.py --version 0.1.1
+python3 /path/to/homewire/companion/tv/release.py --version 0.1.5
 ```
 
-From the repository root, the equivalent is `python3 companion/tv/release.py --version 0.1.1`.
+From the repository root, the equivalent is:
+
+```sh
+python3 companion/tv/release.py --version 0.1.5
+```
+
+Choose an unused version greater than the installed version; `0.1.5` is an example.
+The default private configuration is `.local/tv-release.json` under the repository
+root, independent of the current working directory. Use `--config /private/path/tv-release.json`
+for another saved configuration. Once that file and the toolchain are set up,
+future releases need only the command above and an authenticated Infisical session.
+
 The command runs the required Rust checks, Android deployment tests, companion
 Java/Python tests and shellcheck, builds and verifies a signed APK, saves its
 source and hashes, backs up the installed APK, installs once, and verifies the
@@ -62,8 +73,9 @@ pipes the signing key to apksigner and never writes credentials to disk or logs.
 A credential/authentication failure stops the release; renew Infisical login
 before starting another candidate.
 
-Authorize ADB on the intended TV. `serial` selects it explicitly. The command connects the configured TCP serial automatically; the TV must
-already authorize this ADB host. Normal HTTPS verification connects to the audited profile's host/port.
+Authorize ADB on the intended TV. `serial` selects it explicitly. The command
+connects the configured TCP serial automatically; the TV must already authorize
+this ADB host. Normal HTTPS verification connects to the audited profile's host/port.
 An operator-managed tunnel can be specified only in the private release config
 as `"verify_connect": ["127.0.0.1", 18766]`; this never changes Homewire's LAN config
 or the certificate pin. Alternatively, add `"ssh_alias": "managed-phone"` to reuse an existing
@@ -79,23 +91,33 @@ The temporary route configuration contains metadata only and is removed on exit.
 Each `.local/tv-releases/VERSION/` contains the exact signed `homewire-tv.apk`,
 `source.tar.gz`, extracted source, a source/archive/APK hash and signer receipt,
 a credential-free `checks.log`, and, after deployment, `installation.json` plus
-the previous APK backup. The
-receipt records `built`, `verified`, or `failed` and its failed gate. A dirty local
-source tree is allowed and recorded alongside its content hash and Git commit;
+the previous APK backup. The receipt records `built`, `verified`, or `failed`
+and its failed gate. A dirty local source tree is allowed and recorded alongside its content hash and Git commit;
 this is a local deployment workflow, not a publication certification.
 
 Build without contacting the TV, then deploy those exact bytes:
 
 ```sh
-python3 companion/tv/release.py --version 0.1.1 --build-only
-python3 companion/tv/release.py --deploy-existing .local/tv-releases/0.1.1
+python3 companion/tv/release.py --version 0.1.5 --build-only
+python3 companion/tv/release.py --deploy-existing .local/tv-releases/0.1.5
 ```
 
 Normal deployment verifies the autostart permission but does not prove boot
 recovery. To deliberately reboot the TV once after installation and verify the
-boot identity changes and the API returns without opening the app, append `--verify-reboot` to either deployment
-command. This interrupts viewing. If ADB does not reconnect or boot/API verification
+boot identity changes and the API returns without opening the app, append
+`--verify-reboot` to either deployment command:
+
+```sh
+python3 companion/tv/release.py --version 0.1.5 --verify-reboot
+```
+
+This interrupts viewing. If ADB does not reconnect or boot/API verification
 fails, the release remains failed; the command never reboots a second time.
+
+A successful deployment prints `Deployed and verified: ...`; confirm that directory's
+`receipt.json` has `phase` set to `"verified"` and `installation.json` records the acceptance
+checks. With `--verify-reboot`, `reboot_verified` must also be `true`. A `built`
+receipt proves only a signed build, and does not establish a successful deployment.
 
 A connection failure before the installer starts leaves the candidate `built`,
 with the failed connection gate recorded. Restore TV/network access and use
@@ -111,7 +133,7 @@ To restore an earlier saved implementation, rebuild its archived source as a
 **higher new version** and deploy it through the same checks:
 
 ```sh
-python3 companion/tv/release.py --version 0.1.3 --rollback .local/tv-releases/0.1.1
+python3 companion/tv/release.py --version 0.1.6 --rollback .local/tv-releases/0.1.5
 ```
 
 This preserves pairing, TLS keys and replay state without relying on Android
@@ -125,13 +147,13 @@ downgrade path. Never uninstall or clear app data to bypass a version/signature 
 For a signed local build with credentials already injected:
 
 ```sh
-python3 companion/tv/build.py --version 0.1.1 --output /private/fresh/homewire-tv.apk
+python3 companion/tv/build.py --version 0.1.5 --output /private/fresh/homewire-tv.apk
 ```
 
 For a credential-free compile/package check:
 
 ```sh
-python3 companion/tv/build.py --unsigned --version 0.1.1 --output /private/fresh/homewire-tv-unsigned.apk
+python3 companion/tv/build.py --unsigned --version 0.1.5 --output /private/fresh/homewire-tv-unsigned.apk
 ```
 
 The output must not already exist. Every build uses fresh temporary compiler/DEX
