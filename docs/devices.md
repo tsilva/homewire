@@ -297,12 +297,14 @@ nine total targets fail validation before device I/O. `brightness_lights` and
 select each device only once. The primary L900 retains its temperature and
 sunset behavior; all followers use only the shared brightness target.
 
-Set `follow_tv_backlight: true` to make `media_player.tcl` follow the exact same
+Set `follow_tv_backlight: true` to make `media_player.tcl` follow the same
 brightness curve and timezone through the [TV companion](#tcl-backlight-companion).
 It defaults to false and requires a configured TCL adapter and companion; invalid
 combinations fail configuration validation. The TV uses the curve's brightness
-percentage directly as its native backlight level, including the outside-curve
-value. This does not change picture temperature, picture mode or power.
+percentage as its native backlight level with a minimum of 30, including at the
+end of the curve and outside it. Light targets keep their configured range.
+Manual TV adjustments retain the native 0–100 range and the two-hour schedule
+pause. This does not change picture temperature, picture mode or power.
 
 This follower runs in the existing `--light-schedule` job. It checks at the same
 5–30-second interval, assesses an on TV at startup, after observing power-on, and
@@ -688,6 +690,37 @@ sending credentials, read before changing, skip an already matching value, and
 verify the result. Neither client nor server retries an uncertain write. The
 companion retains a bounded replay journal across restarts. Network availability
 in standby and vendor restrictions on starting apps still depend on the TV.
+
+### TCL screenshots and navigation
+
+With the paired companion configured, `media_player.tcl` advertises
+`screen_capture` and its available `screen_navigation` actions. Explicitly enable
+**Homewire TV visual prototype** in the TV's Android accessibility settings.
+Disable it there to revoke screenshot and accessibility-navigation access.
+
+- `media_screen_status {"entity":"media_player.tcl"}` reads fresh enablement
+  and input focus, including bounded text and screen bounds.
+- `media_screenshot {"entity":"media_player.tcl"}` returns one native MCP JPEG
+  image plus timestamp and dimensions. Captures are at most 1280 × 720 and
+  512 KiB; missing, oversized or malformed images fail. No image is cached.
+- `media_navigate {"entity":"media_player.tcl","action":"right"}` sends one
+  of `up`, `down`, `left`, `right`, `select`, `back`, `home`. It requires MCP
+  `--allow-control` and its own agent grant. No power controls are included.
+
+Each operation checks the companion certificate pin before credentials are sent,
+then checks the live paired model and firmware. Navigation is serialized under
+the same configuration ownership and device gate as other controls. An attempt
+is sent once; failures never trigger a replay or a different input method.
+`accepted:true` acknowledges Android's action, with `verified:false`; inspect a
+new screenshot to verify the result. Secure video/screens can appear blank.
+
+Android 12 uses accessibility focus search and click, so support varies by app.
+If an app rejects focus navigation, inspect its fresh screenshot before choosing
+an existing `remote_key` action, which uses the paired Android TV Remote service.
+An MCP client must pass image blocks to a vision-capable model and permit a
+bounded reply of up to 1 MiB. The Android policy helper raises its response budget
+only when `media_screenshot` is explicitly granted. No ADB or root is required
+for runtime screen capture or navigation.
 
 ### Android TV held keys and voice
 

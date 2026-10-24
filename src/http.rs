@@ -119,7 +119,18 @@ pub(crate) fn read_response(
     expected_type: Option<&str>,
     limit: usize,
 ) -> Result<Response> {
-    let limit = limit.min(MAX_BODY);
+    read_bounded_response(reader, expected_type, limit.min(MAX_BODY))
+}
+/// Explicit larger response budget for image-bearing protocols; ordinary callers
+/// retain the 64 KiB envelope above. Header/framing and total socket deadlines apply.
+pub(crate) fn read_bounded_response(
+    reader: &mut impl BufRead,
+    expected_type: Option<&str>,
+    limit: usize,
+) -> Result<Response> {
+    if limit > 1024 * 1024 {
+        return Err(error("Unsupported device response budget"));
+    }
     let mut session_cookie = None;
     let mut budget = MAX_HEADERS;
     let mut length = None;

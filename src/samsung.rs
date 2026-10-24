@@ -417,6 +417,7 @@ impl Adapter for Manager {
                 hold: false,
                 voice: false,
                 activities: &[],
+                screen: false,
             },
         ));
     }

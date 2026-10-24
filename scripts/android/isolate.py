@@ -202,7 +202,8 @@ def activate(p,token):
         raise ValueError('Native sandbox probe failed; no service cutover')
     api_path, document, api, raw = phone.read_api(p)
     if 'agent' in api: raise ValueError('An agent endpoint already exists; inspect before replacing')
-    api['agent']={'listen':deployment.current().endpoint,'token':token,'tools':list(deployment.current().tools)}
+    api['agent']={'listen':deployment.current().endpoint,'token':token,'tools':list(deployment.current().tools),
+                  'image_output':'image_marker' if 'media_screenshot' in deployment.current().tools else 'native'}
     p.put(api_path+'.before-isolation',raw)
     phone.write_api(p, api_path, document)
     try:
@@ -277,8 +278,10 @@ def update(serial,artifacts,policy_only=False):
     root_put(serial,ROOT+'/policy/deployment.json',(json.dumps(profile.value,indent=2)+'\n').encode())
     root_put(serial,ROOT+'/policy/config.toml',prepared.encode())
     direct_boot.root_sh(serial,'chown '+str(agent_uid(serial))+':'+str(agent_uid(serial))+' '+phone.q(ROOT+'/policy/config.toml'))
-    if api['agent'].get('tools')!=list(profile.tools):
+    image_output='image_marker' if 'media_screenshot' in profile.tools else 'native'
+    if api['agent'].get('tools')!=list(profile.tools) or api['agent'].get('image_output','native')!=image_output:
         api['agent']['tools']=list(profile.tools)
+        api['agent']['image_output']=image_output
         phone.write_api(p, api_path, document)
         p.restart()
     root_put(serial,ROOT+'/policy/TOOLS.md',lockdown.instructions(profile.tools,profile.telegram_controls).encode())
@@ -309,6 +312,8 @@ def verify(serial):
     api=preflight(p,profile)
     if api.get('agent',{}).get('listen')!=profile.endpoint or api['agent'].get('tools')!=list(profile.tools):
         raise ValueError('Homewire agent scope does not match deployment profile')
+    if api['agent'].get('image_output','native') != ('image_marker' if 'media_screenshot' in profile.tools else 'native'):
+        raise ValueError('Homewire agent image format does not match deployment profile')
     cfg=tomllib.loads(direct_boot.root_sh(serial,'cat '+phone.q(ROOT+'/policy/config.toml')).decode())
     if cfg['mcp']['servers'][0]['url']!=profile.mcp_url:
         raise ValueError('MCP endpoint does not match deployment profile')

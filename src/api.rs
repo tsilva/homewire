@@ -47,6 +47,15 @@ struct AgentEndpoint {
     listen: SocketAddr,
     token: String,
     tools: Vec<String>,
+    #[serde(default)]
+    image_output: ImageOutput,
+}
+#[derive(Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ImageOutput {
+    #[default]
+    Native,
+    ImageMarker,
 }
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -392,6 +401,10 @@ fn handle(
             let body = json!({"jsonrpc":"2.0","id":request.pointer("/params/data/id").cloned().unwrap_or(Value::Null),"error":error});
             return response(stream, 503, &serde_json::to_vec(&body)?, "application/json");
         }
+        let mut reply = reply;
+        if matches!(agent.image_output, ImageOutput::ImageMarker) {
+            image_markers(&mut reply["result"]);
+        }
         let result = &reply["result"];
         return if result.is_null() {
             response(stream, 202, b"", "application/json")
@@ -499,6 +512,25 @@ fn handle(
         &serde_json::to_vec(&reply)?,
         "application/json",
     )
+}
+/// Compatibility for clients whose vision loader consumes image markers in tool text.
+/// Native MCP image blocks remain the default; convert in place without duplicating data.
+fn image_markers(reply: &mut Value) {
+    if let Some(content) = reply
+        .pointer_mut("/result/content")
+        .and_then(Value::as_array_mut)
+    {
+        for item in content {
+            if item["type"] == "image"
+                && item["mimeType"] == "image/jpeg"
+                && let Some(data) = item.get_mut("data").map(Value::take)
+                && let Value::String(data) = data
+            {
+                *item =
+                    json!({"type":"text","text":format!("[IMAGE:data:image/jpeg;base64,{data}]")});
+            }
+        }
+    }
 }
 fn response(stream: &mut impl Write, status: u16, body: &[u8], content_type: &str) -> Result<()> {
     write!(
@@ -615,6 +647,82 @@ pub fn dispatch(devices: &mut Devices, request: Value, allow_control: bool) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn agent_images_cross_http_as_native_or_explicit_marker_without_duplication() -> Result<()> {
+        use std::os::unix::net::UnixListener;
+        for mode in ["native", "image_marker"] {
+            let mut random = [0u8; 8];
+            getrandom::getrandom(&mut random)?;
+            let suffix: String = random.iter().map(|b| format!("{b:02x}")).collect();
+            let directory = std::env::temp_dir().join(format!("homewire-screen-{suffix}"));
+            std::fs::create_dir(&directory)?;
+            let socket = directory.join("owner.sock");
+            let listener = UnixListener::bind(&socket)?;
+            let owner = thread::spawn(move || -> Result<()> {
+                let (mut stream, _) = listener.accept()?;
+                ipc::exchange(&mut stream, |request| {
+                    let result = mcp::handle_capabilities(
+                        request["params"]["data"].clone(),
+                        crate::device::Selection::ALL,
+                        false,
+                        |name, _| {
+                            assert_eq!(name, "media_screenshot");
+                            let mut jpeg = crate::screen::tests::jpeg(1280, 720);
+                            jpeg.truncate(jpeg.len() - 2);
+                            jpeg.resize(crate::screen::MAX_JPEG - 2, 0);
+                            jpeg.extend_from_slice(&[0xff, 0xd9]);
+                            Ok(
+                                json!({"entity":"media_player.fixture","result":crate::screen::image(&jpeg)?}),
+                            )
+                        },
+                    );
+                    Some(json!({"jsonrpc":"2.0","id":request["id"],"result":result}))
+                })
+            });
+            let mut cfg: Config = serde_json::from_value(
+                json!({"listen":"127.0.0.1:0","dashboard_token":"a".repeat(64),"agent":{"listen":"127.0.0.1:0","token":"b".repeat(64),"tools":["media_screenshot"],"image_output":mode}}),
+            )?;
+            cfg.agent_only = true;
+            let server = Server::listen(cfg, &socket, None)?;
+            let body=json!({"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"media_screenshot","arguments":{"entity":"media_player.fixture"}}}).to_string();
+            let mut stream = TcpStream::connect(server.local_addr())?;
+            stream.set_read_timeout(Some(Duration::from_secs(3)))?;
+            write!(
+                stream,
+                "POST /mcp HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nContent-Length: {}\r\n\r\n{body}",
+                "b".repeat(64),
+                body.len()
+            )?;
+            let response = crate::http::read_bounded_response(
+                &mut BufReader::new(stream),
+                Some("application/json"),
+                1024 * 1024,
+            )?;
+            let value: Value = serde_json::from_slice(&response.body)?;
+            assert_eq!(value["id"], 9);
+            assert!(
+                value["result"]["structuredContent"]["result"]
+                    .get("data")
+                    .is_none()
+            );
+            let content = &value["result"]["content"][1];
+            if mode == "native" {
+                assert_eq!(content["type"], "image");
+                assert_eq!(content["mimeType"], "image/jpeg");
+            } else {
+                assert_eq!(content["type"], "text");
+                let marker = content["text"].as_str().expect("marker");
+                assert!(
+                    marker.starts_with("[IMAGE:data:image/jpeg;base64,") && marker.ends_with(']')
+                );
+                assert!(!response.body.windows(6).any(|s| s == b"\"data\""));
+            }
+            owner.join().expect("owner")?;
+            drop(server);
+            std::fs::remove_dir_all(directory)?;
+        }
+        Ok(())
+    }
     #[test]
     fn agent_http_exposes_busy_error_with_original_request_id_without_retry() {
         use std::os::unix::{fs::PermissionsExt, net::UnixListener};

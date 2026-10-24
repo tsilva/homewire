@@ -249,6 +249,49 @@ Homewire executable/config backup when rolling back an integration. Token
 rotation/re-pairing is not exposed by this first API; deliberate reprovisioning
 requires stopping clients and clearing app data, then pairing and pinning anew.
 
+## Visual navigation prototype
+
+The companion includes an opt-in, experimental accessibility service for screen
+capture and navigation. Open Android accessibility settings from Homewire TV
+and explicitly enable **Homewire TV visual prototype**. Disable it there to
+remove capture and navigation access. An APK update alone does not enable it.
+There is no microphone access, root requirement or shell execution endpoint.
+
+The following endpoints use the same certificate pin, bearer token and paired
+firmware checks as the backlight API:
+
+- `GET /v1/prototype/status`: whether the service is connected and a bounded
+  description of the current input focus. Focus text is private screen data.
+- `GET /v1/prototype/screenshot`: one JPEG, at most 1280 × 720 and 2 MiB.
+  Capture fails explicitly when unavailable; secure content can appear blank.
+  Images are not retained on the TV. Save any diagnostic captures only in an
+  ignored, protected local directory.
+- `POST /v1/prototype/navigation`: JSON
+  `{"action":"right","request_id":"32_LOWERCASE_HEX_CHARACTERS"}` in that
+  field order. Actions are `up`, `down`, `left`, `right`, `select`, `back`, `home`.
+  Attempts are persisted before sending, with a separate history of the last
+  16 IDs. Never retry an uncertain action; obtain a new screenshot first.
+
+Android 12 directional movement uses accessibility input-focus search and focus
+actions; select uses the focused node's click action. Back and Home use Android
+global actions. These are not arbitrary remote key events, and support depends
+on the foreground app exposing suitable nodes. `accepted` is Android's action
+acknowledgement; `verified` remains false until a client checks the resulting
+screen. Missing focus or unsupported actions are reported without falling back
+to privileged input injection. Homewire exposes these through the standard
+`media_screen_status`, `media_screenshot` and `media_navigate` MCP tools for
+`media_player.tcl` when its companion is configured. Navigation requires
+`--allow-control`. MCP screenshots are limited to 512 KiB so one image and its
+metadata fit the existing private IPC reply budget; larger captures fail
+explicitly. The APK's separate direct HTTPS bound remains 2 MiB.
+
+For a harmless on-device target, open the exported
+`eu.tsilva.homewire.tv/.VisionTestActivity` with an authorized ADB operator.
+Its four focusable buttons only update an on-screen selection counter. Test
+navigation there before attempting actions in other apps. Captures are bounded
+to an 8,294,400-pixel source, requested one at a time with a two-second capture
+deadline, and released after JPEG encoding.
+
 ## API and limits
 
 TLS 1.2 on the configured LAN port; clients must verify the exact paired
@@ -267,7 +310,7 @@ descriptor. No other vendor transactions or shell command execution are exposed.
 Status reads do not change display settings.
 
 The server uses one blocking worker and one active client. Request headers are
-bounded to 4096 bytes, bodies to 256, responses to 4096, and sockets to a
+bounded to 4096 bytes, bodies to 256, JSON responses to 4096, and sockets to a
 3-second read timeout. Malformed framing, duplicate headers, chunked input,
 invalid ranges and unknown routes fail explicitly. Slow clients can temporarily
 delay access, so expose the port only on a trusted LAN.

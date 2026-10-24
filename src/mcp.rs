@@ -217,6 +217,8 @@ pub(crate) fn handle_tools(
                 tool_error("Device control is disabled; restart with --allow-control")
             } else {
                 match call(name, &args) {
+                    Ok(value) if name == "media_screenshot" => crate::screen::mcp_result(value)
+                        .unwrap_or_else(|e| tool_error(&e.to_string())),
                     Ok(value) => {
                         let value = if legacy && raw_name.starts_with("light_") {
                             naming::light_output(value)

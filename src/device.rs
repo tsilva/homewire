@@ -46,6 +46,9 @@ pub trait Adapter: Sized {
     fn options(&mut self, _index: usize) -> Result<Value> {
         Err(error("This adapter has no additional live options"))
     }
+    fn screen(&mut self, _index: usize, _capture: bool) -> Result<Value> {
+        Err(error("This device has no screen capture capability"))
+    }
     fn enable_monitoring(&mut self) -> Result<()> {
         Err(error("This adapter has no fault monitoring"))
     }
@@ -388,6 +391,9 @@ macro_rules! static_adapters {
             }
             pub(crate) fn options(&mut self,device:crate::entity::Device)->Result<Value> {
                 match device.family {$(Family::$variant=>self.$field().ok_or_else(||error("Unconfigured device"))?.options(device.index),)+}
+            }
+            pub(crate) fn screen(&mut self,device:crate::entity::Device,capture:bool)->Result<Value> {
+                match device.family {$(Family::$variant=>self.$field().ok_or_else(||error("Unconfigured device"))?.screen(device.index,capture),)+}
             }
             pub(crate) fn control_device(&mut self, device: crate::entity::Device, command: crate::entity::Command, args: &Value) -> Result<Value> {
                 if !self.maintenance && self.computer_owns_power(device)

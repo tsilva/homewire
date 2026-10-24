@@ -38,6 +38,7 @@ mod media;
 mod media_input;
 mod protobuf;
 pub mod samsung;
+mod screen;
 mod tapo_settings;
 mod transport;
 mod web;

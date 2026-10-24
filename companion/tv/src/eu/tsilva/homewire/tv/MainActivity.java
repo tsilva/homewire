@@ -39,6 +39,8 @@ public final class MainActivity extends Activity {
                 getSharedPreferences("lifecycle", 0).edit().putBoolean("enabled", false).commit();
                 stopService(new Intent(this, TvService.class));
             });
+            Button vision = new Button(this); vision.setText("Visual prototype: accessibility settings"); layout.addView(vision);
+            vision.setOnClickListener(v -> startActivity(new Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)));
             if (getSharedPreferences("lifecycle", 0).getBoolean("enabled", true)) startForegroundService(new Intent(this, TvService.class));
         } catch (Exception e) {
             status.setText("Pair this TV through the Homewire installation helper. No local API is enabled until pairing succeeds.");

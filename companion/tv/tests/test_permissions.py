@@ -24,6 +24,21 @@ class PermissionTests(unittest.TestCase):
                        if s.attrib[ANDROID + 'name'] == '.TvService')
         self.assertEqual(service.attrib[ANDROID + 'exported'], 'false')
 
+    def test_visual_service_only_binds_through_android_accessibility(self):
+        app = ET.parse(MANIFEST).getroot().find('application')
+        service = next(s for s in app.findall('service')
+                       if s.attrib[ANDROID + 'name'] == '.VisionService')
+        self.assertEqual(service.attrib[ANDROID + 'permission'],
+                         'android.permission.BIND_ACCESSIBILITY_SERVICE')
+        metadata = service.find('meta-data')
+        self.assertEqual(metadata.attrib[ANDROID + 'resource'], '@xml/vision_service')
+        config = ET.parse(MANIFEST.parent / 'res/xml/vision_service.xml').getroot()
+        self.assertEqual(config.attrib[ANDROID + 'canTakeScreenshot'], 'true')
+        self.assertNotIn(ANDROID + 'canPerformGestures', config.attrib)
+        permissions = {n.attrib[ANDROID + 'name'] for n in ET.parse(MANIFEST).getroot().findall('uses-permission')}
+        self.assertFalse(permissions & {'android.permission.INJECT_EVENTS',
+                                       'android.permission.WRITE_SECURE_SETTINGS'})
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -16,7 +16,8 @@ find src -name '*.java' | LC_ALL=C sort > "$out/sources"
 javac --release 8 -classpath "$HOMEWIRE_ANDROID_PLATFORM/android.jar" -d "$out/classes" @"$out/sources"
 jar cf "$out/classes.jar" -C "$out/classes" .
 "$HOMEWIRE_ANDROID_BUILD_TOOLS/d8" --min-api 31 --lib "$HOMEWIRE_ANDROID_PLATFORM/android.jar" --output "$out/dex" "$out/classes.jar"
-"$HOMEWIRE_ANDROID_BUILD_TOOLS/aapt2" link -I "$HOMEWIRE_ANDROID_PLATFORM/android.jar" --manifest AndroidManifest.xml --replace-version --version-code "$HOMEWIRE_TV_VERSION_CODE" --version-name "$HOMEWIRE_TV_VERSION" -o "$out/unsigned.apk"
+"$HOMEWIRE_ANDROID_BUILD_TOOLS/aapt2" compile --dir res -o "$out/resources.zip"
+"$HOMEWIRE_ANDROID_BUILD_TOOLS/aapt2" link -I "$HOMEWIRE_ANDROID_PLATFORM/android.jar" --manifest AndroidManifest.xml --replace-version --version-code "$HOMEWIRE_TV_VERSION_CODE" --version-name "$HOMEWIRE_TV_VERSION" -o "$out/unsigned.apk" "$out/resources.zip"
 (cd "$out/dex" && zip -q ../unsigned.apk classes.dex)
 "$HOMEWIRE_ANDROID_BUILD_TOOLS/zipalign" -f 4 "$out/unsigned.apk" "$out/aligned.apk"
 if [ "${HOMEWIRE_TV_UNSIGNED:-0}" = 1 ]; then

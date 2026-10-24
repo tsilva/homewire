@@ -693,6 +693,19 @@ impl<const TCL: bool> RemoteManager<TCL> {
             json!({"sent":true,"verified":false,"key":key,"current_app":remote.status.as_ref().and_then(|s|s.current_app.as_deref())}),
         )
     }
+    fn navigate(&mut self, action: &str) -> Result<Value> {
+        let _lease = self.config.gate.enter()?;
+        self.config
+            .companion
+            .as_ref()
+            .filter(|_| TCL)
+            .ok_or_else(|| error("Screen navigation requires a configured TV companion"))?
+            .navigate(
+                self.config.host,
+                self.config.model.as_deref().unwrap_or(""),
+                action,
+            )
+    }
     fn configure(&mut self, settings: &Value) -> Result<Value> {
         crate::settings::validate(self.settings(), settings)?;
         if settings.as_object().is_none_or(|s| s.len() != 1) {
@@ -865,7 +878,9 @@ impl<const TCL: bool> Adapter for RemoteManager<TCL> {
         .union(crate::entity::Support::VOICE)
         .union(crate::entity::Support::ACTIVITY)
         .union(if TCL {
-            crate::entity::Support::WAKE.union(crate::entity::Support::ROUTINES)
+            crate::entity::Support::WAKE
+                .union(crate::entity::Support::ROUTINES)
+                .union(crate::entity::Support::SCREEN)
         } else {
             crate::entity::Support::NONE
         });
@@ -906,6 +921,7 @@ impl<const TCL: bool> Adapter for RemoteManager<TCL> {
                     hold: true,
                     voice: true,
                     activities: activity::NAMES,
+                    screen: TCL && self.config.companion.is_some(),
                 },
             )
             .configurable(self.settings()),
@@ -917,6 +933,22 @@ impl<const TCL: bool> Adapter for RemoteManager<TCL> {
         }
         Ok(serde_json::to_value(self.status()?)?)
     }
+    fn screen(&mut self, index: usize, capture: bool) -> Result<Value> {
+        if index != 0 {
+            return Err(error("Unknown Android TV device"));
+        }
+        let _lease = self.config.gate.enter()?;
+        self.config
+            .companion
+            .as_ref()
+            .filter(|_| TCL)
+            .ok_or_else(|| error("Screen capture requires a configured TV companion"))?
+            .screen(
+                self.config.host,
+                self.config.model.as_deref().unwrap_or(""),
+                capture,
+            )
+    }
     fn control_device(
         &mut self,
         index: usize,
@@ -927,6 +959,11 @@ impl<const TCL: bool> Adapter for RemoteManager<TCL> {
             return Err(error("Unknown Android TV device"));
         }
         match command {
+            crate::entity::Command::Navigate => self.navigate(
+                args["action"]
+                    .as_str()
+                    .ok_or_else(|| error("Expected navigation action"))?,
+            ),
             crate::entity::Command::Activity => self.activity(&args["activity"]),
             crate::entity::Command::Hold => self.hold(args),
             crate::entity::Command::Voice => self.voice(&args["audio"]),
@@ -1038,6 +1075,9 @@ struct ScheduledIo<'a> {
 }
 impl crate::brightness::Io for ScheduledIo<'_> {
     type Applied = ();
+    fn minimum_brightness(&self) -> u8 {
+        30
+    }
     fn read(&mut self) -> Result<crate::brightness::Observation> {
         let mut remote = self.config.remote::<true>(self.deadline)?;
         remote.read_details(self.deadline)?;

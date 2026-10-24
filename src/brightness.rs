@@ -296,6 +296,9 @@ pub struct Observation {
 }
 pub trait Io {
     type Applied;
+    fn minimum_brightness(&self) -> u8 {
+        0
+    }
     fn read(&mut self) -> Result<Observation>;
     fn apply(&mut self, change: &Change, permit: &Permit) -> Result<Self::Applied>;
 }
@@ -385,6 +388,9 @@ impl State {
             return Ok(None);
         }
         let mut target = cycle.target.clone();
+        target.brightness_percent = target
+            .brightness_percent
+            .map(|level| level.max(device.minimum_brightness()));
         if !self.primary {
             target.color_temperature_k = None;
         }

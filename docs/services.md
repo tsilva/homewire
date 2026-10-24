@@ -162,6 +162,13 @@ loopback. Generate independent tokens (e.g. `openssl rand -hex 32`), replace all
 example values, and protect config/key files with mode 600. The frontend handles one bounded connection at a time on a 256 KiB-stack thread
 and forwards device operations to the existing IPC owner.
 
+The optional `agent` object has a loopback `listen` address, distinct `token`,
+an explicit `tools` list (at most 32), and optional `image_output`. This defaults
+to `"native"` for standard MCP images. `"image_marker"` converts image blocks
+only on that scoped endpoint to text markers consumed by clients such as the
+pinned ZeroClaw vision loader. It does not change stdio/bridge responses or
+increase the 1 MiB IPC reply limit. See [visual MCP operation](automation.md#mcp-and-zeroclaw).
+
 Install the signed APK on a compatible Android phone and enter the server HTTPS
 URL, certificate SHA-256
 and **that phone's scoped token**, and press Save and start. Grant notifications;

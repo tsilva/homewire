@@ -16,9 +16,12 @@ final class ApiServer implements Runnable {
     static volatile String tlsFailure = "";
     private static final Pattern SET = Pattern.compile(
         "\\{\\s*\"backlight_level\"\\s*:\\s*(0|[1-9][0-9]{0,2})\\s*,\\s*\"request_id\"\\s*:\\s*\"([a-f0-9]{32})\"\\s*\\}");
+    private static final Pattern NAVIGATE = Pattern.compile(
+        "\\{\\s*\"action\"\\s*:\\s*\"(up|down|left|right|select|back|home)\"\\s*,\\s*\"request_id\"\\s*:\\s*\"([a-f0-9]{32})\"\\s*\\}");
     private final Config config;
     private final Display display;
     private final Journal journal;
+    private final NavigationJournal navigation;
     private volatile boolean running = true;
     private volatile SSLServerSocket listener;
     private volatile Socket active;
@@ -29,6 +32,7 @@ final class ApiServer implements Runnable {
     }
     ApiServer(Context context, Config config) throws Exception {
         this.config = config; display = new Display(config); journal = new Journal(context);
+        navigation = new NavigationJournal(context);
     }
     public void run() {
         try (SSLServerSocket server = (SSLServerSocket) Credentials.tls().getServerSocketFactory()
@@ -67,6 +71,7 @@ final class ApiServer implements Runnable {
             try { request = HttpRequest.read(socket.getInputStream()); }
             catch (Exception e) { throw new Failure(400, "invalid_request"); }
             if (!request.authorized(config.token)) throw new Failure(401, "unauthorized");
+            config.verify();
             if (request.method.equals("GET") && request.path.equals("/v1/status")) {
                 result = display.status();
                 journal.reconcile(result.getInt("backlight_level"));
@@ -85,14 +90,28 @@ final class ApiServer implements Runnable {
                 journal.reconcile(level);
                 result = new JSONObject().put("request_id", id).put("applied", applied)
                     .put("verified", true).put("status", after);
+            } else if (request.method.equals("GET") && request.path.equals("/v1/prototype/status")) {
+                result = VisionService.status();
+            } else if (request.method.equals("GET") && request.path.equals("/v1/prototype/screenshot")) {
+                respond(socket, 200, "image/jpeg", VisionService.screenshot());
+                return;
+            } else if (request.method.equals("POST") && request.path.equals("/v1/prototype/navigation")) {
+                Matcher match = NAVIGATE.matcher(new String(request.body, StandardCharsets.UTF_8));
+                if (!match.matches()) throw new Failure(400, "invalid_navigation_request");
+                if (!VisionService.status().getBoolean("enabled")) throw new Failure(409, "accessibility_not_enabled");
+                navigation.record(match.group(2));
+                result = VisionService.navigate(match.group(1)).put("request_id", match.group(2));
             } else throw new Failure(404, "unknown_endpoint");
         } catch (Failure e) { code = e.code; result = new JSONObject().put("error", e.reason); }
         catch (SecurityException e) { code = 403; result = new JSONObject().put("error", "identity_mismatch"); }
         catch (Exception e) { code = 503; result = new JSONObject().put("error", "display_unavailable_no_replay"); }
         byte[] bytes = result.toString().getBytes(StandardCharsets.UTF_8);
         if (bytes.length > 4096) return;
+        respond(socket, code, "application/json", bytes);
+    }
+    private static void respond(SSLSocket socket, int code, String type, byte[] bytes) throws Exception {
         OutputStream out = socket.getOutputStream();
-        String header = "HTTP/1.1 " + code + " Response\r\nContent-Type: application/json\r\nContent-Length: "
+        String header = "HTTP/1.1 " + code + " Response\r\nContent-Type: " + type + "\r\nContent-Length: "
             + bytes.length + "\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n";
         out.write(header.getBytes(StandardCharsets.US_ASCII)); out.write(bytes); out.flush();
     }
