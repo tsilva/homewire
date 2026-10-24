@@ -4,6 +4,42 @@
 
 ## Implementation and validation
 
+### Public repository privacy
+
+Install the local privacy hooks once per clone (Python 3, standard library only):
+
+```sh
+python3 scripts/privacy_guard.py install
+```
+
+The installer preserves existing/custom hooks rather than replacing them. If
+you already use hooks, integrate the `staged` and `pre-push` commands explicitly.
+Installed standalone copies keep working on branches without the source script;
+repeat installation after updating the guard or its denylist.
+
+The pre-push hook checks every outgoing ref's complete ancestry and reachable
+objects against `scripts/homewire-sensitive-history.txt`. This blocks retired
+commits, copied historical files and tags to old trees/blobs, including new
+branches and force pushes. Deletions remain allowed. Missing/corrupt inspection
+data and shallow clones fail closed; no device or network access is performed.
+The pre-commit hook rejects retired blobs and tracked private configuration
+paths, including force-added `.local/`, `.env`, `.access.local.toml` and
+`.infisical.json` files. Template `.env.example` files are allowed.
+
+Before each commit, review the full staged diff and commit message for household
+identifiers, network/location data, actual schedules, inventories, credentials
+and deployment records. Keep those in ignored `.local/` files. Hash checks cannot
+detect newly written private details; passing the guard does not replace review.
+Hooks are local safeguards and can be deliberately bypassed; do not bypass them.
+
+```sh
+python3 scripts/privacy_guard.py staged
+python3 scripts/privacy_guard.py check HEAD
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+```
+
+### Required checks
+
 Run from the repository root:
 
 ```sh
