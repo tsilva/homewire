@@ -249,14 +249,62 @@ class ReleaseTests(unittest.TestCase):
 
     def test_tcp_adb_connects_once_and_waits_only_for_readiness(self):
         from types import SimpleNamespace
-        responses = [SimpleNamespace(returncode=1, stdout=b'', stderr=b'offline'),
-                     SimpleNamespace(returncode=0, stdout=b'device\n', stderr=b'')]
-        with patch.object(release, 'run') as connect, \
-                patch.object(release.subprocess, 'run', side_effect=responses) as state, \
+        replies = [SimpleNamespace(returncode=0, stdout=b'connected to fixture', stderr=b''),
+                   SimpleNamespace(returncode=1, stdout=b'', stderr=b'offline'),
+                   SimpleNamespace(returncode=0, stdout=b'device\n', stderr=b'')]
+        with patch.object(release.subprocess, 'run', side_effect=replies) as run, \
                 patch.object(release.time, 'sleep'):
             release.connect_adb('127.0.0.1:12345', {})
-            self.assertEqual(connect.call_count, 1)
-            self.assertEqual(state.call_count, 2)
+        actions = [call.args[0][1] for call in run.call_args_list]
+        self.assertEqual(actions, ['connect', '-s', '-s'])
+
+    def test_zero_exit_failed_connect_is_recreated_before_installation(self):
+        from types import SimpleNamespace
+        replies = [SimpleNamespace(returncode=0, stdout=b'failed to connect to fixture', stderr=b''),
+                   SimpleNamespace(returncode=1, stdout=b'', stderr=b'error: device offline'),
+                   SimpleNamespace(returncode=0, stdout=b'disconnected fixture', stderr=b''),
+                   SimpleNamespace(returncode=0, stdout=b'connected to fixture', stderr=b''),
+                   SimpleNamespace(returncode=0, stdout=b'device\n', stderr=b'')]
+        with patch.object(release.subprocess, 'run', side_effect=replies) as run, \
+                patch.object(release.time, 'sleep'):
+            release.connect_adb('127.0.0.1:12345', {})
+        actions = [call.args[0][1] for call in run.call_args_list]
+        self.assertEqual(actions, ['connect', '-s', 'disconnect', 'connect', '-s'])
+        self.assertTrue(all(call.args[0][0] == 'adb' for call in run.call_args_list))
+
+    def test_adb_authorization_failure_never_reconnects(self):
+        from types import SimpleNamespace
+        for reply in [SimpleNamespace(returncode=0, stdout=b'failed to authenticate to fixture', stderr=b''),
+                      SimpleNamespace(returncode=1, stdout=b'', stderr=b'error: device unauthorized')]:
+            with self.subTest(reply=reply), patch.object(release.subprocess, 'run', return_value=reply) as run:
+                with self.assertRaisesRegex(release.GateError, 'Authorize'):
+                    release.connect_adb('127.0.0.1:12345', {})
+                self.assertEqual(run.call_count, 1)
+
+    def test_adb_connection_setup_has_a_fixed_attempt_limit(self):
+        from types import SimpleNamespace
+        def reply(command, **kwargs):
+            if command[1] == 'connect':
+                return SimpleNamespace(returncode=0, stdout=b'failed to connect to fixture', stderr=b'')
+            if command[1] == 'disconnect':
+                return SimpleNamespace(returncode=0, stdout=b'disconnected fixture', stderr=b'')
+            return SimpleNamespace(returncode=1, stdout=b'', stderr=b'error: device offline')
+        with patch.object(release.subprocess, 'run', side_effect=reply) as run, \
+                patch.object(release.time, 'sleep'):
+            with self.assertRaisesRegex(release.GateError, 'no installation attempted'):
+                release.connect_adb('127.0.0.1:12345', {})
+        actions = [call.args[0][1] for call in run.call_args_list]
+        self.assertEqual(actions.count('connect'), 3)
+        self.assertEqual(actions.count('disconnect'), 2)
+        self.assertFalse(any(action in actions for action in ('kill-server', 'install', 'reboot', 'reconnect')))
+
+    def test_adb_timeout_obeys_the_total_setup_deadline(self):
+        import subprocess
+        with patch.object(release.subprocess, 'run', side_effect=subprocess.TimeoutExpired('adb', 12)) as run, \
+                patch.object(release.time, 'monotonic', side_effect=[0, 0, 35, 35, 35, 35]):
+            with self.assertRaisesRegex(release.GateError, 'no installation attempted'):
+                release.connect_adb('127.0.0.1:12345', {})
+        self.assertEqual(run.call_count, 1)
 
 
 if __name__ == '__main__':

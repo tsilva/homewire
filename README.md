@@ -119,8 +119,8 @@ python3 companion/tv/release.py --version 0.1.5
 
 Choose an unused version greater than the installed version. Add `--verify-reboot`
 to deliberately reboot once and verify automatic startup.
-The command preserves pairing and saves versioned artifacts and previous-APK
-backups. See the [one-time setup, verification and recovery guide](companion/tv/README.md#one-command-releases).
+The command preserves pairing, recovers bounded transient ADB connection failures
+before installation, and saves versioned artifacts and previous-APK backups. See the [one-time setup, verification and recovery guide](companion/tv/README.md#one-command-releases).
 
 ## Further reading
 

@@ -80,7 +80,12 @@ before starting another candidate.
 
 Authorize ADB on the intended TV. `serial` selects it explicitly. The command
 connects the configured TCP serial automatically; the TV must already authorize
-this ADB host. Normal HTTPS verification connects to the audited profile's host/port.
+this ADB host. TCP setup checks both ADB's reply and transport state, since
+`adb connect` can return zero while reporting a failed connection. Transient
+connection failures get at most three attempts within 35 seconds, recreating only
+the selected offline transport. Authorization failures stop immediately. This
+happens before the installer starts and never retries installation or controls.
+Normal HTTPS verification connects to the audited profile's host/port.
 An operator-managed tunnel can be specified only in the private release config
 as `"verify_connect": ["127.0.0.1", 18766]`; this never changes Homewire's LAN config
 or the certificate pin. Alternatively, add `"ssh_alias": "managed-phone"` to reuse an existing
