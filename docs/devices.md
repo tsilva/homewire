@@ -226,6 +226,8 @@ additional L430C/L900 followers. The legacy shape is:
 "automation": {
   "light": "led_strip",
   "brightness_lights": ["lamp_a", "lamp_b"],
+  "follow_tv_backlight": false,
+  "brightness_entities": [],
   "timezone": "Etc/UTC",
   "latitude": 0.0,
   "longitude": 0.0,
@@ -273,7 +275,94 @@ state in `lights.schedule.NAME.state.json`; existing primary-light state remains
 in `lights.schedule.state.json`. Failure on one light does not prevent the other
 targets from being assessed, and uncertain writes are not replayed in that minute,
 including after restart. Disable competing brightness automations for each added
-target before enabling it in the native owner. Targets are processed serially.
+target before enabling it in the native owner.
+
+One coordinator calculates a frozen brightness/temperature target and timestamp
+once per cycle, then dispatches it independently to each physical device. Each
+device has one bounded I/O worker, with no separate timer or curve calculation.
+An unreachable device cannot hold up another target. A busy worker skips cycles
+instead of queuing obsolete controls; expired targets are discarded. Network
+operations share the cycle deadline and the adapter's timeout. Polling keeps its
+monotonic cadence and skips missed slots. Manual operations on the same physical
+device fail promptly while it is busy; they are not queued or replayed.
+Completed results are collected on the next regular cycle and feed the existing
+`schedule.lights` alert stream, without extra polling wakeups.
+
+`brightness_entities` selects followers through standard entity IDs, for example
+`["light.lamp_a", "media_player.tcl"]`. Lights and the TCL companion implement
+this optional adapter capability. Unknown entities, unsupported capabilities,
+field projections, duplicate physical devices (including aliases), and more than
+nine total targets fail validation before device I/O. `brightness_lights` and
+`follow_tv_backlight` remain compatible aliases into this same coordinator;
+select each device only once. The primary L900 retains its temperature and
+sunset behavior; all followers use only the shared brightness target.
+
+Set `follow_tv_backlight: true` to make `media_player.tcl` follow the exact same
+brightness curve and timezone through the [TV companion](#tcl-backlight-companion).
+It defaults to false and requires a configured TCL adapter and companion; invalid
+combinations fail configuration validation. The TV uses the curve's brightness
+percentage directly as its native backlight level, including the outside-curve
+value. This does not change picture temperature, picture mode or power.
+
+This follower runs in the existing `--light-schedule` job. It checks at the same
+5–30-second interval, assesses an on TV at startup, after observing power-on, and
+in each new minute. Standby and unknown/unreachable readings never trigger a
+write or a wake. Matching backlight levels are skipped. Manual brightness
+changes pause this device's schedule as described below. TV failures do not stop
+the light targets, and light failures do not stop the TV assessment.
+Its independent, identity-bound attempt state is
+`lights.schedule.state.backlight.json` for unified configuration. Each write is
+persisted before control; an uncertain operation cannot repeat in the same UTC
+minute, including after restart. A subsequent minute reads fresh state before
+considering the current target. Disable competing TV brightness automations
+before enabling this follower.
+
+### Manual brightness overrides
+
+Every scheduled brightness device has an independent two-hour manual override.
+A validated Homewire brightness request persists the pause before device I/O,
+including when the command subsequently fails or its outcome is uncertain. Both
+standard light controls and legacy light commands use this policy; TCL backlight
+requests use it too. Power, volume, app and unrelated configuration requests do
+not create a brightness override.
+
+Changes from a remote, manufacturer app or another controller are detected on
+the next successful on-device reading (normally within the 5–30-second poll).
+Detection compares against the last observed/verified brightness, not the moving
+curve target. The first successful reading establishes a baseline. Each further
+observed brightness change or Homewire brightness request resets the two hours;
+unchanged readings and failed/unknown/off readings do not extend it. External
+changes are inferred from the reported level, so firmware-driven brightness
+changes also count. Changes that return to the same level between polls cannot
+be detected.
+
+While paused, Homewire continues reading that device but sends no scheduled
+brightness, temperature or sunset power-on commands to it. Other targets keep
+running. Expiry resumes the current target at the next successful assessment of
+an on device, without waking it or replaying a missed sunset. A scheduled write
+checks again during preflight; a concurrent Homewire manual request revokes the
+scheduled operation before its next write check. Already-sent commands cannot be
+recalled. Uncertain automatic outcomes retain their expected level so they do
+not masquerade as manual changes or cause an automatic replay.
+
+`brightness_schedule_status {"entity":"media_player.tcl"}` reads `paused`, UTC
+`paused_until`, `resume_requested` and the fixed `manual_override_seconds: 7200`
+without contacting the device. `brightness_schedule_resume` with the same
+arguments clears only that device's override and requests a fresh assessment
+immediately when its I/O worker is available. A busy worker keeps the request
+for its next regular cycle. Resume requires the control grant; it does not enable
+disabled scheduling. It is an explicit new assessment, not a retry of a prior
+uncertain operation.
+
+Override expiry, the scalar baseline and pending outcomes persist in private,
+identity-bound `*.override.json` sidecars alongside the existing attempt files.
+The primary path is `lights.schedule.state.override.json`; light followers use
+`lights.schedule.NAME.state.override.json` and TCL uses
+`lights.schedule.state.backlight.override.json`. Old attempt-file schemas remain
+unchanged. Restart preserves pauses and pending resume requests. Identity changes
+discard the old baseline and override; invalid state or persistence failures
+block scheduled controls. A rollback binary ignores these sidecars and uses its
+previous scheduling behavior.
 
 Sunset uses local-date NOAA/Meeus solar equations with 90.833° zenith and two
 iterations, without network calls or new runtime dependencies. It is an
@@ -342,6 +431,12 @@ measurements fail explicitly. Values are sequential reads rather than an
 atomic metering snapshot. P100 energy is null because these devices provide
 no metering. Auto-off output describes the active timer and raw remaining
 seconds, not whether the saved auto-off feature is enabled.
+
+If `get_energy_usage` returns `-1003` (seen with an uninitialized device clock),
+status still reads the independent live meter. Power, voltage, current and the
+meter's total remain available when reported; daily/monthly totals remain null.
+Other errors and invalid or absent meter readings still fail explicitly.
+Homewire does not change the outlet clock or replay the rejected request.
 
 `plug_apply` reads and verifies the configured model/identity, skips a matching
 relay state, then sends one `set_device_info {"device_on":BOOL}` command,
@@ -526,7 +621,39 @@ Extended `remote_key` names include `stop`, `next`, `previous`, `rewind`,
 `teletext`, and `hdmi_1`–`hdmi_4`. Use discovery for the complete list.
 HDMI shortcuts, subtitles, audio tracks and settings depend on firmware and the
 foreground app; successful delivery is not proof that the requested UI appeared.
-No direct brightness/picture-mode setter or input-state reading is inferred.
+The remote protocol does not report input state or provide picture controls.
+An optional [Homewire TV companion](#tcl-backlight-companion) provides native
+backlight reads and writes separately.
+
+### TCL backlight companion
+
+The [TV companion](../companion/tv/README.md) is an ordinary Android TV APK
+with an authenticated, certificate-pinned HTTPS API. It reads the native
+backlight level and sets an absolute `backlight_level` from 0–100 for the
+current picture mode, using the same apply-and-save operation as the TV menu.
+It does not set Android's unrelated `screen_brightness` value. This initial
+implementation requires a paired, audited TCL Android 12 firmware identity;
+firmware changes fail closed until the native interface has been checked again.
+
+After installing and pairing it, add the generated `companion` object to
+`adapters.tcl`; see [configuration](configuration.md#tcl-companion-configuration).
+`media_player.tcl` then advertises `backlight_level` through its existing
+`entity_options` and `entity_configure` interfaces. Status adds `picture` with
+fresh firmware identity and native backlight readings. A companion failure
+appears as `picture_error` while remote-protocol status remains available.
+
+```sh
+homewire --config .local/home.json call entity_configure '{"entity":"media_player.tcl","settings":{"backlight_level":50}}'
+```
+
+MCP writes require `--allow-control` and the caller's existing `entity_configure`
+grant. Controls require confirmed TV-on status, authenticate the server before
+sending credentials, read before changing, skip an already matching value, and
+verify the result. Neither client nor server retries an uncertain write. The
+companion retains a bounded replay journal across restarts. Network availability
+in standby and vendor restrictions on starting apps still depend on the TV.
+
+### Android TV held keys and voice
 
 `remote_hold {"entity":"media_player.tcl","key":"enter","hold_ms":800}`
 holds a supported key for 1–2000 ms, services incoming messages, and attempts one
@@ -830,8 +957,10 @@ For coordinated power, add:
 Startup delay is 1–60 seconds; readiness is 1–120 seconds. `computer_on` verifies
 the outlet, turns it on if needed, waits for standby power, sends one WoL packet
 if the authenticated service is not already running, and verifies readiness.
+Startup reads identity, relay and protection state without energy statistics;
+an unavailable energy-statistics method does not block waking the computer.
 Enable persistent WoL on the host NIC separately; wake after outlet power loss
-also depends on firmware support. `computer_off` reads the P110 relay and meter,
+also depends on firmware support. Metered `computer_off` reads the P110 relay and meter,
 requires auto-off to be confirmed inactive, and requires running consumption
 more than 10 W above the configured standby threshold before sending one signed
 orderly shutdown request. After authenticated acceptance, it waits for both the

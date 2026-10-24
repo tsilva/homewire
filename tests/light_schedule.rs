@@ -25,6 +25,8 @@ fn config() -> Config {
     Config {
         light: "strip".into(),
         brightness_lights: vec![],
+        follow_tv_backlight: false,
+        brightness_entities: vec![],
         timezone: "Europe/London".into(),
         latitude: 51.5,
         longitude: -0.12,
@@ -187,8 +189,11 @@ fn off_stays_off_startup_and_external_on_apply_curve_and_matching_state_skips() 
     assert_eq!(d.sets, 1);
     let mut c = Controller::open(config(), &t.state(), "strip1", now + Duration::minutes(2))?;
     d.state.brightness_percent = 5;
-    assert!(c.tick(now + Duration::minutes(2), &mut d)?.is_some());
-    assert_eq!(d.sets, 2);
+    assert!(c.tick(now + Duration::minutes(2), &mut d)?.is_none());
+    assert_eq!(
+        d.sets, 1,
+        "manual brightness survives restart and pauses this device"
+    );
     Ok(())
 }
 #[test]
@@ -462,5 +467,54 @@ fn follower_configuration_requires_distinct_configured_bounded_targets() -> Resu
         let config: homewire::bulb::Config = serde_json::from_value(value)?;
         assert!(config.validate().is_err());
     }
+    Ok(())
+}
+
+#[test]
+fn shared_policy_preserves_legacy_tv_attempts_and_never_replays_uncertain_writes() -> Result<()> {
+    use homewire::brightness::{Cycle, Io, Observation, State};
+    use std::time::{Duration as StdDuration, Instant};
+    struct Tv(usize);
+    impl Io for Tv {
+        type Applied = ();
+        fn read(&mut self) -> Result<Observation> {
+            Ok(Observation {
+                power: true,
+                brightness: 1,
+                temperature: None,
+            })
+        }
+        fn apply(&mut self, _: &Change, _: &homewire::brightness::Permit) -> Result<()> {
+            self.0 += 1;
+            Err(homewire::error("Lost response; outcome unknown"))
+        }
+    }
+    let t = Temp::new();
+    let now = at("2026-10-23T10:00:00Z");
+    let minute = now.timestamp().div_euclid(60);
+    support::Directory::write_private(
+        &t.state(),
+        &serde_json::to_vec(&json!({
+            "identity":"tv", "last_attempt_minute":minute
+        }))?,
+    )?;
+    let mut target = Cycle::new(&config(), now, Instant::now() + StdDuration::from_secs(10))?;
+    let mut tv = Tv(0);
+    let mut state = State::open(&t.state(), "tv", false, now)?;
+    assert!(state.tick(&target, &mut tv)?.is_none());
+    assert_eq!(
+        tv.0, 0,
+        "old TV attempt must still suppress same-minute replay"
+    );
+    target.at += Duration::minutes(1);
+    assert!(state.tick(&target, &mut tv).is_err());
+    let memory: serde_json::Value = serde_json::from_slice(&std::fs::read(t.state())?)?;
+    assert_eq!(
+        memory,
+        json!({"identity":"tv", "last_attempt_minute":minute + 1})
+    );
+    let mut restarted = State::open(&t.state(), "tv", false, target.at)?;
+    assert!(restarted.tick(&target, &mut tv)?.is_none());
+    assert_eq!(tv.0, 1, "unknown result must survive owner restart");
     Ok(())
 }

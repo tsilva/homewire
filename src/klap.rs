@@ -72,7 +72,7 @@ impl Session {
         result.resize(32 + bytes.len() + padding, padding as u8);
         let cipher = Aes128::new(GenericArray::from_slice(&self.key));
         let mut previous = self.iv();
-        for block in result[32..].chunks_exact_mut(16) {
+        for block in result[32..].as_chunks_mut::<16>().0 {
             for (byte, prev) in block.iter_mut().zip(previous) {
                 *byte ^= prev;
             }
@@ -105,7 +105,7 @@ impl Session {
         let body = &mut bytes[32..];
         let cipher = Aes128::new(GenericArray::from_slice(&self.key));
         let mut previous = self.iv();
-        for block in body.chunks_exact_mut(16) {
+        for block in body.as_chunks_mut::<16>().0 {
             let mut next = [0; 16];
             next.copy_from_slice(block);
             cipher.decrypt_block(GenericArray::from_mut_slice(block));
@@ -160,6 +160,21 @@ fn handshake_error(
         error(format!("KLAP {stage} failed: {e}"))
     }
 }
+#[derive(Debug)]
+pub(crate) struct RejectedRequest {
+    pub method: String,
+    pub code: i64,
+}
+impl std::fmt::Display for RejectedRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Tapo rejected {} request (code {}); no automatic retry",
+            self.method, self.code
+        )
+    }
+}
+impl std::error::Error for RejectedRequest {}
 pub struct Client {
     address: SocketAddr,
     authority: String,
@@ -177,7 +192,7 @@ impl Client {
     ) -> Result<Self> {
         Self::connect_until(address, authority, auth, Instant::now() + timeout)
     }
-    fn connect_until(
+    pub(crate) fn connect_until(
         address: SocketAddr,
         authority: String,
         auth: &[u8; 32],
@@ -325,9 +340,10 @@ impl Client {
             serde_json::from_slice(decoded).map_err(|_| error("Invalid KLAP response JSON"))?;
         match value.error_code {
             Some(0) => Ok(value.result.unwrap_or(Value::Null)),
-            Some(code) => Err(error(format!(
-                "Tapo rejected request (code {code}); no automatic retry"
-            ))),
+            Some(code) => Err(Box::new(RejectedRequest {
+                method: method.to_owned(),
+                code,
+            })),
             None => Err(error("Missing KLAP response error code")),
         }
     }

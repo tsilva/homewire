@@ -209,7 +209,7 @@ impl<'a> Entity<'a> {
         json!({"entity":self.id(),"domain":self.domain,"device":format!("{}.{}",self.device.family.as_str(),self.device_name.unwrap_or(self.name)),"model":self.model,"unit":self.unit,"capabilities":features,"power_owner":self.owner})
     }
 }
-fn resolve<'a>(devices: &'a Devices, id: &str) -> Result<Entity<'a>> {
+pub(crate) fn resolve<'a>(devices: &'a Devices, id: &str) -> Result<Entity<'a>> {
     let mut found = None;
     let mut duplicate = false;
     devices.entities(&mut |entity| {
@@ -676,6 +676,7 @@ pub fn tools(selection: Selection) -> impl Iterator<Item = &'static Tool> + Clon
     .flatten()
     .chain(crate::routine::tools(selection))
     .chain(crate::wol::tools(selection))
+    .chain(crate::brightness::tools(selection))
     .chain(selection.public_tools())
 }
 pub fn call(devices: &mut Devices, name: &str, args: &Value) -> Result<Value> {
@@ -688,6 +689,9 @@ pub fn call(devices: &mut Devices, name: &str, args: &Value) -> Result<Value> {
     let result = match name {
         "entity_list" => Ok(discover(devices, args)),
         "entity_status" => status(devices, args),
+        "brightness_schedule_status" | "brightness_schedule_resume" => {
+            crate::brightness::call(devices, name, args)
+        }
         "wake_list" | "wake_on_lan" => crate::wol::call(devices, name, args),
         "entity_options" => {
             let device = resolve(

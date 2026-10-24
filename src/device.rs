@@ -23,6 +23,19 @@ pub trait Adapter: Sized {
     fn entities<'a>(&'a self, visit: &mut impl FnMut(crate::entity::Entity<'a>));
     /// Borrowed, configured wake endpoints; no network discovery or retained registry.
     fn wake_targets<'a>(&'a self, _visit: &mut impl FnMut(crate::wol::Target<'a>)) {}
+    fn brightness_device(&self, _index: usize) -> Result<Option<BrightnessDevice>> {
+        Ok(None)
+    }
+    fn brightness_control(&self, _index: usize) -> Option<&crate::brightness::Control> {
+        None
+    }
+    fn set_brightness_control(
+        &mut self,
+        _index: usize,
+        _control: crate::brightness::Control,
+    ) -> Result<()> {
+        Err(error("Unsupported brightness schedule"))
+    }
     fn wake_device(&mut self, _index: usize) -> Result<Value> {
         Err(error("This device does not support Wake-on-LAN"))
     }
@@ -212,6 +225,7 @@ macro_rules! static_adapters {
         pub struct Devices {
             $(pub $field: Option<$adapter>,)+
             pub computer_routine: Option<crate::routine::computer::Manager>,
+            pub tcl_routine: Option<crate::routine::tcl::Manager>,
             /// Explicit override for direct controls owned by a routine.
             pub maintenance: bool,
         }
@@ -303,6 +317,7 @@ macro_rules! static_adapters {
             pub fn validate(&self) -> Result<()> {
                 self.validate_ownership()?;
                 if let Some(routine) = &self.computer_routine { routine.validate(self)?; }
+                if let Some(routine) = &self.tcl_routine { routine.validate(self)?; }
                 crate::wol::validate_targets(self)?;
                 let mut ambiguous = false;
                 self.entities(&mut |entity| {
@@ -321,6 +336,9 @@ macro_rules! static_adapters {
             }
             pub fn entities<'a>(&'a self, visit: &mut impl FnMut(crate::entity::Entity<'a>)) {
                 let mut owned = |mut entity: crate::entity::Entity<'a>| {
+                    if self.tv_owns_power(entity.device) && entity.domain != crate::entity::Domain::Sensor {
+                        entity.owner = Some("tv_on/tv_off");
+                    }
                     if self.computer_owns_power(entity.device) && entity.domain != crate::entity::Domain::Sensor {
                         entity.owner = Some("computer_on/computer_off");
                     }
@@ -343,12 +361,21 @@ macro_rules! static_adapters {
                 if !self.maintenance && self.computer_owns_power(device) {
                     return Err(error("Power is owned by the computer routine; use routine_run or explicit --maintenance"));
                 }
-                if !self.maintenance && self.tv.as_ref().is_some_and(|tv|tv.owns_power(device)) {
+                if !self.maintenance && self.tv_owns_power(device) {
                     return Err(error("Power is owned by the TV routine; use routine_run or explicit --maintenance"));
                 }
                 match device.family {
                     $(Family::$variant => self.$field().ok_or_else(||error("Unconfigured device"))?.wake_device(device.index),)+
                 }
+            }
+            pub(crate) fn brightness_device(&self, device:crate::entity::Device)->Result<Option<BrightnessDevice>> {
+                match device.family {$(Family::$variant=>self.$field.as_ref().ok_or_else(||error("Unconfigured brightness device"))?.brightness_device(device.index),)+}
+            }
+            pub(crate) fn brightness_control(&self, device:crate::entity::Device)->Option<&crate::brightness::Control> {
+                match device.family {$(Family::$variant=>self.$field.as_ref()?.brightness_control(device.index),)+}
+            }
+            pub(crate) fn set_brightness_control(&mut self, device:crate::entity::Device, control:crate::brightness::Control)->Result<()> {
+                match device.family {$(Family::$variant=>self.$field().ok_or_else(||error("Unconfigured brightness device"))?.set_brightness_control(device.index,control),)+}
             }
             pub(crate) fn read_device(&mut self, device: crate::entity::Device) -> Result<Value> {
                 match device.family {
@@ -365,11 +392,11 @@ macro_rules! static_adapters {
                     return Err(error("Computer routine owns power and outlet auto-off; use routine_run or explicit --maintenance"));
                 }
                 if matches!(command, crate::entity::Command::Power)
-                    && !self.maintenance && self.tv.as_ref().is_some_and(|tv|tv.owns_power(device)) {
+                    && !self.maintenance && self.tv_owns_power(device) {
                     return Err(error("Power is owned by the TV routine; use routine_run or explicit --maintenance"));
                 }
                 if matches!(command,crate::entity::Command::Configure) && !self.maintenance
-                    && self.tv.as_ref().is_some_and(|tv|tv.owns_power(device))
+                    && self.tv_owns_power(device)
                     && args["settings"].as_object().is_some_and(|o|o.contains_key("auto_off")||o.contains_key("auto_off_minutes")) {
                     return Err(error("TV routine owns outlet shutdown; auto-off changes require --maintenance"));
                 }
@@ -389,7 +416,7 @@ macro_rules! static_adapters {
                 if !self.maintenance && self.computer_routine.as_ref().is_some_and(|r|r.owns_command(name,args)) {
                     return Err(error("Power is owned by the computer routine; use routine_run or explicit --maintenance"));
                 }
-                if !self.maintenance && self.tv.as_ref().is_some_and(|tv|tv.owns_command(name,args)) {
+                if !self.maintenance && (self.tv.as_ref().is_some_and(|tv|tv.owns_command(name,args)) || self.tcl_routine.as_ref().is_some_and(|tv|tv.owns_command(name,args))) {
                     return Err(error("Power is owned by the TV routine; use routine_run or explicit --maintenance"));
                 }
                 $(if let Some(adapter) = self.$field()
@@ -427,6 +454,13 @@ static_adapters! {
 }
 
 impl Devices {
+    pub(crate) fn tv_owns_power(&self, device: crate::entity::Device) -> bool {
+        self.tv.as_ref().is_some_and(|r| r.owns_power(device))
+            || self
+                .tcl_routine
+                .as_ref()
+                .is_some_and(|r| r.owns_power(self, device))
+    }
     pub(crate) fn plugs_ref(&self) -> Option<&crate::plug::Manager> {
         self.plugs
             .as_ref()
@@ -436,5 +470,35 @@ impl Devices {
         self.computer_routine
             .as_ref()
             .is_some_and(|r| r.owns_power(self, device))
+    }
+}
+
+/// Concrete protocol implementations registered alongside the adapter catalog.
+pub enum BrightnessDevice {
+    Light(crate::bulb::Scheduled),
+    Tv(crate::androidtv::Scheduled),
+}
+impl BrightnessDevice {
+    pub(crate) fn state_key(&self) -> String {
+        match self {
+            Self::Light(v) => v.state_key(),
+            Self::Tv(v) => v.state_key(),
+        }
+    }
+    pub(crate) fn identity(&self) -> String {
+        match self {
+            Self::Light(v) => v.identity(),
+            Self::Tv(v) => v.identity(),
+        }
+    }
+    pub(crate) fn run(
+        &self,
+        state: &mut crate::brightness::State,
+        cycle: &crate::brightness::Cycle,
+    ) -> Result<bool> {
+        match self {
+            Self::Light(v) => v.run(state, cycle),
+            Self::Tv(v) => v.run(state, cycle),
+        }
     }
 }

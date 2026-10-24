@@ -416,6 +416,100 @@ fn wire_p110_queries_only_supported_read_methods_and_preserves_measurements() ->
     Ok(())
 }
 #[test]
+fn wire_rejected_calendar_statistics_preserve_fresh_live_meter_readings() -> Result<()> {
+    let (address, worker) = tapo::mock_sessions_with_energy_replies(
+        vec![(
+            vec!["get_device_info", "get_energy_usage", "get_emeter_data"],
+            None,
+        )],
+        info(Model::P110),
+        Some((
+            json!({"error_code":-1003}),
+            json!({"error_code":0,"result":energy().1}),
+        )),
+    )?;
+    let file = Private::new(Model::P110, Some(address))?;
+    let status = Manager::open(&file.path)?.status("plug1")?;
+    assert_eq!(status.overloaded, Some(false));
+    let energy = status.energy.expect("fresh meter");
+    assert_eq!(energy.power_w, Some(45.259));
+    assert_eq!(energy.voltage_v, Some(235.44));
+    assert_eq!(energy.current_a, Some(0.193));
+    assert_eq!(energy.total_kwh, Some(2.317816));
+    assert_eq!(energy.today_kwh, None);
+    assert_eq!(energy.month_kwh, None);
+    let requests = worker.join().expect("worker")?;
+    assert_eq!(requests.len(), 3, "no command retries or clock writes");
+    Ok(())
+}
+#[test]
+fn wire_calendar_fallback_never_swallows_other_errors_or_invents_measurements() -> Result<()> {
+    for (usage, meter, methods, expected) in [
+        (
+            json!({"error_code":-1002}),
+            json!({"error_code":0,"result":energy().1}),
+            vec!["get_device_info", "get_energy_usage"],
+            "get_energy_usage request (code -1002)",
+        ),
+        (
+            json!({"error_code":-1003}),
+            json!({"error_code":-1003}),
+            vec!["get_device_info", "get_energy_usage", "get_emeter_data"],
+            "get_emeter_data request (code -1003)",
+        ),
+        (
+            json!({"error_code":-1003}),
+            json!({"error_code":0,"result":{}}),
+            vec!["get_device_info", "get_energy_usage", "get_emeter_data"],
+            "Missing plug energy measurements",
+        ),
+        (
+            json!({"error_code":-1003}),
+            json!({"error_code":0,"result":{"power_mw":-1}}),
+            vec!["get_device_info", "get_energy_usage", "get_emeter_data"],
+            "Invalid plug energy measurement",
+        ),
+    ] {
+        let count = methods.len();
+        let (address, worker) = tapo::mock_sessions_with_energy_replies(
+            vec![(methods, None)],
+            info(Model::P110),
+            Some((usage, meter)),
+        )?;
+        let file = Private::new(Model::P110, Some(address))?;
+        let error = Manager::open(&file.path)?
+            .status("plug1")
+            .expect_err("invalid energy remains unavailable");
+        assert!(error.to_string().contains(expected), "{error}");
+        assert_eq!(worker.join().expect("worker")?.len(), count);
+    }
+    Ok(())
+}
+#[test]
+fn wire_p110_relay_status_verifies_identity_without_querying_energy() -> Result<()> {
+    for mismatch in [false, true] {
+        let mut value = info(Model::P110);
+        if mismatch {
+            value["device_id"] = json!("wrong");
+        }
+        let (address, worker) =
+            tapo::mock_sessions(vec![(vec!["get_device_info"], None)], value, None)?;
+        let file = Private::new(Model::P110, Some(address))?;
+        let manager = Manager::open(&file.path)?;
+        let result = manager.relay_status("plug1");
+        if mismatch {
+            assert!(result.is_err());
+        } else {
+            let status = result?;
+            assert!(!status.power);
+            assert_eq!(status.overloaded, Some(false));
+            assert!(status.energy.is_none());
+        }
+        assert_eq!(worker.join().expect("worker")?.len(), 1);
+    }
+    Ok(())
+}
+#[test]
 fn wire_identity_mismatch_and_reported_overload_stop_before_control() -> Result<()> {
     for mismatch in [true, false] {
         let mut value = info(Model::P110);

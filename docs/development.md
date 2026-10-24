@@ -19,6 +19,11 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/android -p 'te
 shellcheck scripts/android/build.sh scripts/android/sandbox/build.sh scripts/android/sandbox/build-identity.sh
 ```
 
+TV companion changes also run `sh companion/tv/test.sh` with `JAVA_HOME` set
+to JDK 17, Python installation tests under `companion/tv/tests`, and shellcheck
+on its two shell scripts. Follow the [TV companion build and hardware checks](../companion/tv/README.md)
+for a signed installation, pinned authentication and deliberate native controls.
+
 Sandbox changes must build the native guard and run its negative probe on the
 target. CI runs Rust checks and a release build with Rust 1.95.0 on Linux.
 Synthetic tests cover protocol framing, stale/unknown readings, identity/signature
@@ -83,7 +88,12 @@ To add a family:
 
 ### Memory and allocation checks
 
-All adapters share one process and add no per-device threads or session caches.
+All adapters share one process without retained session caches. An enabled
+brightness schedule lazily starts at most nine device I/O threads, each with a
+256 KiB configured stack, one in-flight cycle and no pending successor. These
+threads block for work and have no timers; one coordinator owns the curve and
+deadline. They isolate blocking protocol clients and join before ownership locks
+are released. This stack setting is not a resident-memory measurement.
 Idle MCP blocks on stdin; background jobs add one reader thread with a 128 KiB
 stack and a one-message queue. Inputs use a 1 KiB buffer and a 64 KiB message cap.
 Waits follow enabled deadlines: adapter polls, light schedules or minute boundaries

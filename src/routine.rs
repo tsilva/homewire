@@ -6,8 +6,10 @@ use crate::{
     error,
 };
 use serde_json::{Value, json};
+pub mod brightness;
 pub mod computer;
 pub mod meaco;
+pub mod tcl;
 pub mod tv;
 
 fn configured(devices: &Devices, name: &str) -> bool {
@@ -17,7 +19,7 @@ fn configured(devices: &Devices, name: &str) -> bool {
                 .and_then(|s| s.parse().ok())
                 .is_some_and(|op| m.has_preset(op))
         }),
-        "tv_on" | "tv_off" => devices.tv.is_some(),
+        "tv_on" | "tv_off" => devices.tv.is_some() || devices.tcl_routine.is_some(),
         "computer_on" | "computer_off" => devices.computer_routine.is_some(),
         _ => false,
     }
@@ -39,11 +41,11 @@ pub fn call(devices: &mut Devices, tool: &str, args: &Value) -> Result<Value> {
             ),
             (
                 "tv_on",
-                "Outlet first, Samsung wake, DIGI ready and verified wake",
+                "Configured outlet-first startup and verified media wake",
             ),
             (
                 "tv_off",
-                "Verified DIGI sleep, Samsung shutdown once, explicit fixed-delay outlet cutoff",
+                "Configured media shutdown before verified outlet cutoff",
             ),
         ] {
             if configured(devices, name) {
@@ -77,6 +79,18 @@ pub fn call(devices: &mut Devices, tool: &str, args: &Value) -> Result<Value> {
             routine.run(devices, operation == "on")
         };
         devices.computer_routine = Some(routine);
+        result?
+    } else if name.starts_with("tv_") && devices.tcl_routine.is_some() {
+        let mut routine = devices
+            .tcl_routine
+            .take()
+            .ok_or_else(|| error("TV is not configured"))?;
+        let result = if tool == "routine_plan" {
+            Ok(routine.preview(name == "tv_on"))
+        } else {
+            routine.run(devices, name == "tv_on")
+        };
+        devices.tcl_routine = Some(routine);
         result?
     } else if let Some(operation) = name.strip_prefix("meaco_") {
         devices.call(

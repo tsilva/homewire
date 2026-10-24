@@ -18,6 +18,7 @@ use std::{
 mod cli;
 
 struct App {
+    brightness_schedule: Option<homewire::routine::brightness::Coordinator>,
     devices: Devices,
     scheduling: bool,
     light_scheduling: bool,
@@ -34,6 +35,14 @@ impl App {
             || self.devices.next_background().is_some()
     }
     fn wait_duration(&self) -> Duration {
+        if self.light_scheduling
+            && self
+                .brightness_schedule
+                .as_ref()
+                .is_some_and(|s| s.wake_requested())
+        {
+            return Duration::ZERO;
+        }
         let now = Instant::now();
         [
             self.devices.next_background(),
@@ -53,6 +62,37 @@ impl App {
         .unwrap_or(Duration::from_secs(60))
     }
     fn tick(&mut self) -> Result<()> {
+        if self.light_scheduling
+            && (Instant::now() >= self.next_light_schedule
+                || self
+                    .brightness_schedule
+                    .as_ref()
+                    .is_some_and(|s| s.wake_requested()))
+        {
+            let coordinator = self
+                .brightness_schedule
+                .as_mut()
+                .ok_or_else(|| error("No brightness schedule configured"))?;
+            self.next_light_schedule = homewire::routine::brightness::next_deadline(
+                self.next_light_schedule,
+                Instant::now(),
+                Duration::from_secs(coordinator.poll_seconds),
+            );
+            if let Some(failed) = coordinator.tick(self.next_light_schedule)? {
+                record_schedule(
+                    &mut self.devices.alerts,
+                    "schedule.lights",
+                    failed,
+                    "Brightness schedule",
+                    if failed {
+                        "One or more brightness devices failed; no replay"
+                    } else {
+                        ""
+                    },
+                );
+            }
+        }
+
         self.devices.background_tick();
         let mut alerts = self.devices.alerts.take();
         let result = self.tick_with_alerts(&mut alerts);
@@ -117,37 +157,7 @@ impl App {
             self.next_meaco_schedule =
                 Instant::now() + homewire::schedule::until_next_minute(chrono::Utc::now());
         }
-        if self.light_scheduling && Instant::now() >= self.next_light_schedule {
-            let bulbs = self
-                .devices
-                .bulbs
-                .as_mut()
-                .ok_or_else(|| error("No lights configured"))?;
-            match bulbs.schedule_tick() {
-                Ok(results) if !results.is_empty() => {
-                    for result in results {
-                        eprintln!(
-                            "Light schedule completed: {}",
-                            naming::light_output(serde_json::to_value(result)?)
-                        );
-                    }
-                    record_schedule(alerts, "schedule.lights", false, "Light schedule", "");
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    eprintln!("Light schedule failed (no immediate retry): {e}");
-                    record_schedule(
-                        alerts,
-                        "schedule.lights",
-                        true,
-                        "Light schedule failed",
-                        &e.to_string(),
-                    );
-                }
-            }
-            self.next_light_schedule =
-                Instant::now() + Duration::from_secs(bulbs.config.poll_seconds);
-        }
+
         if alerts
             .as_ref()
             .and_then(|a| a.next_delay(chrono::Utc::now().timestamp()))
@@ -432,7 +442,10 @@ fn run() -> Result<()> {
             devices.enable_monitoring(family)?;
         }
     }
+    let brightness_schedule =
+        homewire::routine::brightness::Coordinator::from_devices(&mut devices)?;
     let mut app = App {
+        brightness_schedule,
         devices,
         scheduling: scheduling || command == "schedule",
         light_scheduling: light_scheduling || command == "light-schedule",
@@ -665,6 +678,7 @@ mod tests {
             devices: Devices::default(),
             scheduling: true,
             light_scheduling: false,
+            brightness_schedule: None,
             next_meaco_schedule: now + Duration::from_secs(50),
             next_light_schedule: now + Duration::from_secs(5),
             next_history: now,

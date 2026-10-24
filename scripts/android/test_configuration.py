@@ -82,6 +82,29 @@ class ConfigurationTests(unittest.TestCase):
             self.assertEqual(configuration.load(path), value)
             self.assertFalse((root / 'api-key.pem').exists())
 
+    def test_tv_companion_projection_resolves_token_and_rejects_tunnels(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'home.json'
+            value = {'version': 1, 'adapters': {'tcl': {'companion': {
+                'token': '${HOMEWIRE_SECRET_TV_API_TOKEN}'}}}}
+            configuration.write(path, value)
+            with patch.dict('os.environ', {'HOMEWIRE_SECRET_TV_API_TOKEN': 'ab' * 32}, clear=True):
+                projected = json.loads(dict(phone.validate_configs(path))['home.json'])
+                self.assertEqual(projected['adapters']['tcl']['companion']['token'], 'ab' * 32)
+                self.assertEqual(configuration.load(path), value)
+                value['adapters']['tcl']['companion']['connect'] = '127.0.0.1:12345'
+                configuration.write(path, value)
+                with self.assertRaisesRegex(ValueError, 'test/tunnel'):
+                    phone.validate_configs(path)
+
+    def test_tcl_routine_requires_tcl_and_plugs(self):
+        value = {'version': 1, 'adapters': {'tcl': {}, 'plugs': {}},
+                 'routines': {'tv': {'target': 'tcl', 'plug': 'tv',
+                                     'startup_seconds': 5, 'ready_seconds': 120}}}
+        self.assertIs(configuration.validate(value), value)
+        del value['adapters']['tcl']
+        with self.assertRaises(ValueError): configuration.validate(value)
+
     def test_invalid_sections_or_orphaned_automation_fail_closed(self):
         for value in ({'version': True}, {'version': 2}, {'version': 1, 'unknown': {}},
                       {'version': 1, 'adapters': {'api': {}}},

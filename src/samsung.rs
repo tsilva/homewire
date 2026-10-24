@@ -328,7 +328,7 @@ fn encrypted_command(token: &str, session: u32, key: &str) -> Result<String> {
     bytes.resize(bytes.len() + pad, pad as u8);
     let cipher = Aes128::new_from_slice(&media::hex::<16>(token)?)
         .map_err(|_| error("Invalid Samsung token"))?;
-    for block in bytes.chunks_exact_mut(16) {
+    for block in bytes.as_chunks_mut::<16>().0 {
         cipher.encrypt_block(cipher::generic_array::GenericArray::from_mut_slice(block));
     }
     Ok(format!(

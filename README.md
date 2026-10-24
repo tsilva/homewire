@@ -66,12 +66,18 @@ for credentials. There is no automatic discovery.
 | [Tapo L430C / L900](docs/devices.md#tapo-l430c-bulbs) | Light controls, overheating monitoring and opt-in L900 schedules |
 | [Tapo P100 / P110](docs/devices.md#tapo-p100p110-plugs) | Relay control, P110 metering and overload monitoring |
 | [Samsung UE40H6200 / DIGI R2A](docs/devices.md#samsung-tv-and-digi-r2a) | Paired remotes and shared-outlet TV routines |
-| [TCL Android / Google TV](docs/devices.md#tcl-android--google-tv) | Power, keys, app links, text and supplied voice audio; optional Cast playback |
+| [TCL Android / Google TV](docs/devices.md#tcl-android--google-tv) | Power, keys, app links, text and supplied voice audio; optional Cast playback and authenticated backlight companion with shared light-curve scheduling |
 | [Computers](docs/devices.md#computer-shutdown-service) | Wake, authenticated shutdown and optional metered outlet cutoff |
 
 Controls verify identity where supported and check reported outcomes. Uncertain
 results stop execution; packet or key delivery alone does not prove a device
 changed state. Each guide describes its verification limits.
+[TCL TV routines](docs/configuration.md#unified-configuration) turn the outlet on
+before the TV, and verify TV shutdown before turning the outlet off.
+Computer startup requires verified outlet state, without depending on energy
+statistics; metered shutdown still requires fresh consumption readings.
+P110 live metering remains available when an uninitialized outlet clock causes
+calendar statistics to be rejected; missing daily/monthly totals stay unknown.
 
 ## Agents and automation
 
@@ -94,12 +100,24 @@ Homewire's locks cannot coordinate with manufacturer apps or other controllers.
 Ownership locks are explicitly released when their owner is dropped, even
 during concurrent child-process startup.
 
+Light and TCL brightness followers share one curve target per scheduling cycle.
+Independent bounded device I/O keeps an unreachable target from delaying the
+others; existing follower settings and attempt guards remain supported.
+Manual brightness adjustments pause only that device for two hours, restarting
+the timer on further changes and surviving restarts. Use
+`brightness_schedule_status` or `brightness_schedule_resume` with its entity ID
+to inspect the pause or resume the current target now.
+
 ## Further reading
 
 - [Configuration and CLI](docs/configuration.md): schemas, commands, credentials and migration.
 - [Household services](docs/services.md): playback, alerts, history, dashboard and Android companion.
-- [Android deployment](docs/android.md): installation, isolation, verification and rollback.
+- [Android deployment](docs/android.md): installation, isolation, verification and rollback. Includes optional [offline ultrasleep](docs/android.md#offline-ultrasleep) with a local wake alarm.
 - [Development](docs/development.md): architecture, required checks and memory measurement.
 - [Reference index](docs/reference.md): all guide sections.
+
+The isolated Android agent serves its installed ZeroClaw dashboard from read-only
+assets. Its path compatibility layer keeps procfs hidden and rejects symlinks and
+path traversal; see [Android isolation](docs/android.md#zeroclaw-isolation).
 
 [MIT license](LICENSE)

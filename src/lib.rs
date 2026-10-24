@@ -1,6 +1,7 @@
 pub mod alerts;
 pub mod awair;
 pub mod battery;
+pub mod brightness;
 pub mod bulb;
 pub mod config;
 pub mod device;

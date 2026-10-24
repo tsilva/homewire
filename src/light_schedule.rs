@@ -2,14 +2,16 @@
 use crate::{
     Result,
     bulb::{self, Change, Device},
-    config::{read_bounded, save_private},
     error, solar,
 };
 use chrono::{DateTime, Timelike, Utc};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::path::{Path, PathBuf};
+use std::{
+    path::Path,
+    time::{Duration, Instant},
+};
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -17,6 +19,10 @@ pub struct Config {
     pub light: String,
     #[serde(default)]
     pub brightness_lights: Vec<String>,
+    #[serde(default)]
+    pub follow_tv_backlight: bool,
+    #[serde(default)]
+    pub brightness_entities: Vec<String>,
     pub timezone: String,
     pub latitude: f64,
     pub longitude: f64,
@@ -25,6 +31,16 @@ pub struct Config {
 }
 impl Config {
     pub fn validate(&self) -> Result<Tz> {
+        if self.brightness_entities.len() > 8
+            || self.brightness_entities.iter().any(|s| {
+                s.len() > 80
+                    || !s.contains('.')
+                    || s.bytes()
+                        .any(|c| !c.is_ascii_alphanumeric() && !b"_.-".contains(&c))
+            })
+        {
+            return Err(error("Invalid brightness entity followers"));
+        }
         if self.brightness_lights.len() > 7
             || !crate::config::valid_unique_labels(
                 std::iter::once(self.light.as_str())
@@ -78,7 +94,7 @@ impl Config {
     }
     pub fn preview(&self, now: DateTime<Utc>) -> Result<Value> {
         Ok(
-            json!({"light":self.light,"brightness_lights":self.brightness_lights,"timezone":self.timezone,"at":now.to_rfc3339(),"target":self.target(now)?,"sunset":self.sunset(now)?.map(|t|t.to_rfc3339()),"curve":self.curve,"outside_curve":self.outside_curve,"note":"Preview only. Primary light follows brightness/temperature while on and turns on at sunset. Followers change only brightness while on. Schedule is opt-in."}),
+            json!({"light":self.light,"brightness_lights":self.brightness_lights,"follow_tv_backlight":self.follow_tv_backlight,"brightness_entities":self.brightness_entities,"timezone":self.timezone,"at":now.to_rfc3339(),"target":self.target(now)?,"sunset":self.sunset(now)?.map(|t|t.to_rfc3339()),"curve":self.curve,"outside_curve":self.outside_curve,"note":"Preview only. Primary light follows brightness/temperature while on and turns on at sunset. Followers change only brightness while on. Schedule is opt-in."}),
         )
     }
 }
@@ -96,43 +112,18 @@ pub fn curve(points: &[(u16, u8, u16)], outside: (u8, u16), minute: f64) -> (u8,
     }
     outside
 }
-#[derive(Default, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Memory {
-    pub identity: String,
-    pub sunset_attempt: Option<String>,
-    pub last_attempt_minute: Option<i64>,
-}
+pub use crate::brightness::Memory;
+/// Compatibility facade over the common policy; runtime orchestration owns the curve once.
 pub struct Controller {
     pub config: Config,
-    pub memory: Memory,
-    path: PathBuf,
-    last_check: DateTime<Utc>,
-    last_power: Option<bool>,
-    brightness_only: bool,
+    state: crate::brightness::State,
 }
 impl Controller {
     pub fn open(config: Config, path: &Path, identity: &str, now: DateTime<Utc>) -> Result<Self> {
         config.validate()?;
-        let mut memory: Memory = match read_bounded(path, "Light schedule memory") {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .map_err(|_| error("Invalid light schedule memory"))?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Memory::default(),
-            Err(e) => return Err(e.into()),
-        };
-        if memory.identity != identity {
-            memory = Memory {
-                identity: identity.to_owned(),
-                ..Memory::default()
-            };
-        }
         Ok(Self {
             config,
-            memory,
-            path: path.to_owned(),
-            last_check: now,
-            last_power: None,
-            brightness_only: false,
+            state: crate::brightness::State::open(path, identity, true, now)?,
         })
     }
     pub fn open_brightness(
@@ -144,59 +135,23 @@ impl Controller {
     ) -> Result<Self> {
         config.light = light.to_owned();
         config.brightness_lights.clear();
-        let mut controller = Self::open(config, path, identity, now)?;
-        controller.brightness_only = true;
-        Ok(controller)
+        let mut value = Self::open(config, path, identity, now)?;
+        value.state = crate::brightness::State::open(path, identity, false, now)?;
+        Ok(value)
+    }
+    pub fn state_path(&self) -> &Path {
+        self.state.path()
     }
     pub fn tick(
         &mut self,
         now: DateTime<Utc>,
         device: &mut impl Device,
     ) -> Result<Option<bulb::Applied>> {
-        let sunset = self.config.sunset(now)?;
-        let date = now
-            .with_timezone(&self.config.validate()?)
-            .date_naive()
-            .to_string();
-        let sunset_due = !self.brightness_only
-            && sunset.is_some_and(|t| {
-                self.last_check < t && now >= t && now - t <= chrono::Duration::seconds(60)
-            })
-            && self.memory.sunset_attempt.as_deref() != Some(&date);
-        let previous_minute = self.last_check.timestamp().div_euclid(60);
-        let minute = now.timestamp().div_euclid(60);
-        self.last_check = now;
-        // Persist a sunset attempt before even querying: failures cannot replay it.
-        if sunset_due {
-            let mut memory = self.memory.clone();
-            memory.sunset_attempt = Some(date);
-            save_private(&self.path, &memory)?;
-            self.memory = memory;
-        }
-        let status = device.read()?;
-        let light_on = self.last_power == Some(false) && status.power;
-        let startup = self.last_power.is_none();
-        self.last_power = Some(status.power);
-        if !sunset_due && (!status.power || !startup && !light_on && minute == previous_minute) {
-            return Ok(None);
-        }
-        if !sunset_due && self.memory.last_attempt_minute == Some(minute) {
-            return Ok(None);
-        }
-        let mut target = self.config.target(now)?;
-        if self.brightness_only {
-            target.color_temperature_k = None;
-        }
-        if sunset_due {
-            target.power = Some(true);
-        }
-        if target.matches(&status) {
-            return Ok(None);
-        }
-        let mut memory = self.memory.clone();
-        memory.last_attempt_minute = Some(minute);
-        save_private(&self.path, &memory)?;
-        self.memory = memory;
-        Ok(Some(bulb::apply(device, &target)?))
+        let cycle = crate::brightness::Cycle::new(
+            &self.config,
+            now,
+            Instant::now() + Duration::from_secs(60),
+        )?;
+        self.state.tick(&cycle, &mut bulb::ScheduleIo(device))
     }
 }
