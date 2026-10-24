@@ -89,6 +89,7 @@ class Phone:
                   'GUARD': p['guard'], 'APP_UID': uid, 'APP_USER': '0', 'APP_CONTEXT': runtime_context,
                   'TELEGRAM_CONFIG': p.get('telegram_config', ''), 'TELEGRAM_SECTION': p.get('telegram_section', '')}
         files = {name: (SOURCE / name).read_bytes() for name in ('controller.c', 'telegram.c', 'action.sh', 'supervisor.sh')}
+        files['telegram_credentials.h'] = (SOURCE.parent / 'telegram_credentials.h').read_bytes()
         files['config.sh'] = ''.join(k + '=' + shlex.quote(v) + '\n' for k, v in config.items()).encode()
         files['units'] = ''.join('|'.join(u[k] for k in ('pidfile', 'marker', 'launcher')) + '\n' for u in p['units']).encode()
         files['early-services'] = ''.join(n + '\n' for n in p.get('resume_services_first', [])).encode()
@@ -106,13 +107,13 @@ class Phone:
         build = (f'export PATH={p["prefix"]}/bin:/system/bin; export PREFIX={p["prefix"]}; '
                  f'clang -std=c11 -O2 -Wall -Wextra -Werror {work}/controller.c -o {work}/controller && '
                  f'clang -std=c11 -O2 -Wall -Wextra -Werror -I{p["prefix"]}/include {work}/telegram.c -L{p["prefix"]}/lib -Wl,-rpath,{p["prefix"]}/lib -lcrypto -o {work}/telegram')
-        self.root(f'mkdir -p {work}; chmod 700 {work}; cp {release}/controller.c {release}/telegram.c {work}/; '
+        self.root(f'mkdir -p {work}; chmod 700 {work}; cp {release}/controller.c {release}/telegram.c {release}/telegram_credentials.h {work}/; '
                   f'chown -R {uid}:{uid} {work}; chcon -R {shlex.quote(context)} {work}; '
                   + owner + shlex.quote(build) + f' && cp {work}/controller {release}/controller && '
                   f'cp {work}/telegram {release}/telegram && '
                   f'[ "$(sha256sum {work}/controller | cut -d " " -f 1)" = "$(sha256sum {release}/controller | cut -d " " -f 1)" ] && '
                   f'[ "$(sha256sum {work}/telegram | cut -d " " -f 1)" = "$(sha256sum {release}/telegram | cut -d " " -f 1)" ] && chown 0:0 {release}/controller {release}/telegram && chmod 700 {release}/controller {release}/telegram && rm -rf {work}')
-        self.root(f'cd {release} && sha256sum controller telegram controller.c telegram.c action.sh supervisor.sh config.sh units freeze-executables early-services > SHA256SUMS && chmod 600 SHA256SUMS')
+        self.root(f'cd {release} && sha256sum controller telegram controller.c telegram.c telegram_credentials.h action.sh supervisor.sh config.sh units freeze-executables early-services > SHA256SUMS && chmod 600 SHA256SUMS')
         self.root(f'{release}/controller --probe {STATE} {release}/action.sh 1')
         if p.get('telegram_config'):
             self.root(f'{release}/telegram ' + shlex.quote(p['telegram_config']) + ' ' + shlex.quote(p['telegram_section']) + ' ' + shlex.quote(p['prefix'] + '/bin/curl') + ' --check-network')

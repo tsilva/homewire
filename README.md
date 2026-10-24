@@ -11,6 +11,10 @@ routines, with no Home Assistant, container or interpreter required at runtime.
 Agents can use the same devices through MCP (Model Context Protocol); controls
 and schedules are opt-in.
 
+Rooted Android hosts can add an independent [battery guard](docs/android.md#battery-guard)
+with a charge ceiling, temperature cutoff, persistent serious-fault lockout and
+optional approved Telegram alerts. It runs separately from the automation owner.
+
 ## Quickstart
 
 Requires **Rust 1.89+**, Git, and network access to a supported device. This
@@ -111,6 +115,8 @@ Ownership locks are explicitly released when their owner is dropped, even
 during concurrent child-process startup.
 
 Light and TCL brightness followers share one curve target per scheduling cycle.
+Scheduled TCL backlight has a minimum of 30, including at the end of the curve
+and outside it; light brightness keeps the configured range.
 Independent bounded device I/O keeps an unreachable target from delaying the
 others; existing follower settings and attempt guards remain supported.
 Manual brightness adjustments pause only that device for two hours, restarting
@@ -119,6 +125,12 @@ the timer on further changes and surviving restarts. Use
 to inspect the pause or resume the current target now.
 
 ## TCL companion releases
+
+The companion also has an opt-in [visual navigation prototype](companion/tv/README.md#visual-navigation-prototype)
+for authenticated screenshots and accessibility navigation on the paired TV.
+Agents use `media_screenshot`, `media_screen_status` and `media_navigate` through
+MCP. Enable the companion's accessibility service explicitly; navigation also
+requires `--allow-control`. [Visual control guide](docs/devices.md#tcl-screenshots-and-navigation).
 
 After the private toolchain and Infisical bindings are configured, build, sign,
 install and verify an update from the repository root:

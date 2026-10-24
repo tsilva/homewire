@@ -65,7 +65,7 @@ class TelegramTests(unittest.TestCase):
         self.path = Path(self.temp.name)
         self.binary = self.path / 'telegram'
         subprocess.run([shutil.which('cc'), '-std=c11', '-Wall', '-Wextra', '-Werror',
-                        str(ultrasleep.SOURCE / 'telegram.c'), '-o', str(self.binary), *subprocess.check_output(['pkg-config', '--cflags', '--libs', 'openssl'], text=True).split()], check=True)
+                        '-I' + str(ultrasleep.SOURCE.parent), str(ultrasleep.SOURCE / 'telegram.c'), '-o', str(self.binary), *subprocess.check_output(['pkg-config', '--cflags', '--libs', 'openssl'], text=True).split()], check=True)
         self.config = self.path / 'config.toml'
         self.config.write_text('[channels.telegram.synthetic]\nenabled = true\nbot_token = "123456:SYNTHETIC_TOKEN"\n')
         self.curl = self.path / 'curl'

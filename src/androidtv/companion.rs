@@ -50,8 +50,23 @@ mod tests {
         json!({"protocol_version":1,"manufacturer":"TCL","model":"Fixture TV","device":"fixture",
             "fingerprint":"verified-build","incremental":"revision","backlight_level":level})
     }
+    enum Reply {
+        Json(Value),
+        Bytes(&'static str, Vec<u8>),
+        Lost,
+    }
     fn fixture(
         replies: Vec<Option<Value>>,
+    ) -> Result<(Config, thread::JoinHandle<Result<Vec<String>>>)> {
+        fixture_responses(
+            replies
+                .into_iter()
+                .map(|value| value.map_or(Reply::Lost, Reply::Json))
+                .collect(),
+        )
+    }
+    fn fixture_responses(
+        replies: Vec<Reply>,
     ) -> Result<(Config, thread::JoinHandle<Result<Vec<String>>>)> {
         let cert = CertificateDer::from_pem_slice(include_bytes!(
             "../../tests/fixtures/media/test-cert.pem"
@@ -104,25 +119,29 @@ mod tests {
                 reader.read_exact(&mut body)?;
                 requests.push(first.trim().into());
                 drop(reader);
-                if let Some(mut value) = reply {
-                    if first.starts_with("POST ") {
-                        let request: Value = serde_json::from_slice(&body)?;
-                        assert!(
-                            request["request_id"]
-                                .as_str()
-                                .is_some_and(|id| id.len() == 32)
-                        );
-                        value["request_id"] = request["request_id"].clone();
+                let (content_type, body) = match reply {
+                    Reply::Lost => continue,
+                    Reply::Bytes(content_type, body) => (content_type, body),
+                    Reply::Json(mut value) => {
+                        if first.starts_with("POST ") {
+                            let request: Value = serde_json::from_slice(&body)?;
+                            assert!(
+                                request["request_id"]
+                                    .as_str()
+                                    .is_some_and(|id| id.len() == 32)
+                            );
+                            value["request_id"] = request["request_id"].clone();
+                        }
+                        ("application/json", serde_json::to_vec(&value)?)
                     }
-                    let body = serde_json::to_vec(&value)?;
-                    write!(
-                        stream,
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        body.len()
-                    )?;
-                    stream.write_all(&body)?;
-                    stream.flush()?;
-                }
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )?;
+                stream.write_all(&body)?;
+                stream.flush()?;
             }
             Ok(requests)
         });
@@ -190,6 +209,102 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn screenshot_requires_live_identity_and_accepts_only_bounded_jpeg() -> Result<()> {
+        let mut jpeg = crate::screen::tests::jpeg(1280, 720);
+        jpeg.truncate(jpeg.len() - 2);
+        jpeg.resize(crate::screen::MAX_JPEG - 2, 0);
+        jpeg.extend_from_slice(&[0xff, 0xd9]);
+        let (cfg, worker) = fixture_responses(vec![
+            Reply::Json(status(50)),
+            Reply::Bytes("image/jpeg", jpeg),
+        ])?;
+        let value = cfg.screen("192.0.2.40".parse()?, "Fixture TV", true)?;
+        assert_eq!(value["width"], 1280);
+        assert_eq!(value["height"], 720);
+        assert_eq!(
+            finish(worker)?,
+            [
+                "GET /v1/status HTTP/1.1",
+                "GET /v1/prototype/screenshot HTTP/1.1"
+            ]
+        );
+        let (cfg, worker) = fixture(vec![Some(status(50))])?;
+        assert!(cfg.screen("192.0.2.40".parse()?, "Other TV", true).is_err());
+        assert_eq!(finish(worker)?.len(), 1);
+        for reply in [
+            Reply::Bytes("image/jpeg", vec![0; crate::screen::MAX_JPEG + 1]),
+            Reply::Bytes("text/plain", crate::screen::tests::jpeg(1, 1)),
+            Reply::Bytes("image/jpeg", b"not a JPEG".to_vec()),
+        ] {
+            let (cfg, worker) = fixture_responses(vec![Reply::Json(status(50)), reply])?;
+            assert!(
+                cfg.screen("192.0.2.40".parse()?, "Fixture TV", true)
+                    .is_err()
+            );
+            let _ = finish(worker);
+        }
+        Ok(())
+    }
+    #[test]
+    fn navigation_is_sent_once_and_requires_an_accepted_response() -> Result<()> {
+        for reply in [
+            Some(json!({"accepted":true,"verified":false})),
+            Some(json!({"accepted":false,"verified":false})),
+            None,
+        ] {
+            let expected = reply.as_ref().is_some_and(|v| v["accepted"] == true);
+            let (cfg, worker) = fixture(vec![Some(status(50)), reply])?;
+            assert_eq!(
+                cfg.navigate("192.0.2.40".parse()?, "Fixture TV", "right")
+                    .is_ok(),
+                expected
+            );
+            let requests = finish(worker)?;
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|line| line.starts_with("POST "))
+                    .count(),
+                1
+            );
+        }
+        let (cfg, worker) = fixture(vec![Some(status(50))])?;
+        assert!(
+            cfg.navigate("192.0.2.40".parse()?, "Other TV", "right")
+                .is_err()
+        );
+        assert_eq!(finish(worker)?.len(), 1);
+        assert!(
+            cfg.navigate("192.0.2.40".parse()?, "Fixture TV", "power")
+                .is_err()
+        );
+        Ok(())
+    }
+    #[test]
+    fn screen_status_accepts_disabled_and_rejects_malformed_focus() -> Result<()> {
+        for (response, expected) in [
+            (json!({"enabled":false}), true),
+            (
+                json!({"enabled":true,"navigation_method":"accessibility_focus_actions","focus":{"available":false}}),
+                true,
+            ),
+            (
+                json!({"enabled":true,"navigation_method":"accessibility_focus_actions","focus":{"available":true}}),
+                false,
+            ),
+            (json!({"enabled":false,"unexpected":"field"}), false),
+        ] {
+            let (cfg, worker) = fixture(vec![Some(status(50)), Some(response)])?;
+            assert_eq!(
+                cfg.screen("192.0.2.40".parse()?, "Fixture TV", false)
+                    .is_ok(),
+                expected
+            );
+            assert_eq!(finish(worker)?.len(), 2);
+        }
+        Ok(())
+    }
+    #[test]
     fn malformed_config_and_out_of_range_are_rejected() -> Result<()> {
         let cfg = Config {
             port: 8766,
@@ -217,7 +332,88 @@ pub struct Status {
     pub incremental: String,
     pub backlight_level: u8,
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScreenStatus {
+    enabled: bool,
+    navigation_method: Option<String>,
+    focus: Option<Focus>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Focus {
+    available: bool,
+    package: Option<String>,
+    class: Option<String>,
+    text: Option<String>,
+    description: Option<String>,
+    bounds: Option<String>,
+}
 impl Config {
+    pub(super) fn screen(&self, host: IpAddr, model: &str, capture: bool) -> Result<Value> {
+        let deadline = Instant::now() + Duration::from_secs(self.timeout_seconds);
+        self.status_until(host, model, deadline)?;
+        if capture {
+            let bytes = self.request_bytes_until(
+                host,
+                "/v1/prototype/screenshot",
+                None,
+                deadline,
+                None,
+                true,
+            )?;
+            return crate::screen::image(&bytes);
+        }
+        let value = self.request_until(host, "/v1/prototype/status", None, deadline)?;
+        let state: ScreenStatus =
+            serde_json::from_value(value.clone()).map_err(|_| error("Invalid TV screen status"))?;
+        let valid = if state.enabled {
+            state.navigation_method.as_deref() == Some("accessibility_focus_actions")
+                && state.focus.is_some_and(|focus| {
+                    [
+                        &focus.package,
+                        &focus.class,
+                        &focus.text,
+                        &focus.description,
+                        &focus.bounds,
+                    ]
+                    .iter()
+                    .all(|value| match value {
+                        Some(text) => text.len() <= 640,
+                        None => !focus.available,
+                    })
+                })
+        } else {
+            state.navigation_method.is_none() && state.focus.is_none()
+        };
+        if !valid {
+            return Err(error("Invalid TV screen status"));
+        }
+        Ok(value)
+    }
+    pub(super) fn navigate(&self, host: IpAddr, model: &str, action: &str) -> Result<Value> {
+        if !crate::screen::ACTIONS.contains(&action) {
+            return Err(error("Unsupported screen navigation action"));
+        }
+        let deadline = Instant::now() + Duration::from_secs(self.timeout_seconds);
+        self.status_until(host, model, deadline)?;
+        let mut random = [0u8; 16];
+        getrandom::getrandom(&mut random)?;
+        let id: String = random.iter().map(|b| format!("{b:02x}")).collect();
+        let body = serde_json::to_vec(&json!({"action":action,"request_id":id}))?;
+        // Exactly one POST; no fallback or replay after any transport or action failure.
+        let response =
+            self.request_until(host, "/v1/prototype/navigation", Some(&body), deadline)?;
+        if response["request_id"] != id
+            || response["accepted"] != true
+            || response["verified"] != false
+        {
+            return Err(error(
+                "Screen navigation was rejected or is unconfirmed; inspect a fresh screenshot, never replay automatically",
+            ));
+        }
+        Ok(json!({"action":action,"accepted":true,"verified":false,"request_id":id}))
+    }
     pub(super) fn validate(&self) -> Result<()> {
         media::valid_endpoint(self.port, self.connect, self.timeout_seconds)?;
         media::hex::<32>(&self.server_cert_sha256)?;
@@ -262,6 +458,18 @@ impl Config {
         deadline: Instant,
         permit: Option<(&crate::brightness::Permit, u8)>,
     ) -> Result<Value> {
+        let response = self.request_bytes_until(host, path, body, deadline, permit, false)?;
+        serde_json::from_slice(&response).map_err(|_| error("Invalid TV companion response"))
+    }
+    fn request_bytes_until(
+        &self,
+        host: IpAddr,
+        path: &str,
+        body: Option<&[u8]>,
+        deadline: Instant,
+        permit: Option<(&crate::brightness::Permit, u8)>,
+        jpeg: bool,
+    ) -> Result<Vec<u8>> {
         let deadline = deadline.min(Instant::now() + Duration::from_secs(self.timeout_seconds));
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let tls = ClientConfig::builder_with_provider(provider.clone())
@@ -297,13 +505,17 @@ impl Config {
             stream.write_all(body)?;
         }
         stream.flush()?;
-        let response = crate::http::read_response(
-            &mut BufReader::with_capacity(1024, stream),
-            Some("application/json"),
-            4096,
-        )?
-        .body;
-        serde_json::from_slice(&response).map_err(|_| error("Invalid TV companion response"))
+        let mut reader = BufReader::with_capacity(1024, stream);
+        let response = if jpeg {
+            crate::http::read_bounded_response(
+                &mut reader,
+                Some("image/jpeg"),
+                crate::screen::MAX_JPEG,
+            )?
+        } else {
+            crate::http::read_response(&mut reader, Some("application/json"), 4096)?
+        };
+        Ok(response.body)
     }
     pub(super) fn status(&self, host: IpAddr, model: &str) -> Result<Status> {
         self.status_until(

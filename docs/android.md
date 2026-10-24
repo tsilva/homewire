@@ -131,6 +131,15 @@ when already configured; differing existing Homewire definitions fail for review
 The server launches `bridge` with absolute paths and a 300-second tool timeout.
 Tools appear as `homewire__entity_list`, etc.
 
+To grant visual TV access, explicitly include `media_screen_status`,
+`media_screenshot` and `media_navigate` in `deployment.agent.tools`; navigation
+on Telegram also requires `media_navigate` in `telegram_control_tools`. The
+policy update preserves channel enablement, peers and existing grants. With
+screenshots granted, it sets a 1 MiB MCP response cap and selects API
+`agent.image_output: "image_marker"` for the pinned ZeroClaw vision loader.
+Other MCP clients receive native image blocks by default. The TV's separate
+accessibility service must be enabled explicitly.
+
 Termux:Boot can start the existing service supervisor from `~/.termux/boot/`.
 Open the Boot app once after installation; its script can acquire a wake lock and
 start `service-daemon`. The installer preserves existing boot configuration;
@@ -151,6 +160,118 @@ privately and use a dedicated key with an appropriate spending cap. A secret
 manager on the same rooted device cannot protect a credential while the agent
 uses it; keeping provider credentials off the device requires an external proxy.
 Use paginated discovery or targeted status queries for clients with output limits.
+
+## Battery guard
+
+For a rooted, continuously powered Android host, `scripts/android/battery_guard.py`
+installs a separate native guard through an existing managed SSH connection.
+It requires the kernel's writable
+`/sys/class/power_supply/battery/input_suspend` switch (1 inhibits, 0 permits) and readable
+`temp` (tenths of °C), `capacity`, `voltage_now` (µV), `present`, `health` and
+`status` attributes. This is an additional restriction on the charger; it never
+changes OEM thermal limits, current/voltage limits or battery protection settings.
+Unsupported hardware must not use this installer.
+
+The fixed conservative policy is:
+
+| Condition | Action |
+| --- | --- |
+| Battery reaches 70% | Pause charging until 50% or below |
+| Battery reaches 40°C | Pause charging until 37°C or below |
+| Battery reaches 0°C or below | Pause charging until 5°C or above |
+| Missing/invalid sensor data, absent battery, unknown/non-Good health | Pause charging; require three good samples before resuming |
+| Battery reaches 50°C, voltage reaches 4.50 V, or a serious reported battery fault | Persist a lockout before disabling charging; manual inspection required |
+| Failed charging-switch verification | Keep attempting to inhibit charging; report a control fault; never enable during that worker run |
+| Battery below 15% | Queue a low-battery alert |
+
+These are software policy thresholds, not certified safe operating limits for an
+arbitrary cell. Startup is conservative: temperature must be 5–37°C and charge
+must reach 50% or below before a fresh guard permits charging. Resuming requires
+three fresh kernel samples at least 30 seconds apart. A charge ceiling alone does
+not emit a fault. Serious health states include dead battery, overvoltage,
+overcurrent, unspecified failure and charger watchdog/safety timer expiry.
+An initially disabled switch is preserved as `external-hold`; the guard does not
+automatically undo another operator's charging restriction.
+
+The root supervisor starts from Magisk `service.d` before credential unlock,
+restarts a failed worker and leaves charging disabled if stopped. A
+`CLOCK_BOOTTIME_ALARM` deadline and `EPOLLWAKEUP` sample every 30 seconds through
+deep suspend; alarm/wakeup capabilities are mandatory. The supervisor blocks
+waiting for its child and needs no periodic housekeeping wakeups. There are no
+Homewire, agent or Internet dependencies for the charging cutoff. Local state is
+bounded under root-only `/data/adb/homewire-battery`; critical lockouts survive
+worker restarts and reboots. Readback verifies the switch and later polls check
+that a held battery no longer reports `Charging` and its input has stayed suspended.
+On startup the guard first asserts and verifies the cutoff again, because a reboot
+can reset the kernel switch while its durable ownership marker remains present.
+Some Android charger managers immediately undo `battery_charging_enabled` writes;
+this guard deliberately uses input suspend instead. Verify actual charging current
+with the intended charger connected before relying on a new installation.
+
+Create an ignored, mode-600 profile containing references, never token values:
+
+```json
+{
+  "ssh": "android-host",
+  "su": "/system/bin/su",
+  "prefix": "/data/data/com.termux/files/usr"
+}
+```
+
+The existing Termux `clang` compiles the native sources as the app UID. Root
+installs a versioned copy, verifies hashes, and preserves previous boot wrappers
+and durable fault state. Staging reads sensors but does not switch charging.
+Installation deliberately exercises the real charging cutoff during startup.
+
+```sh
+python3 scripts/android/battery_guard.py --profile .local/battery-guard.json stage
+python3 scripts/android/battery_guard.py --profile .local/battery-guard.json install
+python3 scripts/android/battery_guard.py --profile .local/battery-guard.json status
+# Restore the previous installed wrapper; keep protection/lockout state:
+python3 scripts/android/battery_guard.py --profile .local/battery-guard.json rollback
+```
+
+`stop` stops the verified supervisor and leaves charging inhibited; its boot
+wrapper remains installed. Input suspend blocks the phone's use of USB input;
+the charger and cable remain electrically connected. No automatic command clears
+a critical lockout. After physical inspection
+and repair, an operator can stop the guard, review/remove its root-only `latched`
+marker, and restart the installed wrapper. Retain any intentional `external-hold`
+unless its original owner authorizes release. Never restore charging solely to
+silence an alert.
+
+Optional Telegram delivery reuses one explicitly enabled bot from an existing
+encrypted ZeroClaw configuration. Add `telegram_config` (absolute path),
+`telegram_section` (for example `[channels.telegram.observer]`) and `chat_id`
+(one explicit numeric recipient) together to the private profile before staging.
+Credentials are decrypted in memory and passed to HTTPS curl through an anonymous
+pipe. Tokens are never placed in arguments, logs or new credential files.
+Disabled bot channels stay disabled. Each of the six exact message files
+(`paused.txt`, `critical.txt`, `control.txt`, `recovery.txt`, `low.txt`, `test.txt`)
+must be approved with its recipient before enabling delivery:
+
+```sh
+python3 scripts/android/battery_guard.py --profile .local/battery-guard.json enable-alerts --approved-messages .local/approved-battery-messages
+python3 scripts/android/battery_guard.py --profile .local/battery-guard.json test-alert
+```
+
+Delivery starts disabled for each release. Approval is bound to that release's
+recipient and exact message files; staging a different recipient cannot redirect
+an active release's alerts. Persistent event/delivery records reconcile after
+restarts, failed sends remain pending, attempts are at most once per minute and
+active warnings repeat at most every 30 minutes per worker run. Telegram timeouts
+can make delivery ambiguous, so duplicates remain possible. Recovery is sent only
+after a previously delivered warning clears. Delivery is best effort and requires
+network access and unlocked credential storage; airplane/deep-offline modes can
+delay it. Use an independent powered host/monitor for loss-of-phone alerts, and
+an external power cutoff for protection against a hung phone or charger failure.
+
+Software cannot detect swelling, cable/connector damage or every internal cell
+defect, and cannot guarantee fire prevention. Inspect the battery, use a sound
+compatible charger/cable and a ventilated nonflammable resting place. Do not keep
+using a swollen/damaged battery. Keep normal smoke detection in place. See
+[Motorola charging safety](https://help.motorola.com/hc/apps/settings/legal/global/en-gb/T1507072757.html)
+and [NIST's overheating guidance](https://pages.nist.gov/mobile-threat-catalogue/physical-threats/PHY-7.html).
 
 ## ZeroClaw isolation
 

@@ -137,6 +137,10 @@ deadline. They isolate blocking protocol clients and join before ownership locks
 are released. This stack setting is not a resident-memory measurement.
 Idle MCP blocks on stdin; background jobs add one reader thread with a 128 KiB
 stack and a one-message queue. Inputs use a 1 KiB buffer and a 64 KiB message cap.
+Screen-capable adapters return temporary JPEG payloads bounded to 512 KiB and
+1280 × 720; MCP emits one image block without duplicating base64 in JSON metadata.
+The private IPC reply limit remains 1 MiB. Generic media-screen capabilities and
+adapter hooks own routing; MCP only formats the category's native image result.
 Waits follow enabled deadlines: adapter polls, light schedules or minute boundaries
 for Meaco rules. Pre-initialization waits directly for input. Serialized operations
 can delay jobs; Meaco rules have minute-wide windows with no late catch-up.

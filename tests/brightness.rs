@@ -10,6 +10,7 @@ use std::time::{Duration as StdDuration, Instant};
 mod support;
 struct Device {
     level: u8,
+    minimum: u8,
     power: bool,
     writes: usize,
     fail_read: bool,
@@ -21,6 +22,7 @@ impl Device {
     fn new() -> Self {
         Self {
             level: 10,
+            minimum: 0,
             power: true,
             writes: 0,
             fail_read: false,
@@ -32,6 +34,9 @@ impl Device {
 }
 impl Io for Device {
     type Applied = ();
+    fn minimum_brightness(&self) -> u8 {
+        self.minimum
+    }
     fn read(&mut self) -> Result<Observation> {
         if self.fail_read {
             return Err(homewire::error("Unknown state"));
@@ -78,6 +83,42 @@ fn expiry(control: &Control, at: DateTime<Utc>) -> Result<DateTime<Utc>> {
         .as_str()
         .expect("expiry")
         .parse()?)
+}
+#[test]
+fn device_floor_applies_before_matching_and_override_tracking() -> Result<()> {
+    let dir = support::Directory::new()?;
+    let at = now();
+    let mut tv = State::open(&dir.0.join("tv.json"), "tv", false, at)?;
+    let mut light = State::open(&dir.0.join("light.json"), "light", false, at)?;
+    let mut dt = Device::new();
+    dt.minimum = 30;
+    let mut dl = Device::new();
+    let shared = cycle(at, 5);
+    tv.tick(&shared, &mut dt)?;
+    light.tick(&shared, &mut dl)?;
+    assert_eq!((dt.level, dl.level), (30, 5));
+    assert_eq!(shared.target.brightness_percent, Some(5));
+    for minute in 1..=2 {
+        assert!(
+            tv.tick(&cycle(at + Duration::minutes(minute), 5), &mut dt)?
+                .is_none()
+        );
+        assert_eq!(
+            tv.control.status(at + Duration::minutes(minute))?["paused"],
+            false
+        );
+    }
+    assert_eq!(dt.writes, 1);
+    tv.tick(&cycle(at + Duration::minutes(3), 60), &mut dt)?;
+    assert_eq!(dt.level, 60);
+    dt.level = 20;
+    tv.tick(&cycle(at + Duration::minutes(4), 5), &mut dt)?;
+    assert_eq!(dt.level, 20);
+    assert_eq!(
+        tv.control.status(at + Duration::minutes(4))?["paused"],
+        true
+    );
+    Ok(())
 }
 #[test]
 fn changes_pause_only_one_device_extend_the_timer_and_survive_restart() -> Result<()> {

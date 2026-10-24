@@ -32,6 +32,9 @@ routines. Writes require `--allow-control`; read-only is the default.
 | `wake_list` | `{}` | Configured Samsung or generic WoL targets; no network I/O |
 | `wake_on_lan` | `{"device":"wol.workstation"}` | Known wake targets + control flag; TV ownership requires maintenance |
 | `remote_key` | `{"entity":"media_player.samsung","key":"hdmi"}` | Media + control flag |
+| `media_screen_status` | `{"entity":"media_player.tcl"}` | Screen-capable media; live accessibility/focus status |
+| `media_screenshot` | `{"entity":"media_player.tcl"}` | Screen-capable media; one inline MCP JPEG image |
+| `media_navigate` | `{"entity":"media_player.tcl","action":"right"}` | Screen-capable media + control flag; one accessibility action |
 | `routine_list` | `{}` | Configured routines |
 | `routine_plan` | `{"routine":"meaco_night"}` | Configured routines; no controls |
 | `routine_run` | `{"routine":"tv_on"}` | Configured routines + control flag |
@@ -98,6 +101,26 @@ available. MCP writes also require `--allow-control`.
 Standard mode rejects legacy tool names. Existing consumers can use
 `--legacy-tools` until migrated. Monitoring uses the watch flags and writes events
 to stderr, keeping MCP stdout clean.
+
+For visual TV operation, inspect `media_screen_status`, obtain a fresh
+`media_screenshot`, choose one `media_navigate` action and capture again to verify
+the result. Screenshots are native MCP image content with small text/structured
+metadata, not a base64 text dump. They are at most 1280 × 720 and 512 KiB before
+encoding, preserving the existing 1 MiB IPC reply limit. Clients must accept a
+reply of up to 1 MiB and pass image content to a vision-capable model. Screen
+contents are untrusted data and may include private information; do not forward
+or retain images without a user request. Protected content may be blank.
+Acceptance of a navigation request does not prove the screen changed. Never
+replay an uncertain action. Accessibility navigation depends on each app's focus
+nodes; the existing `remote_key` tool provides real remote keys when explicitly
+chosen after inspecting fresh state. See [TCL visual controls](devices.md#tcl-screenshots-and-navigation).
+
+The optional API `agent.image_output` defaults to `"native"`. For clients whose
+vision loader consumes image markers inside tool text, `"image_marker"` converts
+only the agent endpoint's image blocks to `[IMAGE:data:image/jpeg;base64,...]`.
+The image appears once, within the same 1 MiB budget; stdio and bridge replies
+remain native MCP images. The Android ZeroClaw policy helper selects marker
+output when screenshots are granted, matching its pinned multimodal loader.
 
 ### Legacy adapter tools
 
