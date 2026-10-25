@@ -86,7 +86,7 @@ impl Bundle {
             if !value.is_object()
                 || !matches!(
                     family.as_str(),
-                    "meaco" | "tv" | "computer" | "leave_house" | "sleep"
+                    "meaco" | "tv" | "computer" | "leave_house" | "sleep" | "wake_up"
                 )
             {
                 return Err(error("Unknown routine or invalid section"));
@@ -201,6 +201,11 @@ impl Bundle {
                     devices.sleep_routine = Some(manager);
                 }
             }
+        }
+        if let Some(value) = self.document.routines.get("wake_up") {
+            devices.wake_up = Some(crate::routine::startup::Manager::open(&Source::section(
+                &self.path, "wake_up", value,
+            ))?);
         }
         devices.validate()?;
         Ok(devices)

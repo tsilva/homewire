@@ -30,6 +30,8 @@ pub struct Config {
     pub timeout_seconds: u64,
     #[serde(default)]
     pub connect: Option<SocketAddr>,
+    #[serde(default)]
+    pub readback: bool,
 }
 
 #[cfg(test)]
@@ -154,6 +156,7 @@ mod tests {
                 incremental: "revision".into(),
                 timeout_seconds: 2,
                 connect: Some(address),
+                readback: false,
             },
             worker,
         ))
@@ -304,6 +307,54 @@ mod tests {
         }
         Ok(())
     }
+    fn readable() -> Value {
+        json!({"foreground_package":"example.player","playback":{"access_enabled":true,"truncated":false,"sessions":[{"package":"example.player","state":3,"position_ms":12000,"speed":1.0,"updated_age_ms":50,"title":null,"display_title":null,"media_id":null,"duration_ms":null}]}})
+    }
+    #[test]
+    fn readback_keeps_unknown_titles_and_rejects_invalid_sessions() -> Result<()> {
+        let value = readable();
+        assert!(serde_json::from_value::<Readback>(value.clone())?.valid());
+        let mut cases = Vec::new();
+        let mut bad = value.clone();
+        bad["playback"]["sessions"][0]["state"] = json!(12);
+        cases.push(bad);
+        let mut bad = value.clone();
+        bad["playback"]["sessions"][0]["title"] = json!("x".repeat(1025));
+        cases.push(bad);
+        let mut bad = value.clone();
+        bad["playback"]["access_enabled"] = json!(false);
+        cases.push(bad);
+        let mut bad = value.clone();
+        bad["playback"]["sessions"][0]["state"] = Value::Null;
+        cases.push(bad);
+        let mut bad = value.clone();
+        bad["playback"]["sessions"] = json!(vec![value["playback"]["sessions"][0].clone(); 5]);
+        cases.push(bad);
+        for case in cases {
+            assert!(!serde_json::from_value::<Readback>(case)?.valid());
+        }
+        let response = json!({"enabled":true,"navigation_method":"accessibility_focus_actions","focus":{"available":false},"readback":value});
+        let (mut cfg, worker) = fixture(vec![Some(status(50)), Some(response.clone())])?;
+        cfg.readback = true;
+        assert_eq!(
+            cfg.screen("192.0.2.40".parse()?, "Fixture TV", false)?,
+            response
+        );
+        assert_eq!(finish(worker)?[1], "GET /v1/readback HTTP/1.1");
+        let (mut cfg, worker) = fixture(vec![
+            Some(status(50)),
+            Some(
+                json!({"enabled":true,"navigation_method":"accessibility_focus_actions","focus":{"available":false}}),
+            ),
+        ])?;
+        cfg.readback = true;
+        assert!(
+            cfg.screen("192.0.2.40".parse()?, "Fixture TV", false)
+                .is_err()
+        );
+        finish(worker)?;
+        Ok(())
+    }
     #[test]
     fn malformed_config_and_out_of_range_are_rejected() -> Result<()> {
         let cfg = Config {
@@ -314,6 +365,7 @@ mod tests {
             incremental: "revision".into(),
             timeout_seconds: 2,
             connect: None,
+            readback: false,
         };
         assert!(cfg.validate().is_err());
         assert!(cfg.set("192.0.2.40".parse()?, "Fixture TV", 101).is_err());
@@ -338,6 +390,61 @@ struct ScreenStatus {
     enabled: bool,
     navigation_method: Option<String>,
     focus: Option<Focus>,
+    readback: Option<Readback>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Readback {
+    foreground_package: Option<String>,
+    playback: Playback,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Playback {
+    access_enabled: bool,
+    truncated: bool,
+    sessions: Vec<PlaybackSession>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlaybackSession {
+    package: String,
+    state: Option<u8>,
+    position_ms: Option<i64>,
+    speed: Option<f32>,
+    updated_age_ms: Option<u64>,
+    title: Option<String>,
+    display_title: Option<String>,
+    media_id: Option<String>,
+    duration_ms: Option<i64>,
+}
+fn bounded_text(value: &str) -> bool {
+    value.len() <= 1024 && !value.chars().any(char::is_control)
+}
+impl Readback {
+    fn valid(&self) -> bool {
+        let playback = &self.playback;
+        self.foreground_package
+            .as_ref()
+            .is_none_or(|s| bounded_text(s))
+            && playback.sessions.len() <= 4
+            && (playback.access_enabled || (playback.sessions.is_empty() && !playback.truncated))
+            && playback.sessions.iter().all(|session| {
+                !session.package.is_empty()
+                    && bounded_text(&session.package)
+                    && session.state.is_none_or(|s| s <= 11)
+                    && session.position_ms.is_none_or(|p| p >= -1)
+                    && session.duration_ms.is_none_or(|d| d >= 0)
+                    && session.speed.is_none_or(|s| s.is_finite())
+                    && (session.state.is_some()
+                        || (session.position_ms.is_none()
+                            && session.speed.is_none()
+                            && session.updated_age_ms.is_none()))
+                    && [&session.title, &session.display_title, &session.media_id]
+                        .iter()
+                        .all(|s| s.as_ref().is_none_or(|s| bounded_text(s)))
+            })
+    }
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -364,11 +471,18 @@ impl Config {
             )?;
             return crate::screen::image(&bytes);
         }
-        let value = self.request_until(host, "/v1/prototype/status", None, deadline)?;
+        let path = if self.readback {
+            "/v1/readback"
+        } else {
+            "/v1/prototype/status"
+        };
+        let value = self.request_until(host, path, None, deadline)?;
         let state: ScreenStatus =
             serde_json::from_value(value.clone()).map_err(|_| error("Invalid TV screen status"))?;
         let valid = if state.enabled {
             state.navigation_method.as_deref() == Some("accessibility_focus_actions")
+                && (state.readback.as_ref().is_none_or(Readback::valid))
+                && (!self.readback || state.readback.is_some())
                 && state.focus.is_some_and(|focus| {
                     [
                         &focus.package,
@@ -384,7 +498,7 @@ impl Config {
                     })
                 })
         } else {
-            state.navigation_method.is_none() && state.focus.is_none()
+            state.navigation_method.is_none() && state.focus.is_none() && state.readback.is_none()
         };
         if !valid {
             return Err(error("Invalid TV screen status"));

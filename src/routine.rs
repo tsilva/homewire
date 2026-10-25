@@ -10,6 +10,7 @@ pub mod brightness;
 pub mod computer;
 pub mod household;
 pub mod meaco;
+pub mod startup;
 pub mod tcl;
 pub mod tv;
 
@@ -24,6 +25,7 @@ fn configured(devices: &Devices, name: &str) -> bool {
         "computer_on" | "computer_off" => devices.computer_routine.is_some(),
         "leave_house" => devices.leave_house.is_some(),
         "sleep" => devices.sleep_routine.is_some(),
+        "wake_up" => devices.wake_up.is_some(),
         _ => false,
     }
 }
@@ -35,6 +37,10 @@ pub fn call(devices: &mut Devices, tool: &str, args: &Value) -> Result<Value> {
             ("meaco_day", "Configured daytime preset"),
             ("meaco_night", "Configured nighttime preset"),
             ("meaco_off", "Verified dehumidifier power off"),
+            (
+                "wake_up",
+                "Explicit power-on list with protected excluded devices; TV/PC outlets first",
+            ),
             (
                 "leave_house",
                 "Explicit shutdown list; PC and kitchen excluded unless include_pc/include_kitchen are explicitly true",
@@ -85,7 +91,19 @@ pub fn call(devices: &mut Devices, tool: &str, args: &Value) -> Result<Value> {
     if !configured(devices, name) {
         return Err(error("Unknown configured routine"));
     }
-    let result = if matches!(name, "leave_house" | "sleep") {
+    let result = if name == "wake_up" {
+        let mut routine = devices
+            .wake_up
+            .take()
+            .ok_or_else(|| error("wake_up is not configured"))?;
+        let result = if tool == "routine_plan" {
+            Ok(routine.preview())
+        } else {
+            routine.run(devices)
+        };
+        devices.wake_up = Some(routine);
+        result?
+    } else if matches!(name, "leave_house" | "sleep") {
         let slot = if name == "leave_house" {
             &mut devices.leave_house
         } else {
@@ -196,7 +214,8 @@ pub fn tools(selection: Selection) -> impl Iterator<Item = &'static Tool> + Clon
     let enabled = selection
         .support()
         .contains(crate::entity::Support::ROUTINES)
-        || selection.support().contains(crate::entity::Support::SWITCH);
+        || selection.support().contains(crate::entity::Support::SWITCH)
+        || selection.support().contains(crate::entity::Support::LIGHT);
     [
         enabled.then_some(&LIST),
         enabled.then_some(&PLAN),

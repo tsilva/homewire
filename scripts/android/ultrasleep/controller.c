@@ -13,8 +13,8 @@ static int plan(time_t now, int start, int end, time_t *next) {
     struct tm local;
     if (!localtime_r(&now, &local)) return -1;
     int minute = local.tm_hour * 60 + local.tm_min;
-    int asleep = minute >= start || minute < end;
-    if (minute >= start) local.tm_mday++;
+    int asleep = start == 0 ? minute < end : minute >= start || minute < end;
+    if ((asleep ? end : start) <= minute) local.tm_mday++;
     local.tm_hour = (asleep ? end : start) / 60;
     local.tm_min = (asleep ? end : start) % 60;
     local.tm_sec = 0;
@@ -25,6 +25,9 @@ static int plan(time_t now, int start, int end, time_t *next) {
 static int number(const char *s, int low, int high) {
     char *end; errno = 0; long n = strtol(s, &end, 10);
     return errno || !*s || *end || n < low || n > high ? -1 : (int)n;
+}
+static int valid_window(int start, int end) {
+    return start >= 0 && end >= 0 && start != end && (start == 0 || start > end);
 }
 int main(int argc, char **argv);
 #ifdef __linux__
@@ -190,9 +193,9 @@ static int run_schedule(int start, int end) {
 #endif
 int main(int argc, char **argv) {
     if (argc == 6 && !strcmp(argv[1], "--plan")) {
-        int start = number(argv[4], 1, 1439), end = number(argv[5], 0, 1438); char *p;
+        int start = number(argv[4], 0, 1439), end = number(argv[5], 0, 1438); char *p;
         time_t now = (time_t)strtoll(argv[3], &p, 10), next;
-        if (*p || start <= end || end < 0 || setenv("TZ", argv[2], 1)) return 2;
+        if (*p || !valid_window(start, end) || setenv("TZ", argv[2], 1)) return 2;
         tzset(); int asleep = plan(now, start, end, &next);
         if (asleep < 0) return 2;
         printf("{\"asleep\":%s,\"next_transition\":%lld}\n", asleep ? "true" : "false", (long long)next); return 0;
@@ -200,8 +203,8 @@ int main(int argc, char **argv) {
 #ifdef __linux__
     if ((argc == 6 || argc == 8) && !strcmp(argv[1], "--supervise")) return supervise(argc, argv);
     if (argc == 7 && !strcmp(argv[1], "--run")) {
-        root = argv[2]; action = argv[3]; int start = number(argv[5], 1, 1439), end = number(argv[6], 0, 1438);
-        if (start <= end || end < 0 || setenv("TZ", argv[4], 1) || setup(0)) return 2;
+        root = argv[2]; action = argv[3]; int start = number(argv[5], 0, 1439), end = number(argv[6], 0, 1438);
+        if (!valid_window(start, end) || setenv("TZ", argv[4], 1) || setup(0)) return 2;
         tzset(); return run_schedule(start, end);
     }
     if (argc == 5 && (!strcmp(argv[1], "--test") || !strcmp(argv[1], "--probe"))) {

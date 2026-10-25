@@ -97,6 +97,13 @@ and absolute wake/sleep. The TV workflow composes those adapters and a shared pl
   Never restore permissive agent grants on failure or enable disabled channels.
   Never copy test tunnel configs to phones.
 
+## Android daemon deployments
+
+For Android daemon builds, deployments, verification and rollback, use
+`$homewire_deploy-android`. It covers frozen source, versioned binaries, preserved
+private configuration/state and plan-only verification. Loading or updating the
+skill does not authorize a deployment or device-changing tests.
+
 ## TCL companion releases
 
 For TCL companion builds, deployments, verification or recovery, use

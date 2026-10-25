@@ -262,6 +262,11 @@ firmware checks as the backlight API:
 
 - `GET /v1/prototype/status`: whether the service is connected and a bounded
   description of the current input focus. Focus text is private screen data.
+- `GET /v1/readback`: focus, foreground package and optional Android media
+  sessions. See [playback setup](../../docs/devices.md#playback-readback).
+  A connected accessibility service supplies foreground focus; Android notification
+  access separately permits session reads. An APK update enables neither.
+  Notification contents are never inspected. JSON replies are bounded to 32 KiB.
 - `GET /v1/prototype/screenshot`: one JPEG, at most 1280 × 720 and 2 MiB.
   Capture fails explicitly when unavailable; secure content can appear blank.
   Images are not retained on the TV. Save any diagnostic captures only in an

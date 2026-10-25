@@ -57,7 +57,12 @@ def instructions(tools=None, telegram_controls=()):
         '`entity_list` accepts domain/device filters, not an entity argument; use `entity_status` for known entity IDs. '
         'Keep replies brief and outcome-focused. Omit entity IDs, protocol details, unrelated suggestions, '
         'and closing questions unless they are necessary to resolve a real blocker.\n\n')
-    media_policy = ('## Household shutdown routines\n\n'
+    media_policy = ('## Household routines\n\n'
+        'For a current request such as "I woke up", "I am awake", or "good morning, turn everything on", '
+        'use the configured wake_up routine once. It has an explicit power-on list and protected exclusions. '
+        'Never add an excluded device, infer extra startup actions, or bypass the configured list. '
+        'wake_up accepts no include_pc/include_kitchen flags and is separate from the phone offline schedule. '
+        'A greeting alone is not an instruction to run a routine. Preview requests use routine_plan only. '
         'Use configured leave_house and sleep routines for the matching user request. '
         'These routines use explicit device lists; never add discovered devices or assemble outlet cutoffs yourself. '
         'For leave_house, omit include_pc and include_kitchen by default. Set each flag true only when the user '

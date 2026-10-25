@@ -66,6 +66,9 @@ for credentials. There is no automatic discovery.
 compose shutdown lists with device-before-outlet ordering and fresh idle printer
 checks. `leave_house` includes PC and kitchen only on explicit request;
 `sleep` uses its complete configured list. Preview either without device I/O.
+`wake_up` uses an [explicit startup list](docs/configuration.md#explicit-startup-list)
+with protected device exclusions and outlet-first TV/PC sequencing. Preview it
+without controls; its power-only steps preserve other settings.
 
 | Setup guide | Capabilities |
 | --- | --- |
@@ -129,7 +132,9 @@ to inspect the pause or resume the current target now.
 The companion also has an opt-in [visual navigation prototype](companion/tv/README.md#visual-navigation-prototype)
 for authenticated screenshots and accessibility navigation on the paired TV.
 Agents use `media_screenshot`, `media_screen_status` and `media_navigate` through
-MCP. Enable the companion's accessibility service explicitly; navigation also
+MCP. Optional playback readback adds Android media-session state and available
+title metadata to `media_screen_status`.
+Enable the companion's accessibility service explicitly; navigation also
 requires `--allow-control`. [Visual control guide](docs/devices.md#tcl-screenshots-and-navigation).
 
 After the private toolchain and Infisical bindings are configured, build, sign,
@@ -148,7 +153,7 @@ before installation, and saves versioned artifacts and previous-APK backups. See
 
 - [Configuration and CLI](docs/configuration.md): schemas, commands, credentials and migration.
 - [Household services](docs/services.md): playback, alerts, history, dashboard and Android companion.
-- [Android deployment](docs/android.md): installation, isolation, verification and rollback. Includes optional [offline ultrasleep](docs/android.md#offline-ultrasleep) with a local wake alarm.
+- [Android deployment](docs/android.md): installation, isolation, verification and rollback. Includes optional [offline ultrasleep](docs/android.md#offline-ultrasleep) with a private schedule, local wake alarm, checked service transitions and a retained recovery journal.
 - [Development](docs/development.md): architecture, required checks, memory measurement and [privacy hooks](docs/development.md#public-repository-privacy).
   Contributors should install the hooks before committing or pushing.
 - [Reference index](docs/reference.md): all guide sections.

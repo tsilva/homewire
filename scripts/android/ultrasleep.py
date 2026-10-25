@@ -7,10 +7,34 @@ from pathlib import Path
 import re
 import shlex
 import subprocess
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 SOURCE = Path(__file__).with_name('ultrasleep')
 STATE = '/data/adb/homewire-ultrasleep'
 BOOT = '/data/adb/service.d/homewire-ultrasleep.sh'
+
+
+def schedule(value):
+    if not isinstance(value, dict) or set(value) != {'timezone', 'start', 'end'}:
+        raise ValueError('Supply an explicit schedule in the private ultrasleep profile')
+    zone = value['timezone']
+    if not isinstance(zone, str) or not 1 <= len(zone) <= 64:
+        raise ValueError('Invalid private schedule timezone')
+    try:
+        ZoneInfo(zone)
+    except (ValueError, ZoneInfoNotFoundError):
+        raise ValueError('Invalid private schedule timezone') from None
+    minutes = []
+    for key in ('start', 'end'):
+        clock = value[key]
+        if not isinstance(clock, str) or not re.fullmatch(r'(?:[01][0-9]|2[0-3]):[0-5][0-9]', clock):
+            raise ValueError('Schedule times require HH:MM')
+        hour, minute = map(int, clock.split(':'))
+        minutes.append(hour * 60 + minute)
+    start, end = minutes
+    if end > 1438 or start == end or start != 0 and start < end:
+        raise ValueError('Schedule must start at midnight or cross midnight')
+    return zone, start, end
 
 
 def absolute(value):
@@ -24,7 +48,7 @@ def load(path):
     if path.stat().st_mode & 0o077:
         raise ValueError('Private ultrasleep profile must be owner-only')
     value = json.loads(path.read_text())
-    if set(value) - {'telegram_config', 'telegram_section', 'resume_services_first'} != {'ssh', 'su', 'prefix', 'homewire', 'guard', 'units', 'freeze_executables'}:
+    if set(value) - {'telegram_config', 'telegram_section', 'resume_services_first', 'schedule'} != {'ssh', 'su', 'prefix', 'homewire', 'guard', 'units', 'freeze_executables'}:
         raise ValueError('Invalid ultrasleep profile fields')
     if not re.fullmatch(r'[a-zA-Z0-9_-]+', value['ssh']):
         raise ValueError('Expected a managed SSH client alias')
@@ -50,6 +74,8 @@ def load(path):
         absolute(value['telegram_config'])
         if not re.fullmatch(r'\[channels\.telegram\.[a-zA-Z0-9_-]+\]', value['telegram_section']):
             raise ValueError('Invalid explicit Telegram bot section')
+    if 'schedule' in value:
+        schedule(value['schedule'])
     return value
 
 
@@ -127,6 +153,7 @@ class Phone:
         return value
 
     def start(self, test=False):
+        policy = None if test else schedule(self.profile.get('schedule'))
         release = self.release()
         self.root(f'cd {release} && sha256sum -c SHA256SUMS >/dev/null')
         if test:
@@ -136,14 +163,15 @@ class Phone:
             if (status.get('phase') != 'test_complete' or not status.get('ok')
                     or status.get('suspended_seconds', 0) < 180 or status.get('action') != release + '/action.sh'):
                 raise ValueError('A successful five-minute test with actual suspend is required before enabling')
-            args = '--run Europe/Lisbon 1320 420'
+            zone, start, end = policy
+            args = '--run ' + shlex.quote(zone) + f' {start} {end}'
             wrapper = f'#!/system/bin/sh\ncd {release} || exit 1\nsha256sum -c SHA256SUMS >/dev/null || exit 1\nexec /system/bin/sh {release}/supervisor.sh {release} {STATE} {args}\n'
             self.root(f'[ ! -e {BOOT} ] || cp -p {BOOT} {STATE}/previous-boot.sh')
             self.put(BOOT, wrapper.encode(), '700')
         mode, rest = args.split(' ', 1)
         self.root(f'umask 077; nohup /system/bin/sh {release}/supervisor.sh {release} {STATE} {mode} {rest} '
                   f'</dev/null >{STATE}/controller.log 2>&1 &')
-        print('Five-minute offline test started.' if test else 'Nightly schedule enabled: 22:00–07:00 Europe/Lisbon.')
+        print('Five-minute offline test started.' if test else 'Nightly schedule enabled from the private profile.')
 
     def status(self):
         # No process command lines or application configurations are exposed.

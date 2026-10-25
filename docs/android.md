@@ -490,12 +490,13 @@ The optional root-only controller for Android user 0 parks the phone's configure
 Termux services, releases the Termux wake lock, disables cellular/Wi-Fi/Bluetooth
 and scanning, enables battery saver, switches the screen off and forces deep
 Doze. It restores the saved radio settings, wake lock and previously running
-services at 07:00. Existing disabled services remain disabled. Homewire device
+services at the configured end time. Existing disabled services remain disabled. Homewire device
 states and schedules are preserved; its scheduler skips missed jobs. Android
 itself remains running and may briefly wake for essential system work.
 
-The daily window is 22:00–07:00 **Europe/Lisbon**, including daylight-saving
-changes. A native `CLOCK_REALTIME_ALARM` timer wakes the kernel; an
+The daily window and IANA timezone are explicit private-profile settings, including
+daylight-saving changes. There is no household schedule built into the operator.
+A native `CLOCK_REALTIME_ALARM` timer wakes the kernel; an
 `EPOLLWAKEUP` event keeps it awake during each transition. The controller blocks
 between deadlines instead of polling. No network, remote host, Termux wake lock,
 or agent is needed to resume. An operator wake bypasses only the current night.
@@ -508,6 +509,7 @@ inventory under ignored `.local/`, with profile permissions `600`. For example:
 
 ```json
 {
+  "schedule": {"timezone": "Etc/UTC", "start": "21:30", "end": "06:15"},
   "ssh": "phone-admin",
   "su": "/debug_ramdisk/su",
   "prefix": "/data/data/com.termux/files/usr",
@@ -537,6 +539,10 @@ List every root workload supervisor, including any keep-unlocked helper.
 stop/start supervisor, preserving their in-memory state; resume verifies each
 PID's executable and start time. The phone's ingress guards remain active.
 All currently running Termux runit services are parked through their supervisors.
+Entry rejects failed or unrecognized service-status queries before parking any
+workloads; it never treats an unavailable supervisor as a stopped service. Each
+service stop/start is followed by a status check, and root supervisor restoration
+waits for its expected PID identity before claiming success.
 The controller is outside those services. When `telegram_config` and `telegram_section` are explicitly configured, nightly
 resume clears that enabled bot's pending Telegram updates before launching the
 agent. Its token is read from the existing protected configuration, with authenticated
@@ -578,6 +584,10 @@ the journal for another attempt. Records and the status file are bounded and
 contain no application credentials. Versions and the previous boot wrapper stay
 under `/data/adb/homewire-ultrasleep` for operator rollback. Use the operator `recover` command to retry a failed restoration. Never remove a
 recovery journal before restoring its saved state.
+One completed journal is retained as `last-transaction`, including the observed
+service states and transition timestamps, until the next successful restoration.
+This bounded record survives a controller restart or phone reboot. A restore proof
+confirms the saved settings and supervised processes, not remote network reachability.
 
 While reachable, `wake` sends an absolute wake request. During full offline sleep,
 use a local root terminal to send `kill -USR1` to the PID in

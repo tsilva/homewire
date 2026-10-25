@@ -15,6 +15,7 @@ families. The file is bounded to 64 KiB and requires `version: 1`.
 | `routines.meaco` | Day/night presets, previously `meaco.json`'s `presets` |
 | `routines.tv` | TCL outlet sequencing below, or legacy `plug`, `shutdown_policy`, `timings` for Samsung/DIGI |
 | `routines.leave_house`, `routines.sleep` | Explicit shutdown lists, with optional PC/kitchen groups for leave_house |
+| `routines.wake_up` | Explicit power-on list with required device exclusions |
 | `automations.meaco` | `timezone`, `day`, `night`, previously Meaco `schedule` |
 | `automations.lights` | L900 curve/location/timezone settings, previously lights `automation` |
 | `services` | `api`, `alerts`, `history`, `mobile`, `weather`, `shopping`, `radio`, `speech`; see [services](services.md) |
@@ -87,6 +88,48 @@ There is no rollback or automatic replay. An attempt is saved before controls;
 partial/uncertain attempts block replay for 180 seconds, including after restart.
 Plans describe configured steps without any device I/O. These routines do not
 schedule execution or change the Android host's separate offline sleep schedule.
+
+### Explicit startup list
+
+`routines.wake_up` has `steps` and `excluded_entities`, each containing 1–16
+entries. All targets and exclusions resolve before device I/O. There is no
+automatic discovery expansion when the routine runs. For example, using synthetic
+entities whose adapters and child routines are already configured:
+
+```json
+"wake_up": {
+  "excluded_entities": ["switch.protected_load"],
+  "steps": [
+    {"action":"routine","name":"tv_on"},
+    {"action":"routine","name":"computer_on"},
+    {"action":"power_on","entity":"switch.sample_load"},
+    {"action":"power_on","entity":"light.sample_light"},
+    {"action":"power_on","entity":"dehumidifier.meaco"}
+  ]
+}
+```
+
+Only `tv_on` (configured TCL sequencing) and `computer_on` are accepted as child
+routines. They retain outlet-first ordering, identity checks and readiness
+verification. `power_on` supports ordinary switches, lights and dehumidifiers
+with a supported absolute power setting. It preserves brightness, colours,
+humidity targets, modes and timers. Existing overload, overheating and device
+fault guards still apply. Printer or speaker supply outlets use `power_on` on
+the switch; verified relay power does not prove attached-appliance readiness.
+
+Exclusions protect the resolved physical device, including entity aliases and
+outlets reached by child routines. An excluded target, duplicate device,
+unsupported capability, recursive routine, power-off child, or direct control
+of TV/PC-owned power fails configuration validation. Excluded devices receive
+no control; the routine does not forcibly switch them off.
+
+Use `routine_plan` or `routine_run` with `{"routine":"wake_up"}`. No optional
+flags are accepted. The plan is provisional and performs no device I/O. Runs
+attempt each configured step once, continue independent steps on failure, and
+return per-step results plus `completed:false` for partial completion. An
+attempt is saved before controls; partial/uncertain attempts block replay for
+180 seconds, including after restart. Never automatically retry them. No
+schedule is enabled, and the phone's separate offline schedule is unaffected.
 
 Router login, status, client-based presence and administrative controls are no
 longer supported. Remove `adapters.router` from older unified files; the runtime

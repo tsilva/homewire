@@ -34,6 +34,36 @@ termux() {
     "$SU" -d -g "$APP_UID" -G 3003 -Z "$APP_CONTEXT" "$APP_UID" -s /system/bin/sh -c \
         "export PREFIX='$PREFIX'; export PATH='$PREFIX/bin:/system/bin'; $1"
 }
+service_state() {
+    # A failed/unknown query must never be interpreted as a stopped service.
+    service_status=$(termux "sv status '$PREFIX/var/service/$1'") || return 1
+    case "$service_status" in
+        "run: $PREFIX/var/service/$1:"*) printf 'run\n';;
+        "down: $PREFIX/var/service/$1:"*) printf 'down\n';;
+        *) return 1;;
+    esac
+}
+snapshot_services() {
+    : > "$STATE/snapshot.new/services"
+    : > "$STATE/snapshot.new/service-states"
+    service_count=0
+    for service in "$PREFIX"/var/service/*; do
+        [ -d "$service" ] || continue
+        name=${service##*/}
+        case "$name" in *[!a-zA-Z0-9_-]*) return 1;; esac
+        service_count=$((service_count+1))
+        [ "$service_count" -le 64 ] || return 1
+        state=$(service_state "$name") || return 1
+        printf '%s|%s\n' "$name" "$state" >> "$STATE/snapshot.new/service-states"
+        if [ "$state" = run ]; then printf '%s\n' "$name" >> "$STATE/snapshot.new/services"; fi
+    done
+    [ "$service_count" -gt 0 ]
+}
+set_service() {
+    termux "sv -w 15 $1 '$PREFIX/var/service/$2'" || return 1
+    state=$(service_state "$2") || return 1
+    case "$1:$state" in up:run|down:down) return 0;; *) return 1;; esac
+}
 leave() {
     [ -f "$txn/complete" ] || return 0
     # Keep the journal after any failure, allowing another recovery attempt.
@@ -49,7 +79,7 @@ leave() {
     # Enforce existing ingress protection before restarting listeners.
     "$GUARD" check
     while IFS= read -r name; do
-        if grep -Fxq "$name" "$txn/services"; then termux "sv -w 15 up '$PREFIX/var/service/$name'"; fi
+        if grep -Fxq "$name" "$txn/services"; then set_service up "$name"; fi
     done < "$here/early-services"
     if [ "$(cat "$txn/session" 2>/dev/null || true)" = nightly ] && [ -n "$TELEGRAM_CONFIG" ]; then
         echo discard_telegram > "$STATE/action-phase"
@@ -69,20 +99,29 @@ leave() {
         if ! identity "$live" "$marker"; then
             nohup /system/bin/sh "$launcher" </dev/null >/dev/null 2>&1 &
         fi
+        attempt=0
+        until live=$(cat "$pidfile" 2>/dev/null) && identity "$live" "$marker"; do
+            attempt=$((attempt+1)); [ "$attempt" -lt 80 ] || return 1
+            sleep .1
+        done
     done < "$txn/units"
-    while IFS= read -r name; do termux "sv -w 15 up '$PREFIX/var/service/$name'"; done < "$txn/services"
+    while IFS= read -r name; do set_service up "$name"; done < "$txn/services"
     for key in airplane_mode_on wifi_on bluetooth_on; do
         [ "$(setting "$key")" = "$(cat "$txn/$key")" ] || return 1
     done
     [ "$(dumpsys deviceidle get force)" = false ] || return 1
+    date +%s > "$txn/completed-at"
     printf '%s\n' 'radios_restored=true services_restored=true forced_doze=false' > "$STATE/restore-proof"
-    rm -rf "$txn"
+    # Retain one completed journal for diagnosis; a reboot must not erase it.
+    rm -rf "$STATE/last-transaction"
+    mv "$txn" "$STATE/last-transaction"
 }
 enter() {
     [ ! -e "$txn" ] || return 1
     rm -rf "$STATE/snapshot.new"
     echo snapshot > "$STATE/action-phase"
     mkdir "$STATE/snapshot.new"
+    date +%s > "$STATE/snapshot.new/started-at"
     for key in airplane_mode_on wifi_on bluetooth_on wifi_scan_always_enabled ble_scan_always_enabled low_power; do
         setting "$key" > "$STATE/snapshot.new/$key"
     done
@@ -101,14 +140,7 @@ enter() {
         identity "$pid" "$marker" || return 1
         printf '%s|%s|%s|%s\n' "$pid" "$pidfile" "$marker" "$launcher" >> "$STATE/snapshot.new/units"
     done < "$here/units"
-    : > "$STATE/snapshot.new/services"
-    for service in "$PREFIX"/var/service/*; do
-        [ -d "$service" ] || continue
-        name=${service##*/}
-        case "$name" in *[!a-zA-Z0-9_-]*) return 1;; esac
-        state=$(termux "sv status '$service'" || true)
-        case "$state" in run:*) printf '%s\n' "$name" >> "$STATE/snapshot.new/services";; esac
-    done
+    snapshot_services
     : > "$STATE/snapshot.new/frozen"
     while IFS= read -r exe; do
         for proc in /proc/[0-9]*; do
@@ -121,6 +153,7 @@ enter() {
     touch "$STATE/snapshot.new/complete"
     mv "$STATE/snapshot.new" "$txn"
     sync
+    rm -f "$STATE/entry-proof" "$STATE/restore-proof" "$STATE/telegram-resume"
     echo stop_workloads > "$STATE/action-phase"
     while IFS='|' read -r pid pidfile marker launcher; do identity "$pid" "$marker"; kill -TERM "$pid"; done < "$txn/units"
     # Homewire's root supervisor does not own the daemon's process group.
@@ -130,7 +163,7 @@ enter() {
     fi
     while IFS='|' read -r pid pidfile marker launcher; do wait_dead "$pid"; done < "$txn/units"
     while IFS='|' read -r pid exe born; do kill -STOP "$pid"; done < "$txn/frozen"
-    while IFS= read -r name; do termux "sv -w 15 down '$PREFIX/var/service/$name'"; done < "$txn/services"
+    while IFS= read -r name; do set_service down "$name"; done < "$txn/services"
     echo radios > "$STATE/action-phase"
     am startservice --user "$APP_USER" -a com.termux.service_wake_unlock com.termux/com.termux.app.TermuxService >/dev/null
     settings put global wifi_scan_always_enabled 0

@@ -85,6 +85,14 @@ Inspect `result.completed` and individual step errors; partial completion is not
 success and must never trigger an automatic retry. Writes still require
 `--allow-control` and the agent channel's `routine_run` grant.
 
+`{"routine":"wake_up"}` uses the [explicit startup list](configuration.md#explicit-startup-list)
+and accepts no optional flags. Its plan never queries devices. Startup uses
+absolute power controls, preserves other settings, excludes protected devices
+even through aliases/child outlets, and retains TV/PC outlet-first sequencing.
+Report partial failures from `result.completed` and step errors without retrying.
+Agent instructions map a current wake-up request to this routine when configured;
+a greeting alone does not authorize controls. No morning schedule is added.
+
 For a configured TCL TV routine, use `routine_run` with `tv_on` or `tv_off`.
 The routine owns TCL and its selected outlet: startup powers the outlet first;
 shutdown verifies TCL power-off before cutting the outlet. An uncertain TV result

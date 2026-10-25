@@ -45,6 +45,20 @@ public final class VisionService extends AccessibilityService {
             .put("navigation_method", "accessibility_focus_actions")
             .put("focus", service.focus()));
     }
+    static JSONObject readback() throws Exception {
+        VisionService service = connected;
+        if (service == null) return new JSONObject().put("enabled", false);
+        return service.onMain(() -> {
+            AccessibilityNodeInfo root = service.getRootInActiveWindow();
+            String foreground = "";
+            if (root != null) {
+                try { foreground = text(root.getPackageName()); }
+                finally { root.recycle(); }
+            }
+            return new JSONObject().put("enabled", true).put("navigation_method", "accessibility_focus_actions")
+                .put("focus", service.focus()).put("readback", Readback.snapshot(service, foreground));
+        });
+    }
     private JSONObject focus() throws Exception {
         AccessibilityNodeInfo node = findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
         if (node == null) return new JSONObject().put("available", false);

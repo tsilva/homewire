@@ -27,7 +27,7 @@ def validate(value):
         if section in ('adapters', 'services'):
             misplaced = set(entries) & set(SERVICES if section == 'adapters' else ADAPTERS)
         else:
-            misplaced = set(entries) - set(('meaco', 'tv', 'computer', 'leave_house', 'sleep') if section == 'routines' else ('meaco', 'lights'))
+            misplaced = set(entries) - set(('meaco', 'tv', 'computer', 'leave_house', 'sleep', 'wake_up') if section == 'routines' else ('meaco', 'lights'))
         if misplaced:
             raise ValueError('Misplaced family or unknown routine/automation')
     if 'deployment' in value and not isinstance(value['deployment'], dict):
@@ -48,7 +48,33 @@ def validate(value):
     for name in ('leave_house', 'sleep'):
         if name in value.get('routines', {}):
             validate_shutdown(name, value['routines'][name], value.get('routines', {}), adapters)
+    if 'wake_up' in value.get('routines', {}):
+        validate_startup(value['routines']['wake_up'], value['routines'])
     return value
+
+
+def validate_startup(settings, routines):
+    if set(settings) != {'steps', 'excluded_entities'} or any(
+            not isinstance(settings[key], list) or not 1 <= len(settings[key]) <= 16
+            for key in ('steps', 'excluded_entities')):
+        raise ValueError('wake_up requires 1–16 explicit steps and excluded entities')
+    if any(not isinstance(entity, str) or not 1 <= len(entity) <= 96
+           for entity in settings['excluded_entities']):
+        raise ValueError('Invalid startup exclusion')
+    for step in settings['steps']:
+        if not isinstance(step, dict):
+            raise ValueError('Invalid startup step')
+        if step.get('action') == 'power_on' and set(step) == {'action', 'entity'}:
+            if not isinstance(step['entity'], str) or not 1 <= len(step['entity']) <= 96:
+                raise ValueError('Invalid startup entity')
+        elif step.get('action') == 'routine' and set(step) == {'action', 'name'}:
+            name = step['name']
+            if name not in ('tv_on', 'computer_on') or name.removesuffix('_on') not in routines:
+                raise ValueError('Missing or unsupported startup child routine')
+            if name == 'tv_on' and routines['tv'].get('target') != 'tcl':
+                raise ValueError('Startup list requires configured TCL routine')
+        else:
+            raise ValueError('Only power_on and configured startup child routines are allowed')
 
 
 def validate_shutdown(name, settings, routines, adapters):
