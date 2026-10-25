@@ -401,13 +401,33 @@ Configure the assistant gateway with `connect_assistant.py` **before** isolation
 Use the same SDK/platform/signing environment as the companion build; retain the
 private persistent signing key for future APK updates.
 
+A fresh sandbox also requires the dashboard from the same pinned ZeroClaw
+release. Prepare the complete archive on the host, after obtaining its published
+version-specific SHA-256 through the release's trusted metadata:
+
+```sh
+python3 scripts/android/zeroclaw_package.py \
+  --archive .local/zeroclaw-release.tar.gz --sha256 "$ZEROCLAW_RELEASE_SHA256" \
+  --output .local/zeroclaw-package
+```
+
+This does not contact a device. It rejects hash mismatches, traversal, links,
+unexpected payloads and oversized archives, and records the executable/dashboard
+hashes. Install the prepared Android binary through the existing operator
+workflow; select its `web` directory explicitly below. The fresh installer
+validates all dashboard files before device access and transfers them under
+the jail's `/bin/web` as root-owned read-only files before activation. Omitting
+assets fails explicitly. Native and policy updates retain existing dashboard
+files; they do not fetch or replace frontend assets automatically.
+
 ```sh
 # HOMEWIRE_NDK points to NDK 30.0.16248370.
 sh scripts/android/sandbox/build.sh
 # Set JAVA_HOME, HOMEWIRE_ANDROID_PLATFORM, HOMEWIRE_ANDROID_BUILD_TOOLS,
 # HOMEWIRE_SIGNING_KEY and HOMEWIRE_SIGNING_PASSWORD_FILE as for the companion.
 sh scripts/android/sandbox/build-identity.sh
-python3 scripts/android/isolate.py --config .local/home.json --serial SERIAL install
+python3 scripts/android/isolate.py --config .local/home.json --serial SERIAL \
+  --web-assets .local/zeroclaw-package/web install
 python3 scripts/android/isolate.py --config .local/home.json --serial SERIAL verify
 # Apply operator tool/channel policy without replacing native binaries or firewall scripts:
 python3 scripts/android/isolate.py --config .local/home.json --serial SERIAL policy

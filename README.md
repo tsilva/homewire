@@ -161,5 +161,8 @@ before installation, and saves versioned artifacts and previous-APK backups. See
 The isolated Android agent serves its installed ZeroClaw dashboard from read-only
 assets. Its path compatibility layer keeps procfs hidden and rejects symlinks and
 path traversal; see [Android isolation](docs/android.md#zeroclaw-isolation).
+Fresh isolated installations prepare the pinned ZeroClaw release with
+`scripts/android/zeroclaw_package.py` and pass its dashboard through
+`isolate.py --web-assets`; existing native/policy updates preserve dashboard files.
 
 [MIT license](LICENSE)
