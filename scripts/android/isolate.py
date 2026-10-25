@@ -15,6 +15,7 @@ import phone
 import direct_boot
 import lockdown
 import deployment
+import zeroclaw_package
 
 ROOT = phone.CE_HOMEWIRE.rsplit('/',1)[0]+'/zeroclaw-sandbox'
 SUPERVISOR = '/data/adb/service.d/zeroclaw-sandbox.sh'
@@ -146,7 +147,18 @@ def preflight(p,profile):
     return api
 
 
-def install(serial, artifacts):
+def install(serial, artifacts, web_assets=None):
+    # Validate all host assets before any device access or service mutation.
+    web = zeroclaw_package.dashboard_files(web_assets or Path(artifacts) / 'web')
+    native = {}
+    for name in ('identity.apk', 'enter', 'probe', 'guard.so', 'log'):
+        path = Path(artifacts) / name
+        if path.is_symlink() or not path.is_file() or not 1 <= path.stat().st_size <= 16 * 1024 * 1024:
+            raise ValueError('Build all bounded native sandbox artifacts before installing')
+        native[name] = path.read_bytes()
+    settings = deployment.current().android
+    if not settings.get('root_command'):
+        settings['root_command'] = deployment.root_executable(serial)
     p = phone.Phone(serial)
     q = phone.q
     def root(command): return direct_boot.root_sh(serial, 'set -eu; ' + command)
@@ -186,10 +198,24 @@ def install(serial, artifacts):
          'chown '+str(uid)+':'+str(uid)+' '+q(ROOT)+'/policy/TOOLS.md')
     for name in ('enter', 'probe', 'guard.so', 'log'):
         target = ROOT + ('/enter' if name == 'enter' else '/log-writer' if name == 'log' else '/root/bin/' + name)
-        root_put(serial, target, (Path(artifacts) / name).read_bytes(), '755')
+        root_put(serial, target, native[name], '755')
+    install_dashboard(serial, web)
     root_put(serial, ROOT + '/namespace.sh', namespace_script().encode(), '700')
     root('chown -R 0:0 '+q(ROOT)+'/root; chmod -R a+rX '+q(ROOT)+'/root')
     activate(p,token)
+
+
+def install_dashboard(serial, files):
+    destination = ROOT + '/root/bin/web'
+    directories = {destination}
+    for name, _ in files:
+        parent = Path(name).parent
+        while str(parent) != '.':
+            directories.add(destination + '/' + parent.as_posix())
+            parent = parent.parent
+    direct_boot.root_sh(serial, 'set -eu; mkdir -p ' + ' '.join(phone.q(p) for p in sorted(directories)))
+    for name, data in files:
+        root_put(serial, destination + '/' + name, data, '644')
 
 
 def activate(p,token):
@@ -354,15 +380,21 @@ if __name__ == '__main__':
     ap.add_argument('--serial',required=True)
     deployment.add_argument(ap,required=True)
     ap.add_argument('--artifacts',default='target/android-sandbox')
+    ap.add_argument('--web-assets', type=Path, help='Verified ZeroClaw package web directory; fresh install only')
     ap.add_argument('command',choices=['install','update','policy','verify','restart'],nargs='?',default='install')
     a=ap.parse_args()
+    if a.web_assets is not None and a.command!='install':
+        ap.error('--web-assets is only supported for a fresh install; updates preserve dashboard files')
     profile=deployment.load(a.deployment)
-    profile.android.setdefault('root_command',deployment.root_executable(a.serial))
+    if a.command!='install' and not profile.android.get('root_command'):
+        profile.android['root_command']=deployment.root_executable(a.serial)
     ROOT=profile.paths()['sandbox']
     MARKER=phone.CE_HOMEWIRE.rsplit('/',1)[0]+'/zeroclaw-isolated'
     if a.command=='policy':
         update(a.serial,a.artifacts,policy_only=True)
-    elif a.command in ('install','update'):
-        globals()[a.command](a.serial,a.artifacts)
+    elif a.command=='install':
+        install(a.serial,a.artifacts,a.web_assets)
+    elif a.command=='update':
+        update(a.serial,a.artifacts)
     else:
         globals()[a.command](a.serial)
