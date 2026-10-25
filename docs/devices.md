@@ -722,6 +722,27 @@ bounded reply of up to 1 MiB. The Android policy helper raises its response budg
 only when `media_screenshot` is explicitly granted. No ADB or root is required
 for runtime screen capture or navigation.
 
+#### Playback readback
+
+An updated companion can report Android media sessions through the same
+`media_screen_status` tool. Set `"readback": true` in the paired companion object
+only after installing a companion with `GET /v1/readback` support; the default
+is false and keeps the original focus-only status endpoint. The same certificate,
+firmware, token, device ownership and response bounds still apply. This is a read;
+it never changes focus, speech settings, or playback.
+
+Enable **Homewire TV playback state** under Android notification access to permit
+Android media-session inspection. The listener does not read notifications.
+Up to four sessions report their source package, numeric Android playback state,
+position, speed, update age and optional title/ID/duration. State `3` means playing
+and `2` means paused; absent metadata stays null. A media-session report does not
+prove visible video frames or confirm a missing title. Revoke notification access
+to disable these reads. No microphone, audio capture, root, retained state, or
+log scraping is used. Apps can omit title metadata and expose no accessibility
+labels; in that case the selected title remains unknown even when playback state
+is available. Never substitute the title requested in a launch command for an
+observed title.
+
 ### Android TV held keys and voice
 
 `remote_hold {"entity":"media_player.tcl","key":"enter","hold_ms":800}`

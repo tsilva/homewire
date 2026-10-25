@@ -92,6 +92,8 @@ final class ApiServer implements Runnable {
                     .put("verified", true).put("status", after);
             } else if (request.method.equals("GET") && request.path.equals("/v1/prototype/status")) {
                 result = VisionService.status();
+            } else if (request.method.equals("GET") && request.path.equals("/v1/readback")) {
+                result = VisionService.readback();
             } else if (request.method.equals("GET") && request.path.equals("/v1/prototype/screenshot")) {
                 respond(socket, 200, "image/jpeg", VisionService.screenshot());
                 return;
@@ -106,7 +108,7 @@ final class ApiServer implements Runnable {
         catch (SecurityException e) { code = 403; result = new JSONObject().put("error", "identity_mismatch"); }
         catch (Exception e) { code = 503; result = new JSONObject().put("error", "display_unavailable_no_replay"); }
         byte[] bytes = result.toString().getBytes(StandardCharsets.UTF_8);
-        if (bytes.length > 4096) return;
+        if (bytes.length > 32768) return;
         respond(socket, code, "application/json", bytes);
     }
     private static void respond(SSLSocket socket, int code, String type, byte[] bytes) throws Exception {

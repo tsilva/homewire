@@ -41,6 +41,15 @@ public final class MainActivity extends Activity {
             });
             Button vision = new Button(this); vision.setText("Visual prototype: accessibility settings"); layout.addView(vision);
             vision.setOnClickListener(v -> startActivity(new Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)));
+            TextView readback = new TextView(this);
+            readback.setText("Optional playback access reads Android media sessions, not notification contents. "
+                + "Apps may omit their title metadata.");
+            layout.addView(readback);
+            Button playback = new Button(this); playback.setText("Playback state: notification access settings"); layout.addView(playback);
+            playback.setOnClickListener(v -> {
+                try { startActivity(new Intent(android.provider.Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)); }
+                catch (android.content.ActivityNotFoundException e) { status.setText("Notification access settings are unavailable on this TV."); }
+            });
             if (getSharedPreferences("lifecycle", 0).getBoolean("enabled", true)) startForegroundService(new Intent(this, TvService.class));
         } catch (Exception e) {
             status.setText("Pair this TV through the Homewire installation helper. No local API is enabled until pairing succeeds.");

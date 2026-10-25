@@ -231,6 +231,7 @@ macro_rules! static_adapters {
             pub tcl_routine: Option<crate::routine::tcl::Manager>,
             pub leave_house: Option<crate::routine::household::Manager>,
             pub sleep_routine: Option<crate::routine::household::Manager>,
+            pub wake_up: Option<crate::routine::startup::Manager>,
             /// Explicit override for direct controls owned by a routine.
             pub maintenance: bool,
         }
@@ -325,6 +326,7 @@ macro_rules! static_adapters {
                 if let Some(routine) = &self.tcl_routine { routine.validate(self)?; }
                 if let Some(routine) = &self.leave_house { routine.validate(self)?; }
                 if let Some(routine) = &self.sleep_routine { routine.validate(self)?; }
+                if let Some(routine) = &self.wake_up { routine.validate(self)?; }
                 crate::wol::validate_targets(self)?;
                 let mut ambiguous = false;
                 self.entities(&mut |entity| {

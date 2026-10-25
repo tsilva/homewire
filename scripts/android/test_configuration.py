@@ -12,6 +12,22 @@ from test_deployment import fixture
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_startup_requires_on_only_lists_and_explicit_exclusions(self):
+        import copy
+        value={'version':1,'adapters':{'plugs':{},'computer':{}},'routines':{
+            'computer':{},'wake_up':{'steps':[{'action':'routine','name':'computer_on'}],
+                                   'excluded_entities':['switch.protected_load']}}}
+        self.assertIs(configuration.validate(value),value)
+        for child in ('sleep','wake_up','computer_off','tv_on'):
+            invalid=copy.deepcopy(value)
+            invalid['routines']['wake_up']['steps']=[{'action':'routine','name':child}]
+            with self.subTest(child=child),self.assertRaises(ValueError):configuration.validate(invalid)
+        for exclusions in ([],['switch.a']*17,None):
+            invalid=copy.deepcopy(value);invalid['routines']['wake_up']['excluded_entities']=exclusions
+            with self.assertRaises(ValueError):configuration.validate(invalid)
+        invalid=copy.deepcopy(value);invalid['routines']['wake_up']['steps']=[{'action':'power_on','entity':'switch.a','power':False}]
+        with self.assertRaises(ValueError):configuration.validate(invalid)
+
     def test_explicit_shutdown_lists_keep_pc_optional_and_reject_unsafe_actions(self):
         import copy
         value = {'version': 1, 'adapters': {'plugs': {}, 'printers': {}, 'computer': {}},

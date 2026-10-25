@@ -39,6 +39,17 @@ class PermissionTests(unittest.TestCase):
         self.assertFalse(permissions & {'android.permission.INJECT_EVENTS',
                                        'android.permission.WRITE_SECURE_SETTINGS'})
 
+    def test_readback_access_is_separate_and_does_not_request_privileged_capture(self):
+        app = ET.parse(MANIFEST).getroot().find('application')
+        listener = next(s for s in app.findall('service')
+                        if s.attrib[ANDROID + 'name'] == '.PlaybackAccessService')
+        self.assertEqual(listener.attrib[ANDROID + 'permission'],
+                         'android.permission.BIND_NOTIFICATION_LISTENER_SERVICE')
+        source = MANIFEST.parent / 'src/eu/tsilva/homewire/tv'
+        self.assertNotIn('onNotificationPosted', (source / 'PlaybackAccessService.java').read_text())
+        permissions = {n.attrib[ANDROID + 'name'] for n in ET.parse(MANIFEST).getroot().findall('uses-permission')}
+        self.assertNotIn('android.permission.MEDIA_CONTENT_CONTROL', permissions)
+
 
 if __name__ == '__main__':
     unittest.main()
