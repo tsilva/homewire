@@ -65,7 +65,12 @@ for credentials. There is no automatic discovery.
 [Explicit household routines](docs/configuration.md#explicit-household-shutdown-lists)
 compose shutdown lists with device-before-outlet ordering and fresh idle printer
 checks. `leave_house` includes PC and kitchen only on explicit request;
-`sleep` uses its complete configured list. Preview either without device I/O.
+`sleep` uses its complete configured list, including explicit light/group-off steps.
+[Device groups](docs/configuration.md#device-groups) switch their configured lights
+concurrently with per-member verification.
+`group_plan` previews this without device I/O.
+`group_set` uses absolute power and preserves brightness and colour.
+Preview shutdown routines without device I/O.
 `wake_up` uses an [explicit startup list](docs/configuration.md#explicit-startup-list)
 with protected device exclusions and outlet-first TV/PC sequencing. Preview it
 without controls; its power-only steps preserve other settings.

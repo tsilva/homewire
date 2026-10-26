@@ -26,6 +26,8 @@ struct Document {
     services: Map<String, Value>,
     #[serde(default)]
     deployment: Option<Value>,
+    #[serde(default)]
+    groups: crate::group::Groups,
 }
 pub struct Bundle {
     path: PathBuf,
@@ -49,6 +51,7 @@ impl Bundle {
             "automations",
             "services",
             "deployment",
+            "groups",
         ]
         .iter()
         .any(|key| value.get(key).is_some());
@@ -139,7 +142,10 @@ impl Bundle {
         }))
     }
     pub fn open_devices(&self, connect: Option<SocketAddr>) -> Result<Devices> {
-        let mut devices = Devices::default();
+        let mut devices = Devices {
+            groups: self.document.groups.clone(),
+            ..Devices::default()
+        };
         for (family, value) in self
             .document
             .adapters

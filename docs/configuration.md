@@ -12,6 +12,7 @@ families. The file is bounded to 64 KiB and requires `version: 1`.
 | Section | Contents |
 | --- | --- |
 | `adapters` | `meaco`, `printers`, `awair`, `lights`, `plugs`, `samsung`, `digi`, `tcl`, `brother`, `cast`, `dlna`, `wol`, `computer`; see [device guides](devices.md) |
+| `groups` | Up to eight explicitly configured light groups for concurrent absolute power |
 | `routines.meaco` | Day/night presets, previously `meaco.json`'s `presets` |
 | `routines.tv` | TCL outlet sequencing below, or legacy `plug`, `shutdown_policy`, `timings` for Samsung/DIGI |
 | `routines.leave_house`, `routines.sleep` | Explicit shutdown lists, with optional PC/kitchen groups for leave_house |
@@ -32,6 +33,35 @@ beside `home.json`; runtime state and locks also live there (`meaco.state.json`,
 `lights.state.json`, `tv.state.json`, `FAMILY.json.lock`, plus `home.json.lock`).
 Use one config directory per installation and [daemon/bridge](automation.md#persistent-daemon-and-mcp-bridge)
 for additional clients. Temporary JSON and host-only `deployment` data are discarded.
+
+### Device groups
+
+Define reusable groups independently of their physical adapters. The first group
+capability is verified absolute light power; each group has 1–8 explicit light
+entity members, with at most eight named groups. For example:
+
+```json
+"groups": {
+  "sample_lights": {"members":["light.bulb_1","light.bulb_2","light.led_strip"]}
+}
+```
+
+`group_list` discovers group IDs and membership without device I/O.
+`group_plan` accepts `{"group":"group.sample_lights","power":false}` and
+previews the resolved members without queries or controls. `group_set` takes
+the same arguments and requires the ordinary control grant. Independent members
+run concurrently on bounded, request-scoped workers. Starting the requests close
+together is best effort; network/device delays prevent guaranteed simultaneity.
+Each member retains its adapter identity checks, fault guards, absolute controls
+and verification. Brightness, colour and effects are preserved by power-only
+changes. No new polling or persistent workers are introduced.
+
+All members resolve before controls begin. Unknown entities, nested groups,
+non-light members and duplicate physical devices fail validation. Groups cannot
+bypass routine-owned power. Every member is attempted once; success requires
+all members verified, and failures include their individual results. There is no
+rollback or automatic replay after partial/uncertain results. Configure room
+membership explicitly, including any intended strips; discovery never expands it.
 
 ### Explicit household shutdown lists
 
@@ -81,6 +111,14 @@ This policy permits cutting power to an idle printer; it does not issue a gracef
 printer shutdown or prevent new external jobs arriving after the check.
 An already-off outlet is verified without querying its unpowered printer.
 Duplicate physical targets and unknown entities fail configuration validation.
+
+`light` steps, such as `{"action":"light","entity":"light.bulb_1"}`, turn
+one explicitly configured light off. `group` steps, such as
+`{"action":"group","group":"group.sample_lights"}`, turn every configured
+member off concurrently. Both are off-only and reject extra power-on settings.
+They participate in the same duplicate-physical-target validation as other steps.
+A failed group retains its member results, marks the routine incomplete and
+leaves the durable attempt guard active. Independent later steps still run.
 
 Steps run sequentially. A failed step leaves its dependent cutoff unexecuted;
 independent steps continue. Results report `completed:false` and per-step errors.

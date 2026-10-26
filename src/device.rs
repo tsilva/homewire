@@ -39,6 +39,13 @@ pub trait Adapter: Sized {
     fn wake_device(&mut self, _index: usize) -> Result<Value> {
         Err(error("This device does not support Wake-on-LAN"))
     }
+    /// Shared-reference absolute power for independent group workers.
+    /// Return success only after adapter identity and requested power are verified.
+    fn power_device(&self, _index: usize, _power: bool) -> Result<Value> {
+        Err(error(
+            "This adapter does not support verified grouped power",
+        ))
+    }
     /// One fresh physical-device snapshot, shared across requested entities.
     fn read_device(&mut self, _index: usize) -> Result<Value> {
         Err(error("This adapter has no readable physical device"))
@@ -234,6 +241,7 @@ macro_rules! static_adapters {
             pub wake_up: Option<crate::routine::startup::Manager>,
             /// Explicit override for direct controls owned by a routine.
             pub maintenance: bool,
+            pub groups: crate::group::Groups,
         }
         #[derive(Clone, Copy, PartialEq, Eq, serde::Serialize)]
         #[serde(rename_all = "snake_case")]
@@ -322,6 +330,7 @@ macro_rules! static_adapters {
             }
             pub fn validate(&self) -> Result<()> {
                 self.validate_ownership()?;
+                self.groups.validate(self)?;
                 if let Some(routine) = &self.computer_routine { routine.validate(self)?; }
                 if let Some(routine) = &self.tcl_routine { routine.validate(self)?; }
                 if let Some(routine) = &self.leave_house { routine.validate(self)?; }
@@ -396,6 +405,16 @@ macro_rules! static_adapters {
             }
             pub(crate) fn screen(&mut self,device:crate::entity::Device,capture:bool)->Result<Value> {
                 match device.family {$(Family::$variant=>self.$field().ok_or_else(||error("Unconfigured device"))?.screen(device.index,capture),)+}
+            }
+            pub(crate) fn power_device(&self, device: crate::entity::Device, power: bool) -> Result<Value> {
+                if self.tv_owns_power(device) || self.computer_owns_power(device) {
+                    return Err(error("Grouped power cannot bypass routine ownership"));
+                }
+                match device.family {$(Family::$variant => {
+                    let adapter=self.$field.as_ref().ok_or_else(||error("Unconfigured group member"))?;
+                    adapter.authorize_control(crate::entity::Command::Power,&json!({"power":power}),self.maintenance)?;
+                    adapter.power_device(device.index,power)
+                },)+}
             }
             pub(crate) fn control_device(&mut self, device: crate::entity::Device, command: crate::entity::Command, args: &Value) -> Result<Value> {
                 if !self.maintenance && self.computer_owns_power(device)

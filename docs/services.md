@@ -163,7 +163,7 @@ example values, and protect config/key files with mode 600. The frontend handles
 and forwards device operations to the existing IPC owner.
 
 The optional `agent` object has a loopback `listen` address, distinct `token`,
-an explicit `tools` list (at most 32), and optional `image_output`. This defaults
+an explicit `tools` list (at most 64), and optional `image_output`. This defaults
 to `"native"` for standard MCP images. `"image_marker"` converts image blocks
 only on that scoped endpoint to text markers consumed by clients such as the
 pinned ZeroClaw vision loader. It does not change stdio/bridge responses or

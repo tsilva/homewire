@@ -14,7 +14,7 @@ from catalog import ADAPTERS, SERVICES
 def validate(value):
     if not isinstance(value, dict) or value.get('version') != 1 or type(value['version']) is not int:
         raise ValueError('Homewire configuration requires version 1')
-    if set(value) - {'version', 'adapters', 'routines', 'automations', 'services', 'deployment'}:
+    if set(value) - {'version', 'adapters', 'routines', 'automations', 'services', 'deployment', 'groups'}:
         raise ValueError('Unknown unified configuration section')
     for section in ('adapters', 'services', 'routines', 'automations'):
         entries = value.get(section, {})
@@ -32,6 +32,8 @@ def validate(value):
             raise ValueError('Misplaced family or unknown routine/automation')
     if 'deployment' in value and not isinstance(value['deployment'], dict):
         raise ValueError('Deployment must be an object')
+    groups = value.get('groups', {})
+    validate_groups(groups)
     adapters = value.get('adapters', {})
     for section, family, field in (('routines', 'meaco', 'presets'),
                                    ('automations', 'meaco', 'schedule'),
@@ -47,7 +49,7 @@ def validate(value):
         raise ValueError('Computer routine requires computer and plugs')
     for name in ('leave_house', 'sleep'):
         if name in value.get('routines', {}):
-            validate_shutdown(name, value['routines'][name], value.get('routines', {}), adapters)
+            validate_shutdown(name, value['routines'][name], value.get('routines', {}), adapters, groups)
     if 'wake_up' in value.get('routines', {}):
         validate_startup(value['routines']['wake_up'], value['routines'])
     return value
@@ -77,7 +79,19 @@ def validate_startup(settings, routines):
             raise ValueError('Only power_on and configured startup child routines are allowed')
 
 
-def validate_shutdown(name, settings, routines, adapters):
+def validate_groups(groups):
+    if not isinstance(groups, dict) or len(groups) > 8:
+        raise ValueError('Configure at most eight explicit device groups')
+    for name, group in groups.items():
+        if (not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,32}', name)
+                or not isinstance(group, dict) or set(group) != {'members'}
+                or not isinstance(group['members'], list) or not 1 <= len(group['members']) <= 8
+                or any(not isinstance(member, str) or not member.startswith('light.') or not 1 <= len(member) <= 96 for member in group['members'])
+                or len(set(group['members'])) != len(group['members'])):
+            raise ValueError('Device groups require 1–8 distinct explicit light entities')
+
+
+def validate_shutdown(name, settings, routines, adapters, groups=None):
     allowed = {'steps', 'optional_pc', 'optional_kitchen'}
     if set(settings) - allowed or not settings.get('steps') or any(
             not isinstance(settings.get(key, []), list) for key in allowed):
@@ -93,10 +107,15 @@ def validate_shutdown(name, settings, routines, adapters):
             if not isinstance(action, str):
                 raise ValueError('Invalid shutdown action')
             keys = {'routine': {'action', 'name'}, 'outlet': {'action', 'entity'},
-                    'printer': {'action', 'entity', 'outlet'}}.get(action)
+                    'printer': {'action', 'entity', 'outlet'}, 'light': {'action', 'entity'},
+                    'group': {'action', 'group'}}.get(action)
             if keys is None or set(step) != keys or any(
                     not isinstance(step[key], str) or not 1 <= len(step[key]) <= 96 for key in keys):
                 raise ValueError('Invalid shutdown step schema')
+            if action == 'light' and not step['entity'].startswith('light.'):
+                raise ValueError('Shutdown light step requires a light entity')
+            if action == 'group' and (not step['group'].startswith('group.') or step['group'][6:] not in (groups or {})):
+                raise ValueError('Shutdown step requires a configured device group')
             if action == 'routine':
                 child = step['name']
                 if child not in ('tv_off', 'computer_off') or child.removesuffix('_off') not in routines:
