@@ -14,6 +14,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+const MAX_AGENT_TOOLS: usize = 64;
 trait ApiTransport: Read + Write {
     fn response_deadline(&mut self);
 }
@@ -122,7 +123,7 @@ impl Settings {
                 || equal(&a.token, &cfg.dashboard_token)
                 || cfg.clients.iter().any(|c| equal(&a.token, &c.token))
                 || a.tools.is_empty()
-                || a.tools.len() > 64
+                || a.tools.len() > MAX_AGENT_TOOLS
                 || a.tools.iter().enumerate().any(|(i, n)| {
                     n.is_empty()
                         || n.len() > 64
@@ -561,7 +562,7 @@ fn agent_mcp(
 ) -> Result<Value> {
     let scope = params["tools"]
         .as_array()
-        .filter(|t| !t.is_empty() && t.len() <= 32)
+        .filter(|t| !t.is_empty() && t.len() <= MAX_AGENT_TOOLS)
         .ok_or_else(|| error("Missing tool scope"))?;
     Ok(mcp::handle_tools(
         params["data"].clone(),
@@ -647,6 +648,42 @@ pub fn dispatch(devices: &mut Devices, request: Value, allow_control: bool) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn expanded_agent_scope_accepts_groups_in_settings_discovery_and_calls() -> Result<()> {
+        for count in [33, MAX_AGENT_TOOLS, MAX_AGENT_TOOLS + 1] {
+            let mut names = vec![
+                "group_list".to_owned(),
+                "group_plan".into(),
+                "group_set".into(),
+            ];
+            names.extend((3..count).map(|i| format!("synthetic_tool_{i}")));
+            let config = json!({"listen":"127.0.0.1:0","dashboard_token":"a".repeat(64),
+                "agent":{"listen":"127.0.0.1:0","token":"b".repeat(64),"tools":names}});
+            let source = config::Source::section(Path::new("home.json"), "api", &config);
+            assert_eq!(
+                Settings::from_source(&source).is_ok(),
+                count <= MAX_AGENT_TOOLS
+            );
+            let mut params =
+                json!({"tools":names,"data":{"jsonrpc":"2.0","id":1,"method":"tools/list"}});
+            let list = agent_mcp(crate::device::Selection::ALL, &params, true, |_, _| {
+                panic!("discovery must not call devices")
+            });
+            if count > MAX_AGENT_TOOLS {
+                assert!(list.is_err());
+                continue;
+            }
+            assert_eq!(list?["result"]["tools"].as_array().expect("tools").len(), 3);
+            params["data"] = json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+                "params":{"name":"group_set","arguments":{"group":"group.synthetic","power":false}}});
+            let reply = agent_mcp(crate::device::Selection::ALL, &params, true, |name, _| {
+                assert_eq!(name, "group_set");
+                Ok(json!({"synthetic":true}))
+            })?;
+            assert_eq!(reply["result"]["structuredContent"]["synthetic"], true);
+        }
+        Ok(())
+    }
     #[test]
     fn agent_images_cross_http_as_native_or_explicit_marker_without_duplication() -> Result<()> {
         use std::os::unix::net::UnixListener;
