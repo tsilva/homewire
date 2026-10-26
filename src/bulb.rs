@@ -620,6 +620,18 @@ impl Adapter for Manager {
             json!({"presets":presets,"transitions":fade,"effect_control":"disable or restore the device's currently stored effect"}),
         )
     }
+    fn power_device(&self, index: usize, power: bool) -> Result<Value> {
+        let endpoint = self
+            .config
+            .bulbs
+            .get(index)
+            .ok_or_else(|| error("Unknown light"))?;
+        let change = Change {
+            power: Some(power),
+            ..Change::default()
+        };
+        Ok(serde_json::to_value(self.apply(&endpoint.name, &change)?)?)
+    }
     fn control_device(
         &mut self,
         index: usize,

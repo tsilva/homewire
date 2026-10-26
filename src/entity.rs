@@ -722,6 +722,7 @@ pub fn tools(selection: Selection) -> impl Iterator<Item = &'static Tool> + Clon
     ]
     .into_iter()
     .flatten()
+    .chain(crate::group::tools(selection))
     .chain(crate::routine::tools(selection))
     .chain(crate::wol::tools(selection))
     .chain(crate::brightness::tools(selection))
@@ -770,6 +771,7 @@ pub fn call(devices: &mut Devices, name: &str, args: &Value) -> Result<Value> {
         | "media_voice" | "media_activity" | "dehumidifier_set" | "media_navigate" => {
             control(devices, name, args)
         }
+        "group_list" | "group_plan" | "group_set" => crate::group::call(devices, name, args),
         name if name.starts_with("routine_") => crate::routine::call(devices, name, args),
         _ => devices.call(name, args),
     };
@@ -790,6 +792,7 @@ pub fn call(devices: &mut Devices, name: &str, args: &Value) -> Result<Value> {
                 | "media_activity"
                 | "media_navigate"
                 | "routine_run"
+                | "group_set"
                 | "dehumidifier_set"
                 | "wake_on_lan"
         )
@@ -798,6 +801,7 @@ pub fn call(devices: &mut Devices, name: &str, args: &Value) -> Result<Value> {
         let target = args["entity"]
             .as_str()
             .or(args["routine"].as_str())
+            .or(args["group"].as_str())
             .or(args["device"].as_str())
             .unwrap_or(name);
         let key = format!(

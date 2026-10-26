@@ -16,6 +16,8 @@ enum Step {
     Routine { name: String },
     Outlet { entity: String },
     Printer { entity: String, outlet: String },
+    Light { entity: String },
+    Group { group: String },
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -87,6 +89,14 @@ impl Manager {
                     routines.push(name.clone());
                 }
                 Step::Outlet { entity } => add_target(&mut targets, outlet(devices, entity)?)?,
+                Step::Light { entity } => {
+                    add_target(&mut targets, crate::group::light_target(devices, entity)?)?
+                }
+                Step::Group { group } => {
+                    for (_, device) in devices.groups.targets(devices, group)? {
+                        add_target(&mut targets, device)?;
+                    }
+                }
                 Step::Printer { entity, outlet: id } => {
                     let printer = crate::entity::resolve(devices, entity)?;
                     if printer.domain != Domain::Printer
@@ -147,6 +157,8 @@ fn validate_settings(settings: &Settings, name: &str) -> Result<()> {
         || all.clone().any(|step| match step {
             Step::Routine { name } => !matches!(name.as_str(), "tv_off" | "computer_off"),
             Step::Outlet { entity } => entity.is_empty() || entity.len() > 96,
+            Step::Light { entity } => entity.is_empty() || entity.len() > 96,
+            Step::Group { group } => group.is_empty() || group.len() > 96,
             Step::Printer { entity, outlet } => {
                 entity.is_empty() || entity.len() > 96 || outlet.is_empty() || outlet.len() > 96
             }
@@ -206,6 +218,12 @@ trait Control {
     fn outlet(&mut self, entity: &str) -> Result<bool>;
     fn cutoff(&mut self, entity: &str) -> Result<()>;
     fn printer(&mut self, entity: &str) -> Result<Value>;
+    fn light(&mut self, _entity: &str) -> Result<Value> {
+        Err(error("Light power unavailable"))
+    }
+    fn group(&mut self, _group: &str) -> Result<Value> {
+        Err(error("Grouped power unavailable"))
+    }
 }
 struct Equipment<'a>(&'a mut Devices);
 impl Equipment<'_> {
@@ -222,6 +240,14 @@ impl Equipment<'_> {
     }
 }
 impl Control for Equipment<'_> {
+    fn light(&mut self, entity: &str) -> Result<Value> {
+        let target = crate::group::light_target(self.0, entity)?;
+        let result = self.0.power_device(target, false)?;
+        Ok(json!({"verified":true,"power":false,"result":result}))
+    }
+    fn group(&mut self, group: &str) -> Result<Value> {
+        crate::group::apply(self.0, group, false)
+    }
     fn routine(&mut self, name: &str) -> Result<Value> {
         super::call(self.0, "routine_run", &json!({"routine":name}))
     }
@@ -249,6 +275,8 @@ impl Control for Equipment<'_> {
 }
 fn run_step(step: &Step, control: &mut impl Control) -> Result<Value> {
     match step {
+        Step::Light { entity } => control.light(entity),
+        Step::Group { group } => control.group(group),
         Step::Routine { name } => {
             let reply = control.routine(name)?;
             let confirmed = if name == "computer_off" {
@@ -289,7 +317,7 @@ fn run_step(step: &Step, control: &mut impl Control) -> Result<Value> {
 fn sequence<'a>(steps: impl Iterator<Item = &'a Step>, control: &mut impl Control) -> Value {
     let mut completed = true;
     let results=steps.map(|step| match run_step(step,control) {
-        Ok(result)=>json!({"step":step,"completed":true,"result":result}),
+        Ok(result)=>{let verified=result["completed"]!=false && result["verified"]!=false;completed &=verified;json!({"step":step,"completed":verified,"result":result})},
         Err(e)=>{completed=false;json!({"step":step,"completed":false,"error":e.to_string().chars().take(512).collect::<String>()})}
     }).collect::<Vec<_>>();
     json!({"completed":completed,"verified":completed,"steps":results})
@@ -317,6 +345,12 @@ mod tests {
         }
     }
     impl Control for Fake {
+        fn group(&mut self, group: &str) -> Result<Value> {
+            self.events.push(format!("group:{group}"));
+            Ok(
+                json!({"completed":false,"verified":false,"results":[{"verified":false,"error":"synthetic uncertain outcome"}]}),
+            )
+        }
         fn routine(&mut self, name: &str) -> Result<Value> {
             self.events.push(name.into());
             if self.tv_fails {
@@ -354,6 +388,32 @@ mod tests {
                 entity: "switch.heater".into(),
             },
         ]
+    }
+    #[test]
+    fn partial_group_retains_member_results_and_does_not_skip_independent_steps() {
+        let steps = [
+            Step::Group {
+                group: "group.sample_lights".into(),
+            },
+            Step::Outlet {
+                entity: "switch.sample".into(),
+            },
+        ];
+        let mut fake = Fake::default();
+        let result = sequence(steps.iter(), &mut fake);
+        assert_eq!(result["completed"], false);
+        assert_eq!(
+            result["steps"][0]["result"]["results"][0]["verified"],
+            false
+        );
+        assert_eq!(
+            fake.events,
+            vec![
+                "group:group.sample_lights",
+                "read:switch.sample",
+                "cut:switch.sample"
+            ]
+        );
     }
     #[test]
     fn fresh_printer_check_precedes_cutoff_and_independent_steps_continue() {

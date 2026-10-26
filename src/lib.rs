@@ -7,6 +7,7 @@ pub mod config;
 pub mod device;
 pub mod entity;
 pub mod fault;
+pub mod group;
 pub mod history;
 mod http;
 #[cfg(unix)]

@@ -255,5 +255,14 @@
       "lan_probe": "192.0.2.1:80",
       "admin_port": 8443
     }
+  },
+  "groups": {
+    "sample_lights": {
+      "members": [
+        "light.bulb_1",
+        "light.bulb_2",
+        "light.led_strip"
+      ]
+    }
   }
 }

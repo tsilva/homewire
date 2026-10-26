@@ -14,11 +14,11 @@ from pathlib import Path
 import phone
 import deployment
 
-READ = ('entity_list', 'entity_status', 'entity_options', 'routine_list',
+READ = ('entity_list', 'entity_status', 'entity_options', 'group_list', 'group_plan', 'routine_list',
         'routine_plan', 'alert_list', 'history_series', 'history_query',
         'weather_status', 'shopping_list', 'radio_search', 'tts_media', 'wake_list',
         'media_screen_status', 'media_screenshot')
-WRITE = ('dehumidifier_set', 'light_set', 'switch_set', 'media_power', 'remote_key', 'remote_hold', 'media_voice', 'media_activity', 'media_launch', 'media_text', 'routine_run',
+WRITE = ('dehumidifier_set', 'light_set', 'group_set', 'switch_set', 'media_power', 'remote_key', 'remote_hold', 'media_voice', 'media_activity', 'media_launch', 'media_text', 'routine_run',
          'media_play', 'media_command', 'shopping_update', 'wake_on_lan', 'media_navigate')
 BLOCKED = ('shell', 'file_read', 'file_write', 'file_list', 'file_edit',
            'glob_search', 'content_search', 'model_routing_config', 'delegate',
@@ -131,6 +131,14 @@ def instructions(tools=None, telegram_controls=()):
         'only when granted. Never infer that video is visible from a blank protected screen. '
         'Do not save or forward screenshots unless the user requested it. Respect channel grants.\n'
         if 'media_screenshot' in reads else '')
+    group_policy = ('\n## Light groups\n\n'
+        'For a request covering a configured room light group, use homewire__group_set once with the requested absolute power. '
+        'Use homewire__group_list to discover explicit membership, including light strips. '
+        'Do not send a sequence of separate light_set calls for members of the same group. '
+        'Independent member commands are concurrent, with best-effort timing rather than guaranteed simultaneity. '
+        'Read completed and every member result; report partial completion accurately and never replay uncertain members. '
+        'Use group_plan for previews. Individual light requests still use light_set when granted.\n'
+        if 'group_set' in writes else '')
     return ('# Active tool policy\n\n'
         'The operator has isolated this ZeroClaw deployment. Use the actual supplied tool schemas. '
         'Old conversation memories and identity notes about shell, files or other tool bundles are obsolete.\n\n'
@@ -141,7 +149,7 @@ def instructions(tools=None, telegram_controls=()):
         'Shell, filesystem, arbitrary HTTP, browser, delegation, cron, camera, microphone, Google and photo tools are unavailable. '
         'Homewire device/security settings cannot be configured by this agent.\n\n'
         'Use the granted discovery tools and actual entity names. Never substitute shell commands or invent readings.\n\n'
-        + media_policy + wake_policy + dehumidifier_policy)
+        + media_policy + wake_policy + dehumidifier_policy + group_policy)
 
 
 def patches(config, token, profile=None):

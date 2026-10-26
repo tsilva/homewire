@@ -9,6 +9,14 @@ import deployment
 
 
 class LockdownTests(unittest.TestCase):
+    def test_group_controls_are_explicit_and_partial_results_are_not_replayed(self):
+        text=lockdown.instructions(['group_list','group_plan','group_set'],['group_set'])
+        self.assertIn('homewire__group_set once',text)
+        self.assertIn('best-effort timing',text)
+        self.assertIn('never replay uncertain members',text)
+        self.assertIn('homewire__group_set',lockdown.telegram_exclusions([],[]))
+        self.assertNotIn('homewire__group_set',lockdown.telegram_exclusions([],['group_set']))
+
     def setUp(self):
         self.profile = deployment.Profile({'android': {'package': 'com.termux', 'user': 0}, 'agent': {'name': 'phone', 'gateway_port': 42617, 'mcp_port': 42620, 'transcription_port': None, 'provider_host': 'provider.example'}, 'network': {'dns_servers': ['192.0.2.1'], 'lan_probe': '192.0.2.1:80', 'admin_port': 8443}})
     def test_static_binary_cannot_silently_bypass_the_preload_guard(self):

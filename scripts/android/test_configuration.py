@@ -12,6 +12,18 @@ from test_deployment import fixture
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_light_groups_and_shutdown_reference_are_explicit_and_bounded(self):
+        import copy
+        value={'version':1,'adapters':{'lights':{}},'groups':{'sample_lights':{'members':['light.sample_bulb','light.sample_strip']}},
+               'routines':{'sleep':{'steps':[{'action':'group','group':'group.sample_lights'}]}}}
+        self.assertIs(configuration.validate(value),value)
+        for members in ([],['light.same','light.same'],['group.nested'],['switch.owned'],['light.a']*9):
+            invalid=copy.deepcopy(value);invalid['groups']['sample_lights']['members']=members
+            with self.assertRaises(ValueError):configuration.validate(invalid)
+        for step in ({'action':'group','group':'group.unknown'}, {'action':'group','group':'group.sample_lights','power':True}):
+            invalid=copy.deepcopy(value);invalid['routines']['sleep']['steps']=[step]
+            with self.assertRaises(ValueError):configuration.validate(invalid)
+
     def test_startup_requires_on_only_lists_and_explicit_exclusions(self):
         import copy
         value={'version':1,'adapters':{'plugs':{},'computer':{}},'routines':{

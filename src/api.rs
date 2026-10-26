@@ -122,7 +122,7 @@ impl Settings {
                 || equal(&a.token, &cfg.dashboard_token)
                 || cfg.clients.iter().any(|c| equal(&a.token, &c.token))
                 || a.tools.is_empty()
-                || a.tools.len() > 32
+                || a.tools.len() > 64
                 || a.tools.iter().enumerate().any(|(i, n)| {
                     n.is_empty()
                         || n.len() > 64
