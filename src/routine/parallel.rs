@@ -214,9 +214,7 @@ impl Drop for Equipment<'_> {
 }
 
 #[cfg(test)]
-#[path = "../../tests/support/mod.rs"]
-#[allow(dead_code)]
-mod test_support;
+use crate::test_support;
 
 #[cfg(test)]
 mod tests {
