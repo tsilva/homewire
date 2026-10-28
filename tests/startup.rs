@@ -48,6 +48,7 @@ fn startup_plan_is_offline_excludes_the_protected_load_and_rejects_options() -> 
     );
     assert_eq!(reply["result"]["live_state_checked"], false);
     assert_eq!(reply["result"]["preserve_other_settings"], true);
+    assert_eq!(reply["result"]["execution"], "concurrent_best_effort");
     for key in ["include_pc", "include_kitchen", "all"] {
         for tool in ["routine_plan", "routine_run"] {
             assert!(

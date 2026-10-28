@@ -10,6 +10,7 @@ pub mod brightness;
 pub mod computer;
 pub mod household;
 pub mod meaco;
+mod parallel;
 pub mod startup;
 pub mod tcl;
 pub mod tv;

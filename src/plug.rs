@@ -474,6 +474,15 @@ impl Adapter for Manager {
         Ok(serde_json::to_value(self.status(name)?)?)
     }
 
+    fn power_device(&self, index: usize, power: bool) -> Result<Value> {
+        let endpoint = self
+            .config
+            .plugs
+            .get(index)
+            .ok_or_else(|| error("Unknown plug"))?;
+        Ok(serde_json::to_value(self.apply(&endpoint.name, power)?)?)
+    }
+
     fn control_device(
         &mut self,
         index: usize,

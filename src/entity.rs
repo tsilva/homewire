@@ -804,28 +804,37 @@ pub fn call(devices: &mut Devices, name: &str, args: &Value) -> Result<Value> {
             .or(args["group"].as_str())
             .or(args["device"].as_str())
             .unwrap_or(name);
-        let key = format!(
-            "control.{}",
-            target
-                .chars()
-                .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-                .take(80)
-                .collect::<String>()
-        );
-        let message = result
-            .as_ref()
-            .err()
-            .map(|e| e.to_string().chars().take(512).collect::<String>())
-            .unwrap_or_default();
-        if let Err(e) = alerts.record(
-            &key,
-            result.is_err(),
-            "Homewire control",
-            &message,
-            chrono::Utc::now().timestamp(),
-        ) {
-            eprintln!("Control alert ledger update failed: {e}");
-        }
+        record_control_result(alerts, target, &result);
     }
     result
+}
+
+/// Keep the same bounded alert ledger for transport and concurrent routine controls.
+pub(crate) fn record_control_result(
+    alerts: &mut crate::alerts::Manager,
+    target: &str,
+    result: &Result<Value>,
+) {
+    let key = format!(
+        "control.{}",
+        target
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+            .take(80)
+            .collect::<String>()
+    );
+    let message = result
+        .as_ref()
+        .err()
+        .map(|e| e.to_string().chars().take(512).collect::<String>())
+        .unwrap_or_default();
+    if let Err(e) = alerts.record(
+        &key,
+        result.is_err(),
+        "Homewire control",
+        &message,
+        chrono::Utc::now().timestamp(),
+    ) {
+        eprintln!("Control alert ledger update failed: {e}");
+    }
 }

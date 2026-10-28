@@ -106,6 +106,22 @@ impl Manager {
     }
     pub(crate) fn run(&mut self, devices: &mut Devices, power: bool) -> Result<Value> {
         self.validate(devices)?;
+        self.run_with(
+            devices
+                .plugs
+                .as_ref()
+                .ok_or_else(|| error("Missing plugs"))?,
+            devices.tcl.as_mut().ok_or_else(|| error("Missing TCL"))?,
+            power,
+        )
+    }
+    /// The containing routine validates ownership before borrowing independent lanes.
+    pub(super) fn run_with(
+        &mut self,
+        plugs: &crate::plug::Manager,
+        tv: &mut crate::androidtv::TclManager,
+        power: bool,
+    ) -> Result<Value> {
         let now = chrono::Utc::now().timestamp();
         if self
             .memory
@@ -120,7 +136,8 @@ impl Manager {
         save_private(&self.path, &self.memory)?;
         sequence(
             &mut Equipment {
-                devices,
+                plugs,
+                tv,
                 plug: &self.settings.plug,
             },
             power,
@@ -140,37 +157,23 @@ trait Control {
     fn wait(&mut self, seconds: u64);
 }
 struct Equipment<'a> {
-    devices: &'a mut Devices,
+    plugs: &'a crate::plug::Manager,
+    tv: &'a mut crate::androidtv::TclManager,
     plug: &'a str,
 }
 impl Control for Equipment<'_> {
     fn outlet(&mut self) -> Result<bool> {
-        Ok(self
-            .devices
-            .plugs()
-            .ok_or_else(|| error("Missing TV outlet"))?
-            .relay_status(self.plug)?
-            .power)
+        Ok(self.plugs.relay_status(self.plug)?.power)
     }
     fn set_outlet(&mut self, power: bool) -> Result<()> {
-        self.devices
-            .plugs()
-            .ok_or_else(|| error("Missing TV outlet"))?
-            .apply(self.plug, power)?;
+        self.plugs.apply(self.plug, power)?;
         Ok(())
     }
     fn ready(&mut self, seconds: u64) -> Result<()> {
         let until = Instant::now() + Duration::from_secs(seconds);
         loop {
             // A failed pinned read sends no power command. No controls are replayed.
-            if self
-                .devices
-                .tcl
-                .as_ref()
-                .ok_or_else(|| error("Missing TCL"))?
-                .status()
-                .is_ok()
-            {
+            if self.tv.status().is_ok() {
                 return Ok(());
             }
             if Instant::now() >= until {
@@ -180,14 +183,7 @@ impl Control for Equipment<'_> {
         }
     }
     fn tv(&mut self, power: bool) -> Result<()> {
-        require_verified(
-            &self
-                .devices
-                .tcl
-                .as_mut()
-                .ok_or_else(|| error("Missing TCL"))?
-                .apply(power)?,
-        )
+        require_verified(&self.tv.apply(power)?)
     }
     fn wait(&mut self, seconds: u64) {
         std::thread::sleep(Duration::from_secs(seconds));
