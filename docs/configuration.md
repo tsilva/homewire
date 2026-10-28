@@ -118,10 +118,16 @@ one explicitly configured light off. `group` steps, such as
 member off concurrently. Both are off-only and reject extra power-on settings.
 They participate in the same duplicate-physical-target validation as other steps.
 A failed group retains its member results, marks the routine incomplete and
-leaves the durable attempt guard active. Independent later steps still run.
+leaves the durable attempt guard active. Independent steps still run.
 
-Steps run sequentially. A failed step leaves its dependent cutoff unexecuted;
-independent steps continue. Results report `completed:false` and per-step errors.
+Steps run concurrently with up to 16 scoped workers; group members also overlap.
+Configuration order controls result order, not command timing. Each child retains
+its internal safety ordering: outlets first on startup, verified shutdown before
+cutoff, and fresh printer checks before removing printer power. A failed step
+leaves its dependent cutoff unexecuted; independent steps continue. Results
+include `execution:"concurrent_best_effort"`, `completed:false` and per-step errors
+on partial completion. Worker creation failures and unwinding panics mark the
+affected step incomplete without retrying it.
 There is no rollback or automatic replay. An attempt is saved before controls;
 partial/uncertain attempts block replay for 180 seconds, including after restart.
 Plans describe configured steps without any device I/O. These routines do not
@@ -163,8 +169,11 @@ no control; the routine does not forcibly switch them off.
 
 Use `routine_plan` or `routine_run` with `{"routine":"wake_up"}`. No optional
 flags are accepted. The plan is provisional and performs no device I/O. Runs
-attempt each configured step once, continue independent steps on failure, and
-return per-step results plus `completed:false` for partial completion. An
+attempt independent steps concurrently, each once, and continue siblings on
+failure. TV/PC startup and readiness waits overlap with other device chains;
+dependent controls inside each chain remain ordered. Results stay in configured
+step order and include `execution:"concurrent_best_effort"` plus
+`completed:false` for partial completion. An
 attempt is saved before controls; partial/uncertain attempts block replay for
 180 seconds, including after restart. Never automatically retry them. No
 schedule is enabled, and the phone's separate offline schedule is unaffected.

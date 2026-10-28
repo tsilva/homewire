@@ -35,6 +35,7 @@ fn plans_are_offline_explicit_and_optional_groups_require_booleans() -> Result<(
             count
         );
         assert_eq!(plan["result"]["live_state_checked"], false);
+        assert_eq!(plan["result"]["execution"], "concurrent_best_effort");
     }
     let plan = routine::call(
         &mut devices,

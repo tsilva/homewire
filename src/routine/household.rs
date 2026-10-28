@@ -86,6 +86,19 @@ impl Manager {
                             "Shutdown list requires unique configured verified TV/PC routines",
                         ));
                     }
+                    if name == "tv_off" {
+                        devices
+                            .tcl_routine
+                            .as_ref()
+                            .ok_or_else(|| error("Missing TV routine"))?
+                            .validate(devices)?;
+                    } else {
+                        devices
+                            .computer_routine
+                            .as_ref()
+                            .ok_or_else(|| error("Missing computer routine"))?
+                            .validate(devices)?;
+                    }
                     routines.push(name.clone());
                 }
                 Step::Outlet { entity } => add_target(&mut targets, outlet(devices, entity)?)?,
@@ -124,17 +137,22 @@ impl Manager {
     }
     pub(crate) fn preview(&self, pc: bool, kitchen: bool) -> Result<Value> {
         self.check_options(pc, kitchen)?;
-        Ok(json!({"live_state_checked":false,"provisional":true,
+        Ok(
+            json!({"live_state_checked":false,"provisional":true,"execution":"concurrent_best_effort",
             "steps":self.steps(pc,kitchen).collect::<Vec<_>>(),
             "optional_groups_selected":{"pc":pc,"kitchen":kitchen},
             "printer_policy":"fresh_idle_and_zero_jobs_before_cutoff; no graceful shutdown command",
-            "failure_policy":"leave dependent outlet on; continue independent steps; never replay automatically"}))
+            "failure_policy":"leave dependent outlet on; continue independent steps; never replay automatically"}),
+        )
     }
     pub(crate) fn run(&mut self, devices: &mut Devices, pc: bool, kitchen: bool) -> Result<Value> {
         self.check_options(pc, kitchen)?;
         self.validate(devices)?;
         begin(&mut self.memory, &self.path, chrono::Utc::now().timestamp())?;
-        let result = sequence(self.steps(pc, kitchen), &mut Equipment(devices));
+        let equipment = super::parallel::Equipment::new(devices);
+        let result = sequence(self.steps(pc, kitchen), |step| {
+            run_step(step, &mut Equipment(&equipment))
+        });
         // Retain the durable guard on partial completion, including a lost response.
         if result["completed"] == true {
             self.memory.attempt = None;
@@ -225,12 +243,13 @@ trait Control {
         Err(error("Grouped power unavailable"))
     }
 }
-struct Equipment<'a>(&'a mut Devices);
-impl Equipment<'_> {
+struct Equipment<'a, 'b>(&'a super::parallel::Equipment<'b>);
+impl Equipment<'_, '_> {
     fn plug_name(&self, id: &str) -> Result<String> {
-        let device = outlet(self.0, id)?;
+        let device = outlet(self.0.devices(), id)?;
         Ok(self
             .0
+            .devices()
             .plugs_ref()
             .ok_or_else(|| error("Missing plugs"))?
             .config
@@ -239,22 +258,23 @@ impl Equipment<'_> {
             .clone())
     }
 }
-impl Control for Equipment<'_> {
+impl Control for Equipment<'_, '_> {
     fn light(&mut self, entity: &str) -> Result<Value> {
-        let target = crate::group::light_target(self.0, entity)?;
-        let result = self.0.power_device(target, false)?;
+        let target = crate::group::light_target(self.0.devices(), entity)?;
+        let result = self.0.devices().power_device(target, false)?;
         Ok(json!({"verified":true,"power":false,"result":result}))
     }
     fn group(&mut self, group: &str) -> Result<Value> {
-        crate::group::apply(self.0, group, false)
+        crate::group::apply(self.0.devices(), group, false)
     }
     fn routine(&mut self, name: &str) -> Result<Value> {
-        super::call(self.0, "routine_run", &json!({"routine":name}))
+        self.0.routine(name)
     }
     fn outlet(&mut self, entity: &str) -> Result<bool> {
         let name = self.plug_name(entity)?;
         Ok(self
             .0
+            .devices()
             .plugs_ref()
             .ok_or_else(|| error("Missing plugs"))?
             .relay_status(&name)?
@@ -263,14 +283,25 @@ impl Control for Equipment<'_> {
     fn cutoff(&mut self, entity: &str) -> Result<()> {
         let name = self.plug_name(entity)?;
         self.0
+            .devices()
             .plugs_ref()
             .ok_or_else(|| error("Missing plugs"))?
             .apply(&name, false)?;
         Ok(())
     }
     fn printer(&mut self, entity: &str) -> Result<Value> {
-        let device = crate::entity::resolve(self.0, entity)?.device;
-        self.0.read_device(device)
+        let devices = self.0.devices();
+        let device = crate::entity::resolve(devices, entity)?.device;
+        let printers = devices
+            .printers
+            .as_ref()
+            .ok_or_else(|| error("Missing printers"))?;
+        let endpoint = printers
+            .config
+            .printers
+            .get(device.index)
+            .ok_or_else(|| error("Unknown printer"))?;
+        Ok(serde_json::to_value(printers.status(&endpoint.name)?)?)
     }
 }
 fn run_step(step: &Step, control: &mut impl Control) -> Result<Value> {
@@ -314,13 +345,13 @@ fn run_step(step: &Step, control: &mut impl Control) -> Result<Value> {
         }
     }
 }
-fn sequence<'a>(steps: impl Iterator<Item = &'a Step>, control: &mut impl Control) -> Value {
-    let mut completed = true;
-    let results=steps.map(|step| match run_step(step,control) {
-        Ok(result)=>{let verified=result["completed"]!=false && result["verified"]!=false;completed &=verified;json!({"step":step,"completed":verified,"result":result})},
-        Err(e)=>{completed=false;json!({"step":step,"completed":false,"error":e.to_string().chars().take(512).collect::<String>()})}
-    }).collect::<Vec<_>>();
-    json!({"completed":completed,"verified":completed,"steps":results})
+fn sequence<'a>(
+    steps: impl Iterator<Item = &'a Step>,
+    control: impl Fn(&Step) -> Result<Value> + Sync,
+) -> Value {
+    let steps = steps.collect::<Vec<_>>();
+    let results = super::parallel::run(&steps, &|step| control(step));
+    super::parallel::report(steps.into_iter(), results)
 }
 
 #[cfg(test)]
@@ -375,6 +406,12 @@ mod tests {
             Ok(self.status.clone())
         }
     }
+    fn fake_sequence<'a>(steps: impl Iterator<Item = &'a Step>, fake: &mut Fake) -> Value {
+        let control = std::sync::Mutex::new(fake);
+        sequence(steps, |step| {
+            run_step(step, &mut **control.lock().expect("control"))
+        })
+    }
     fn steps() -> Vec<Step> {
         vec![
             Step::Routine {
@@ -400,18 +437,30 @@ mod tests {
             },
         ];
         let mut fake = Fake::default();
-        let result = sequence(steps.iter(), &mut fake);
+        let result = fake_sequence(steps.iter(), &mut fake);
         assert_eq!(result["completed"], false);
         assert_eq!(
             result["steps"][0]["result"]["results"][0]["verified"],
             false
         );
+        let read = fake
+            .events
+            .iter()
+            .position(|e| e == "read:switch.sample")
+            .expect("read");
+        let cut = fake
+            .events
+            .iter()
+            .position(|e| e == "cut:switch.sample")
+            .expect("cutoff");
+        assert!(read < cut);
+        fake.events.sort();
         assert_eq!(
             fake.events,
             vec![
+                "cut:switch.sample",
                 "group:group.sample_lights",
-                "read:switch.sample",
-                "cut:switch.sample"
+                "read:switch.sample"
             ]
         );
     }
@@ -421,20 +470,40 @@ mod tests {
             tv_fails: true,
             ..Fake::default()
         };
-        let result = sequence(steps().iter(), &mut fake);
+        let result = fake_sequence(steps().iter(), &mut fake);
         assert_eq!(result["completed"], false);
         assert_eq!(result["steps"][1]["completed"], true);
-        assert_eq!(
-            fake.events,
-            vec![
-                "tv_off",
-                "read:switch.printer",
-                "ipp:printer.office",
-                "cut:switch.printer",
-                "read:switch.heater",
-                "cut:switch.heater"
-            ]
-        );
+        let position = |event| fake.events.iter().position(|e| e == event).expect("event");
+        assert!(position("read:switch.printer") < position("ipp:printer.office"));
+        assert!(position("ipp:printer.office") < position("cut:switch.printer"));
+        assert!(position("read:switch.heater") < position("cut:switch.heater"));
+        assert!(fake.events.contains(&"tv_off".into()));
+        assert_eq!(fake.events.len(), 6);
+    }
+    #[test]
+    fn independent_shutdown_steps_overlap_and_replies_keep_configuration_order() {
+        let steps = steps();
+        let (release, receive) = std::sync::mpsc::sync_channel(1);
+        let receive = std::sync::Mutex::new(receive);
+        let result = sequence(steps.iter(), |step| match step {
+            Step::Routine { .. } => {
+                receive
+                    .lock()
+                    .expect("receiver")
+                    .recv_timeout(std::time::Duration::from_secs(5))?;
+                Err(error("Synthetic unconfirmed shutdown"))
+            }
+            Step::Outlet { .. } => {
+                release.send(())?;
+                Ok(json!({"verified":true}))
+            }
+            _ => Ok(json!({"verified":true})),
+        });
+        assert_eq!(result["completed"], false);
+        assert_eq!(result["steps"][0]["completed"], false);
+        assert_eq!(result["steps"][1]["completed"], true);
+        assert_eq!(result["steps"][2]["completed"], true);
+        assert_eq!(result["steps"][0]["step"]["name"], "tv_off");
     }
     #[test]
     fn busy_stopped_unknown_missing_or_nonzero_jobs_never_cut_printer_power() {
@@ -450,7 +519,7 @@ mod tests {
                 status,
                 ..Fake::default()
             };
-            let result = sequence(steps().iter(), &mut fake);
+            let result = fake_sequence(steps().iter(), &mut fake);
             assert_eq!(result["completed"], false);
             assert!(!fake.events.contains(&"cut:switch.printer".into()));
             assert!(fake.events.contains(&"cut:switch.heater".into()));
@@ -462,7 +531,7 @@ mod tests {
             powered: false,
             ..Fake::default()
         };
-        assert_eq!(sequence(steps().iter(), &mut fake)["completed"], true);
+        assert_eq!(fake_sequence(steps().iter(), &mut fake)["completed"], true);
         assert!(
             !fake
                 .events
@@ -473,7 +542,7 @@ mod tests {
             cutoff_fails: true,
             ..Fake::default()
         };
-        assert_eq!(sequence(steps().iter(), &mut fake)["completed"], false);
+        assert_eq!(fake_sequence(steps().iter(), &mut fake)["completed"], false);
         assert_eq!(
             fake.events
                 .iter()

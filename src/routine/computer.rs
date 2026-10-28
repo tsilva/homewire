@@ -147,7 +147,23 @@ impl Manager {
     }
     pub(crate) fn run(&mut self, devices: &mut Devices, power: bool) -> Result<Value> {
         self.validate(devices)?;
-        let identity = shutdown_identity(devices, &self.settings.plug)?;
+        self.run_with(
+            devices.plugs_ref().ok_or_else(|| error("Missing plugs"))?,
+            devices
+                .computer
+                .as_ref()
+                .ok_or_else(|| error("Missing computer"))?,
+            power,
+        )
+    }
+    /// The containing routine validates ownership before borrowing independent lanes.
+    pub(super) fn run_with(
+        &mut self,
+        plugs: &crate::plug::Manager,
+        computer: &crate::computer::Manager,
+        power: bool,
+    ) -> Result<Value> {
+        let identity = shutdown_identity(computer, plugs, &self.settings.plug)?;
         if self.memory.shutdown_accepted.is_some()
             && self.memory.shutdown_identity.as_deref() != Some(&identity)
         {
@@ -182,7 +198,8 @@ impl Manager {
             save_private(&self.path, &self.memory)?;
         }
         let mut control = Equipment {
-            devices,
+            plugs,
+            computer,
             plug: &self.settings.plug,
             started: Instant::now(),
         };
@@ -223,15 +240,17 @@ impl Manager {
         Ok(result)
     }
 }
-fn shutdown_identity(devices: &Devices, plug: &str) -> Result<String> {
+fn shutdown_identity(
+    computer: &crate::computer::Manager,
+    plugs: &crate::plug::Manager,
+    plug: &str,
+) -> Result<String> {
     use sha2::{Digest, Sha256};
-    let computer = devices
-        .computer
-        .as_ref()
-        .ok_or_else(|| error("Missing computer"))?;
-    let outlet = devices
-        .plugs_ref()
-        .and_then(|p| p.config.plugs.iter().find(|p| p.name == plug))
+    let outlet = plugs
+        .config
+        .plugs
+        .iter()
+        .find(|p| p.name == plug)
         .ok_or_else(|| error("Missing outlet"))?;
     let mut hash = Sha256::new();
     hash.update(computer.shutdown_identity());
@@ -273,16 +292,14 @@ trait Control {
     fn elapsed(&self) -> Duration;
 }
 struct Equipment<'a> {
-    devices: &'a mut Devices,
+    plugs: &'a crate::plug::Manager,
+    computer: &'a crate::computer::Manager,
     plug: &'a str,
     started: Instant,
 }
 impl Control for Equipment<'_> {
     fn outlet(&mut self, metering: bool) -> Result<Reading> {
-        let plugs = self
-            .devices
-            .plugs()
-            .ok_or_else(|| error("Missing outlet"))?;
+        let plugs = self.plugs;
         let status = if metering {
             plugs.status(self.plug)?
         } else {
@@ -295,40 +312,24 @@ impl Control for Equipment<'_> {
         })
     }
     fn set_outlet(&mut self, power: bool) -> Result<()> {
-        self.devices
-            .plugs()
-            .ok_or_else(|| error("Missing outlet"))?
-            .apply(self.plug, power)?;
+        self.plugs.apply(self.plug, power)?;
         Ok(())
     }
     fn running(&mut self) -> bool {
-        self.devices
-            .computer
-            .as_ref()
-            .and_then(|c| c.status().ok())
+        self.computer
+            .status()
+            .ok()
             .is_some_and(|v| v["state"] == "running")
     }
     fn unreachable(&mut self) -> Result<bool> {
-        self.devices
-            .computer
-            .as_ref()
-            .ok_or_else(|| error("Missing computer"))?
-            .unreachable()
+        self.computer.unreachable()
     }
     fn wake(&mut self) -> Result<()> {
-        self.devices
-            .computer
-            .as_ref()
-            .ok_or_else(|| error("Missing computer"))?
-            .wake()?;
+        self.computer.wake()?;
         Ok(())
     }
     fn shutdown(&mut self) -> Result<()> {
-        self.devices
-            .computer
-            .as_ref()
-            .ok_or_else(|| error("Missing computer"))?
-            .shutdown()?;
+        self.computer.shutdown()?;
         Ok(())
     }
     fn ready(&mut self, seconds: u64) -> Result<()> {

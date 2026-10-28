@@ -156,13 +156,18 @@ target/release/homewire --printers .local/printers.json serve --legacy-tools --w
 Repeated check calls in one server confirm/deduplicate events. Automatic watch
 jobs begin after MCP initialization and first poll within their configured
 interval. `--watch-lights` covers bulbs/L900; `--watch-bulbs` remains an alias.
-Queries are sequential: allow client timeouts for multiple devices and Meaco's
-20-second settling delay per step. Cancellation does not abort an in-flight sequence.
+Tool calls are handled sequentially, but independent steps inside `wake_up`,
+`sleep` and `leave_house` run concurrently, as do explicit light-group members.
+Each device chain keeps its required control/verification order. Allow client
+timeouts for the slowest chain, including Meaco's configured settling delay per
+changed setting (20 seconds by default). Cancellation does not abort an in-flight
+sequence.
 
 The server implements initialization, ping, tool listing and tool calls for
 MCP 2024-11-05, 2025-03-26, 2025-06-18, and 2025-11-25. Messages are newline-delimited JSON-RPC,
-limited to 64 KiB. Device operations run sequentially; stdout contains only
-protocol messages. For authenticated HTTP MCP, use the
+limited to 64 KiB. Requests run sequentially; a household routine overlaps its
+independent device operations and returns results in configured order. Stdout
+contains only protocol messages. For authenticated HTTP MCP, use the
 [agent endpoint](android.md#trusted-homewire-mcp-endpoint). Model inference is
 separate.
 

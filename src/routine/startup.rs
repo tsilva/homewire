@@ -90,6 +90,19 @@ impl Manager {
                             "wake_up child routine is not configured or unsupported",
                         ));
                     }
+                    if name == "tv_on" {
+                        devices
+                            .tcl_routine
+                            .as_ref()
+                            .ok_or_else(|| error("Missing TV routine"))?
+                            .validate(devices)?;
+                    } else {
+                        devices
+                            .computer_routine
+                            .as_ref()
+                            .ok_or_else(|| error("Missing computer routine"))?
+                            .validate(devices)?;
+                    }
                     let mut owned = Vec::new();
                     devices.entities(&mut |entity| {
                         let owns = if name == "tv_on" {
@@ -114,7 +127,7 @@ impl Manager {
     }
     pub(crate) fn preview(&self) -> Value {
         json!({"steps":self.settings.steps,"excluded_entities":self.settings.excluded_entities,
-            "live_state_checked":false,"provisional":true,
+            "live_state_checked":false,"provisional":true,"execution":"concurrent_best_effort",
             "power_only":true,"preserve_other_settings":true,
             "ordering":"child TV/PC routines power their outlets before starting devices",
             "outlet_verification":"confirms relay power, not attached appliance readiness",
@@ -122,8 +135,22 @@ impl Manager {
     }
     pub(crate) fn run(&mut self, devices: &mut Devices) -> Result<Value> {
         self.validate(devices)?;
+        let targets = self
+            .settings
+            .steps
+            .iter()
+            .map(|step| match step {
+                Step::PowerOn { entity } => {
+                    power_target(devices, entity).map(|(device, _)| Some(device))
+                }
+                Step::Routine { .. } => Ok(None),
+            })
+            .collect::<Result<Vec<_>>>()?;
         begin(&mut self.memory, &self.path, chrono::Utc::now().timestamp())?;
-        let result = sequence(&self.settings.steps, &mut Equipment(devices));
+        let equipment = super::parallel::Equipment::new(devices);
+        let result = sequence(&self.settings.steps, |index, step| {
+            step_run(step, &mut Equipment(&equipment, targets[index]))
+        });
         if result["completed"] == true {
             clear(&mut self.memory, &self.path)?;
         }
@@ -199,19 +226,17 @@ trait Control {
     fn routine(&mut self, name: &str) -> Result<Value>;
     fn power_on(&mut self, id: &str) -> Result<Value>;
 }
-struct Equipment<'a>(&'a mut Devices);
-impl Control for Equipment<'_> {
+struct Equipment<'a, 'b>(&'a super::parallel::Equipment<'b>, Option<Device>);
+impl Control for Equipment<'_, '_> {
     fn routine(&mut self, name: &str) -> Result<Value> {
-        super::call(self.0, "routine_run", &json!({"routine":name}))
+        self.0.routine(name)
     }
     fn power_on(&mut self, id: &str) -> Result<Value> {
-        let (_, tool) = power_target(self.0, id)?;
-        let args = if tool == "switch_set" {
-            json!({"entity":id,"power":true})
-        } else {
-            json!({"entity":id,"settings":{"power":true}})
-        };
-        crate::entity::call(self.0, tool, &args)
+        self.0.power_on(
+            self.1
+                .ok_or_else(|| error("Missing resolved power target"))?,
+            id,
+        )
     }
 }
 fn step_run(step: &Step, control: &mut impl Control) -> Result<Value> {
@@ -232,13 +257,10 @@ fn step_run(step: &Step, control: &mut impl Control) -> Result<Value> {
     }
     Ok(reply)
 }
-fn sequence(steps: &[Step], control: &mut impl Control) -> Value {
-    let mut completed = true;
-    let results = steps.iter().map(|step|match step_run(step, control) {
-        Ok(result) => json!({"step":step,"completed":true,"result":result}),
-        Err(e) => { completed=false; json!({"step":step,"completed":false,"error":e.to_string().chars().take(512).collect::<String>()}) }
-    }).collect::<Vec<_>>();
-    json!({"completed":completed,"verified":completed,"steps":results})
+fn sequence(steps: &[Step], control: impl Fn(usize, &Step) -> Result<Value> + Sync) -> Value {
+    let indices = (0..steps.len()).collect::<Vec<_>>();
+    let results = super::parallel::run(&indices, &|index| control(*index, &steps[*index]));
+    super::parallel::report(steps.iter(), results)
 }
 
 #[cfg(test)]
@@ -282,10 +304,42 @@ mod tests {
                 entity: "switch.sample".into(),
             },
         ];
-        let reply = sequence(&steps, &mut fake);
+        let control = std::sync::Mutex::new(&mut fake);
+        let reply = sequence(&steps, |_, step| {
+            step_run(step, &mut **control.lock().expect("control"))
+        });
+        drop(control);
         assert_eq!(reply["completed"], false);
         assert_eq!(reply["steps"][1]["completed"], true);
-        assert_eq!(fake.calls, vec!["tv_on", "switch.sample"]);
+        fake.calls.sort();
+        assert_eq!(fake.calls, vec!["switch.sample", "tv_on"]);
+    }
+    #[test]
+    fn independent_startup_steps_overlap_and_replies_keep_configuration_order() {
+        let steps = vec![
+            Step::Routine {
+                name: "tv_on".into(),
+            },
+            Step::PowerOn {
+                entity: "light.sample".into(),
+            },
+        ];
+        let (release, receive) = std::sync::mpsc::sync_channel(1);
+        let receive = std::sync::Mutex::new(receive);
+        let reply = sequence(&steps, |index, _| {
+            if index == 0 {
+                receive
+                    .lock()
+                    .expect("receiver")
+                    .recv_timeout(std::time::Duration::from_secs(5))?;
+            } else {
+                release.send(())?;
+            }
+            Ok(json!({"verified":true}))
+        });
+        assert_eq!(reply["completed"], true);
+        assert_eq!(reply["steps"][0]["step"]["name"], "tv_on");
+        assert_eq!(reply["steps"][1]["step"]["entity"], "light.sample");
     }
     #[test]
     fn request_acceptance_without_power_confirmation_is_incomplete() {

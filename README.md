@@ -66,6 +66,11 @@ for credentials. There is no automatic discovery.
 compose shutdown lists with device-before-outlet ordering and fresh idle printer
 checks. `leave_house` includes PC and kitchen only on explicit request;
 `sleep` uses its complete configured list, including explicit light/group-off steps.
+Wake, sleep and leave-house lists run independent device chains concurrently,
+including TV/PC readiness and shutdown verification alongside other devices.
+Each chain preserves device-before-outlet shutdown and outlet-first startup.
+Results stay in configuration order; timing is best effort and partial failures
+never trigger automatic replay.
 [Device groups](docs/configuration.md#device-groups) switch their configured lights
 concurrently with per-member verification.
 `group_plan` previews this without device I/O.
