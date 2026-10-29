@@ -112,3 +112,12 @@ It uses `companion/tv/release.py`, the protected `.local/tv-release.json` bindin
 and the [release guide](companion/tv/README.md#one-command-releases).
 An explicit build-and-deploy request authorizes the normal update checks;
 reboot verification remains opt-in for the current run.
+
+## Betty assistant releases
+
+For native Betty phone APK builds, verification and updates, use
+[$homewire_betty-release](.agents/skills/homewire_betty-release/SKILL.md).
+It uses the existing Betty build script and a parameterized verification/update
+helper with protected local bindings. Preserve Telegram state and assistant
+settings; never run synthetic instrumentation on a personal installation.
+Creating or editing the skill does not authorize a build, phone update or message.

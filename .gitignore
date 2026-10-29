@@ -11,3 +11,6 @@
 /companion/tv/build/
 __pycache__/
 *.py[cod]
+
+# Betty build dependency pins are source, not runtime lock state.
+!/companion/betty/dependencies.lock.json

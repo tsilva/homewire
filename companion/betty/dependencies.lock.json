@@ -1,0 +1,120 @@
+{
+  "repository": "TGX-Android/tdlib",
+  "commit": "1094df0caf4e5b59f6b247f8d9eb8896022cb379",
+  "files": [
+    {
+      "path": "src/main/java/org/drinkless/tdlib/Client.java",
+      "sha256": "904e814160c64103665b3044eb1558f853b6a19a760128f42fd9c0d4b1285e58",
+      "size": 10866
+    },
+    {
+      "path": "src/main/java/org/drinkless/tdlib/TdApi.java",
+      "sha256": "b42737ecc92b909394dad3ae0bdd549ebc175eda0f13b758c04aa31f766c5884",
+      "size": 5337970
+    },
+    {
+      "path": "LICENCE",
+      "sha256": "c9bff75738922193e67fa726fa225535870d2aa1059f91452c411736284ad566",
+      "size": 1338
+    },
+    {
+      "path": "src/main/libs/30.0.16248370/android-24/arm64-v8a/libtdjni.so",
+      "sha256": "0600b7c30d2aee7be71818596b57200a03d088f5a554e9f299f53ce1bc19d678",
+      "size": 14379360
+    },
+    {
+      "path": "openssl/30.0.16248370/android-24/arm64-v8a/lib/libcryptox.so",
+      "sha256": "9fdc85415c999a2c7383817a204d822f0e509515016b8fee14c45d5a1c40e4d6",
+      "size": 3556736
+    },
+    {
+      "path": "openssl/30.0.16248370/android-24/arm64-v8a/lib/libsslx.so",
+      "sha256": "48194dfff5be214af8a50be0f13c020c9fdafc82f01ccf324e86056d841a5cb5",
+      "size": 690512
+    },
+    {
+      "path": "src/main/libs/30.0.16248370/android-24/x86_64/libtdjni.so",
+      "sha256": "5a020d8411d26352c73802f6f63763d7c405fac468b7c9aee8e1500cfc79c2ab",
+      "size": 17973088
+    },
+    {
+      "path": "openssl/30.0.16248370/android-24/x86_64/lib/libcryptox.so",
+      "sha256": "6f52a70151a187dc8185c298caccbcd6c3f376d1a3c2c75c79510cb87728435c",
+      "size": 4261616
+    },
+    {
+      "path": "openssl/30.0.16248370/android-24/x86_64/lib/libsslx.so",
+      "sha256": "4cac7d6efbfa233aa10a88220fe42f28a6fffabbdd28c7cbd89b367ae64cb77a",
+      "size": 669032
+    }
+  ],
+  "annotation": {
+    "url": "https://dl.google.com/dl/android/maven2/androidx/annotation/annotation-jvm/1.9.1/annotation-jvm-1.9.1.jar",
+    "sha256": "1e343917ebf27ba96fe4dc52b1cad7fd32b738fbc6355bb6cd5b3b305d7212d0",
+    "size": 60577
+  },
+  "icons": {
+    "repository": "google/material-design-icons",
+    "commit": "49d4db35df873165d6bd6ba09b063c7dafbac2f4",
+    "license": "Apache-2.0",
+    "files": [
+      {
+        "path": "android/navigation/more_vert/materialicons/black/res/drawable/baseline_more_vert_24.xml",
+        "sha256": "94be369f6fd110d81635630bc67d82d35f42ec581a25435fa33b340a114e3c82"
+      },
+      {
+        "path": "android/navigation/close/materialicons/black/res/drawable/baseline_close_24.xml",
+        "sha256": "3e40fea86110c38e6930418b8ad464b85fce1c76d6abf3baf35fc1881f0dfc14"
+      },
+      {
+        "path": "android/hardware/keyboard/materialicons/black/res/drawable/baseline_keyboard_24.xml",
+        "sha256": "e164c66df7d3ea8b04dcf4d09ca853ad8180f26177fc945c33720e2f9e6f96b5"
+      },
+      {
+        "path": "android/av/stop/materialicons/black/res/drawable/baseline_stop_24.xml",
+        "sha256": "bd2c65760275542e75cf54d098c60c40696c704c22bc7b48015f3fbbe5bc093a"
+      },
+      {
+        "path": "android/action/delete_outline/materialicons/black/res/drawable/baseline_delete_outline_24.xml",
+        "sha256": "e9721213478f5763a36b63425351fc5c15799ff43e15e1a64288087a0efd5c3d"
+      },
+      {
+        "path": "android/av/play_arrow/materialicons/black/res/drawable/baseline_play_arrow_24.xml",
+        "sha256": "67fb13daad9b2639f8990133f5dc98c002359e507b25c22e3608fe35bb0540c4"
+      },
+      {
+        "path": "android/av/mic/materialicons/black/res/drawable/baseline_mic_24.xml",
+        "sha256": "260ea0ff2afd7df64fa48226e76670850d7c6823f42eb5c78893d1eb080e8631"
+      },
+      {
+        "path": "android/communication/chat_bubble_outline/materialicons/black/res/drawable/baseline_chat_bubble_outline_24.xml",
+        "sha256": "cb1f9b6e4dcf5fb09b316dc1784c5a81eb473019bcd8df0dded2cebc2e7f3744"
+      }
+    ]
+  },
+  "ndk": {
+    "url": "https://dl.google.com/android/repository/android-ndk-r30-darwin.zip",
+    "sha1": "c060be96767eefbb8e0a27796d6f43115fc1a0c4",
+    "version": "30.0.16248370",
+    "files": [
+      {
+        "member": "android-ndk-r30/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so",
+        "path": "ndk/arm64-v8a/libc++_shared.so",
+        "size": 9485032,
+        "sha256": "7466ed097631a564ed6bff0b47768caa76bf03270d2047b5a65c03f497b824df"
+      },
+      {
+        "member": "android-ndk-r30/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/x86_64-linux-android/libc++_shared.so",
+        "path": "ndk/x86_64/libc++_shared.so",
+        "size": 9091400,
+        "sha256": "7918ebd0b8074c312d0c610205d49760b98c008026e6b817cd92103a3e12241b"
+      },
+      {
+        "member": "android-ndk-r30/toolchains/llvm/prebuilt/darwin-x86_64/NOTICE",
+        "path": "NDK-NOTICE.txt",
+        "size": 130424,
+        "sha256": "f96f763beb66a7ba7a667647fc64c0226ace875e590c831fdd9579ec1c1d91e1"
+      }
+    ]
+  }
+}

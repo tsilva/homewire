@@ -1,0 +1,7 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="eu.tsilva.homewire.betty.tests" android:versionCode="1" android:versionName="1">
+    <uses-sdk android:minSdkVersion="31" android:targetSdkVersion="35" />
+    <application android:label="Betty offline checks" android:allowBackup="false" />
+    <instrumentation android:name="eu.tsilva.homewire.betty.tests.Checks"
+        android:targetPackage="eu.tsilva.homewire.betty" />
+</manifest>

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Homewire Betty Release"
+  short_description: "Build and verify state-preserving Betty APK updates"
+  default_prompt: "Use $homewire_betty-release to build Betty and perform an authorized, verified phone update."

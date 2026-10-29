@@ -139,6 +139,16 @@ the timer on further changes and surviving restarts. Use
 `brightness_schedule_status` or `brightness_schedule_resume` with its entity ID
 to inspect the pause or resume the current target now.
 
+## Android assistant input
+
+The [native assistant input](companion/betty/README.md) takes Android's digital
+assistant shortcut, records on-device dictation, and shows an editable transcript.
+Tap Send to deliver text into the existing private Telegram bot conversation;
+after Telegram confirms delivery, the app opens that conversation in Telegram.
+The capture screen contains no chat history or replies. Recording stops when the
+app leaves the foreground, and opening the app never sends a message.
+See the guide for sign-in, Pixel power-button setup, privacy boundaries and builds.
+
 ## TCL companion releases
 
 The companion also has an opt-in [visual navigation prototype](companion/tv/README.md#visual-navigation-prototype)
