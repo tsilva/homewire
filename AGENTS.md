@@ -112,3 +112,4 @@ It uses `companion/tv/release.py`, the protected `.local/tv-release.json` bindin
 and the [release guide](companion/tv/README.md#one-command-releases).
 An explicit build-and-deploy request authorizes the normal update checks;
 reboot verification remains opt-in for the current run.
+
