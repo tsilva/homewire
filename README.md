@@ -77,7 +77,9 @@ concurrently with per-member verification.
 `group_set` uses absolute power and preserves brightness and colour.
 Preview shutdown routines without device I/O.
 `wake_up` uses an [explicit startup list](docs/configuration.md#explicit-startup-list)
-with protected device exclusions and outlet-first TV/PC sequencing. Preview it
+with protected device exclusions and outlet-first TV/PC sequencing. Keep printers
+and their supply outlets out of its steps and explicitly excluded, so waking up
+does not turn either on. Preview it
 without controls; its power-only steps preserve other settings.
 
 | Setup guide | Capabilities |

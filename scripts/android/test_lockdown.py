@@ -186,6 +186,11 @@ class LockdownTests(unittest.TestCase):
         self.assertIn('verify its pinned identity and power state', instructions)
         self.assertIn('report the wake as unverified and the request as incomplete', instructions)
 
+    def test_wake_policy_excludes_printers_and_their_supplies(self):
+        instructions = lockdown.instructions()
+        self.assertIn('Wake-up requests never turn on printers or their supply outlets', instructions)
+        self.assertIn('do not add separate printer power-on commands', instructions)
+
     def test_focus_and_power_outcomes_do_not_depend_on_ungranted_tools(self):
         instructions = lockdown.instructions(('entity_status', 'media_power'), ('media_power',))
         for phrase in ('does not change the active device',

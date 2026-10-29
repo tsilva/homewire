@@ -147,3 +147,57 @@ fn explicit_lists_are_bounded_and_exclusions_are_required() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn wake_up_keeps_excluded_printers_and_their_supplies_out_of_startup() -> Result<()> {
+    let t = support::Directory::new()?;
+    t.certs()?;
+    let mut config = fixture();
+    config["adapters"]["printers"] = json!({"printers":[
+        {"name":"sample_a","host":"192.0.2.10"},
+        {"name":"sample_b","host":"192.0.2.11"}
+    ]});
+    let protected = [
+        "printer.sample_a",
+        "printer.sample_b",
+        "switch.sample_load",
+        "switch.excluded_load",
+    ];
+    config["routines"]["wake_up"]["excluded_entities"] = json!(protected);
+    config["routines"]["wake_up"]["steps"]
+        .as_array_mut()
+        .expect("steps")
+        .retain(|step| step["entity"] != "switch.sample_load");
+    let path = t.config("home.json", &config)?;
+    {
+        let mut devices = Bundle::load(&path)?.expect("bundle").open_devices(None)?;
+        let plan = routine::call(&mut devices, "routine_plan", &json!({"routine":"wake_up"}))?;
+        assert_eq!(plan["result"]["live_state_checked"], false);
+        assert_eq!(plan["result"]["excluded_entities"], json!(protected));
+        assert_eq!(
+            plan["result"]["steps"],
+            config["routines"]["wake_up"]["steps"]
+        );
+        assert!(
+            plan["result"]["steps"]
+                .as_array()
+                .expect("steps")
+                .iter()
+                .all(|step| !protected.iter().any(|id| step["entity"] == *id))
+        );
+    }
+    for target in protected {
+        let mut invalid = config.clone();
+        invalid["routines"]["wake_up"]["steps"]
+            .as_array_mut()
+            .expect("steps")
+            .push(json!({"action":"power_on","entity":target}));
+        let bad = t.config("invalid.json", &invalid)?;
+        let result = Bundle::load(&bad)?.expect("bundle").open_devices(None);
+        assert!(
+            result.is_err(),
+            "Printer or excluded supply must fail before device I/O"
+        );
+    }
+    Ok(())
+}

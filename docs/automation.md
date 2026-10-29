@@ -89,6 +89,9 @@ success and must never trigger an automatic retry. Writes still require
 and accepts no optional flags. Its plan never queries devices. Startup uses
 absolute power controls, preserves other settings, excludes protected devices
 even through aliases/child outlets, and retains TV/PC outlet-first sequencing.
+Printers and their supply switches stay outside the wake steps and belong in the
+explicit exclusions. Do not add separate printer or printer-outlet power-on
+commands to a wake-up request.
 Report partial failures from `result.completed` and step errors without retrying.
 Agent instructions map a current wake-up request to this routine when configured;
 a greeting alone does not authorize controls. No morning schedule is added.
