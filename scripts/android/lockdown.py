@@ -61,6 +61,7 @@ def instructions(tools=None, telegram_controls=()):
         'For a current request such as "I woke up", "I am awake", or "good morning, turn everything on", '
         'use the configured wake_up routine once. It has an explicit power-on list and protected exclusions. '
         'Never add an excluded device, infer extra startup actions, or bypass the configured list. '
+        'Wake-up requests never turn on printers or their supply outlets; do not add separate printer power-on commands. '
         'wake_up accepts no include_pc/include_kitchen flags and is separate from the phone offline schedule. '
         'A greeting alone is not an instruction to run a routine. Preview requests use routine_plan only. '
         'Use configured leave_house and sleep routines for the matching user request. '

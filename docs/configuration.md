@@ -158,8 +158,13 @@ routines. They retain outlet-first ordering, identity checks and readiness
 verification. `power_on` supports ordinary switches, lights and dehumidifiers
 with a supported absolute power setting. It preserves brightness, colours,
 humidity targets, modes and timers. Existing overload, overheating and device
-fault guards still apply. Printer or speaker supply outlets use `power_on` on
-the switch; verified relay power does not prove attached-appliance readiness.
+fault guards still apply. Keep printers and their supply outlets out of wake-up
+steps. Add both each printer entity and its supply switch to `excluded_entities`,
+for example `printer.sample_printer` and `switch.printer_supply`. The physical
+device exclusion guard rejects attempts to power an excluded outlet, including
+through a child routine; exclusions do not query or switch off those devices.
+Other explicitly included supply outlets verify relay power, not attached-appliance
+readiness.
 
 Exclusions protect the resolved physical device, including entity aliases and
 outlets reached by child routines. An excluded target, duplicate device,
