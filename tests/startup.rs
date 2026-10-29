@@ -157,9 +157,11 @@ fn wake_up_keeps_excluded_printers_and_their_supplies_out_of_startup() -> Result
         {"name":"sample_a","host":"192.0.2.10"},
         {"name":"sample_b","host":"192.0.2.11"}
     ]});
+    config["adapters"]["brother"] = json!({"name":"sample_a_counters","host":"192.0.2.10"});
     let protected = [
         "printer.sample_a",
         "printer.sample_b",
+        "printer.sample_a_counters",
         "switch.sample_load",
         "switch.excluded_load",
     ];
