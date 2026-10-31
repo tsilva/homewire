@@ -202,6 +202,29 @@ Homewire, agent or Internet dependencies for the charging cutoff. Local state is
 bounded under root-only `/data/adb/homewire-battery`; critical lockouts survive
 worker restarts and reboots. Readback verifies the switch and later polls check
 that a held battery no longer reports `Charging` and its input has stayed suspended.
+
+Magisk safe mode skips its boot-script dispatch, so an intact `service.d` file
+alone does not prove that the guard started. For an existing validated guard,
+install a separate Termux:Boot fallback using the same private hardware profile:
+
+```sh
+python3 scripts/android/battery_guard.py --profile .local/battery-profile.json repair-startup
+```
+
+This verifies the installed release and its matching boot wrapper, preserves the
+native binary, fault records and alert configuration, backs up the previous boot
+wrapper, and installs only `~/.termux/boot/homewire-battery`. It requires an
+existing Termux:Boot installation and an application-owned boot directory. The
+fallback uses the existing administrative root grant and native supervisor lock;
+it starts no unrelated services and adds no wake lock. It follows the current
+root-owned boot wrapper across guard upgrades and rollback. Startup requests are
+logged privately with one rotated 64 KiB log. A fresh worker is checked after
+repair; reboot recovery must still be verified separately.
+
+Termux:Boot runs only after the first unlock. When Magisk skips its hooks, this
+fallback cannot protect charging before that unlock. Do not infer continuous
+early-boot protection or qualify a connected-charger reboot from this repair.
+
 On startup the guard first asserts and verifies the cutoff again, because a reboot
 can reset the kernel switch while its durable ownership marker remains present.
 Some Android charger managers immediately undo `battery_charging_enabled` writes;
