@@ -191,9 +191,31 @@ impl Control for Equipment<'_> {
 }
 fn require_verified(result: &Value) -> Result<()> {
     if result["verified"] != true {
-        return Err(error(
-            "TCL power was not verified; outlet left on; do not replay the control",
-        ));
+        // Preserve the adapter's failure without copying its status snapshot or
+        // configuration. Keep the whole message within household/alert limits.
+        let label = |field: &str| {
+            result[field]
+                .as_str()
+                .unwrap_or("unknown")
+                .chars()
+                .take(32)
+                .collect::<String>()
+        };
+        let sent = |field: &str| match result[field].as_bool() {
+            Some(true) => "true",
+            Some(false) => "false",
+            None => "unknown",
+        };
+        let message = format!(
+            "TCL power was not verified; outlet left on; do not replay the control; phase={}; outcome={}; command_sent={}; wake_packet_sent={}; cast_command_sent={}; error={}",
+            label("phase"),
+            label("outcome"),
+            sent("command_sent"),
+            sent("wake_packet_sent"),
+            sent("cast_command_sent"),
+            result["error"].as_str().unwrap_or("not provided"),
+        );
+        return Err(error(message.chars().take(512).collect::<String>()));
     }
     Ok(())
 }
@@ -219,6 +241,7 @@ mod tests {
         outlet: bool,
         calls: Vec<String>,
         fail: Option<&'static str>,
+        power_result: Option<Value>,
     }
     impl Fake {
         fn step(&mut self, name: &str) -> Result<()> {
@@ -241,7 +264,11 @@ mod tests {
             self.step("ready")
         }
         fn tv(&mut self, power: bool) -> Result<()> {
-            self.step(if power { "tv_on" } else { "tv_off" })
+            self.step(if power { "tv_on" } else { "tv_off" })?;
+            self.power_result
+                .as_ref()
+                .map(require_verified)
+                .unwrap_or(Ok(()))
         }
         fn wait(&mut self, _: u64) {
             self.calls.push("wait".into());
@@ -263,6 +290,7 @@ mod tests {
                 outlet,
                 calls: vec![],
                 fail: None,
+                power_result: None,
             };
             sequence(&mut fake, power, 5, 120).expect("successful sequence");
             assert_eq!(fake.calls, expected);
@@ -275,6 +303,7 @@ mod tests {
                     outlet,
                     calls: vec![],
                     fail: Some(step),
+                    power_result: None,
                 };
                 assert!(sequence(&mut fake, power, 5, 120).is_err());
                 assert_eq!(fake.calls, expected[..=index]);
@@ -291,5 +320,63 @@ mod tests {
             assert!(require_verified(&result).is_err());
         }
         assert!(require_verified(&json!({"verified":true})).is_ok());
+    }
+
+    #[test]
+    fn power_failure_details_survive_household_reporting_without_cutoff_or_replay() {
+        for (phase, outcome, sent, cause) in [
+            ("connect", "not_sent", json!(false), "connection timed out"),
+            (
+                "prepare",
+                "not_sent",
+                json!(false),
+                "Android TV control features unavailable",
+            ),
+            ("send", "unknown", Value::Null, "Broken pipe (os error 32)"),
+            (
+                "verify",
+                "unknown",
+                json!(true),
+                "Connection reset by peer (os error 104)",
+            ),
+        ] {
+            let mut control = Fake {
+                outlet: true,
+                calls: vec![],
+                fail: None,
+                power_result: Some(json!({
+                    "verified":false,"phase":phase,"outcome":outcome,
+                    "command_sent":sent,"wake_packet_sent":false,"cast_command_sent":false,
+                    "error":cause,"status":{"private":"must not appear"},
+                })),
+            };
+            let result = sequence(&mut control, false, 5, 120).map(|()| json!({"verified":true}));
+            let direct = result.as_ref().expect_err("unverified TV").to_string();
+            let steps = [json!({"action":"routine","name":"tv_off"})];
+            let report = super::super::parallel::report(steps.iter(), vec![result]);
+            assert_eq!(report["completed"], false);
+            assert_eq!(report["steps"][0]["completed"], false);
+            assert_eq!(report["steps"][0]["error"], direct);
+            assert!(direct.contains(&format!("phase={phase}; outcome={outcome}")));
+            let sent = sent
+                .as_bool()
+                .map_or("unknown", |s| if s { "true" } else { "false" });
+            assert!(direct.contains(&format!("command_sent={sent};")));
+            assert!(direct.contains("wake_packet_sent=false; cast_command_sent=false;"));
+            assert!(direct.ends_with(&format!("error={cause}")));
+            assert!(!direct.contains("must not appear"));
+            assert_eq!(control.calls, ["outlet_status", "tv_off"]);
+        }
+    }
+
+    #[test]
+    fn power_failure_diagnostics_are_bounded_and_missing_sent_state_is_unknown() {
+        let result = json!({"verified":false,"error":"é".repeat(1024)});
+        let message = require_verified(&result)
+            .expect_err("unverified TV")
+            .to_string();
+        assert_eq!(message.chars().count(), 512);
+        assert!(message.contains("phase=unknown; outcome=unknown; command_sent=unknown;"));
+        assert!(message.contains("outlet left on; do not replay the control"));
     }
 }
