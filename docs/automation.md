@@ -100,6 +100,13 @@ For a configured TCL TV routine, use `routine_run` with `tv_on` or `tv_off`.
 The routine owns TCL and its selected outlet: startup powers the outlet first;
 shutdown verifies TCL power-off before cutting the outlet. An uncertain TV result
 leaves the outlet on. Agent channels need an explicit `routine_run` grant.
+Unverified TCL power errors include `phase`, `outcome`, `command_sent`,
+`wake_packet_sent`, `cast_command_sent` and the adapter's error text. A missing
+or uncertain send state is `unknown`, never inferred to mean no command was sent.
+These diagnostics survive direct TV routine errors and child-step errors in
+`wake_up`, `sleep` and `leave_house`, bounded to 512 characters per error (long
+error text may be truncated). Device status snapshots and configuration are not
+copied into these diagnostics. Outlet cutoff and no-replay guards still apply.
 
 When legacy `--tv` is configured, its Samsung, DIGI and entire plug adapter are borrowed
 from one owner. Loading separate adapters for those families is rejected, even

@@ -71,6 +71,8 @@ including TV/PC readiness and shutdown verification alongside other devices.
 Each chain preserves device-before-outlet shutdown and outlet-first startup.
 Results stay in configuration order; timing is best effort and partial failures
 never trigger automatic replay.
+Unverified TCL power errors retain the adapter's failure phase, command-send
+state and error text in routine results, within the 512-character error limit.
 [Device groups](docs/configuration.md#device-groups) switch their configured lights
 concurrently with per-member verification.
 `group_plan` previews this without device I/O.
