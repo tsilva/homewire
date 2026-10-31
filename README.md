@@ -14,6 +14,9 @@ and schedules are opt-in.
 Rooted Android hosts can add an independent [battery guard](docs/android.md#battery-guard)
 with a charge ceiling, temperature cutoff, persistent serious-fault lockout and
 optional approved Telegram alerts. It runs separately from the automation owner.
+The battery operator also supports `repair-startup` to add a Termux:Boot fallback
+for an existing guard when Magisk skips its hooks; that fallback requires the
+first unlock and does not establish protection during early boot.
 
 ## Quickstart
 

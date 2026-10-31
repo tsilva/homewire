@@ -199,9 +199,13 @@ class Phone(ManagedPhone):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--profile', required=True)
-    parser.add_argument('action', choices=('stage', 'install', 'status', 'stop', 'rollback', 'enable-alerts', 'test-alert'))
+    parser.add_argument('action', choices=('stage', 'install', 'repair-startup', 'status', 'stop', 'rollback', 'enable-alerts', 'test-alert'))
     parser.add_argument('--approved-messages')
     args = parser.parse_args()
+    if args.action == 'repair-startup':
+        import battery_startup
+        battery_startup.repair(Phone(battery_startup.load(args.profile)))
+        return
     phone = Phone(load(args.profile))
     if args.action == 'enable-alerts':
         if not args.approved_messages:
