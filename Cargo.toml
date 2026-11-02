@@ -22,7 +22,7 @@ chrono-tz = "=0.10.3"
 
 base64 = "=0.22.1"
 sha1 = "=0.10.7"
-rustls = { version = "=0.23.45", default-features = false, features = ["std", "ring", "tls12"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["std", "ring", "tls12"] }
 webpki-roots = "=1.0.3"
 quick-xml = { version = "=0.37.2", default-features = false }
 
