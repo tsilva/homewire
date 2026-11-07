@@ -327,6 +327,12 @@ mod tests {
         for (phase, outcome, sent, cause) in [
             ("connect", "not_sent", json!(false), "connection timed out"),
             (
+                "connect_recovery",
+                "not_sent",
+                json!(false),
+                "connection timed out",
+            ),
+            (
                 "prepare",
                 "not_sent",
                 json!(false),
