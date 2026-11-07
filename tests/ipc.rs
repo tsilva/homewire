@@ -482,6 +482,7 @@ fn admitted_request_is_served_before_another_overdue_background_poll() -> Result
             Err(e) => return Err(e.into()),
         }
     };
+    poll.set_nonblocking(false)?;
     poll.set_read_timeout(Some(Duration::from_secs(1)))?;
     let mut bytes = [0; 1024];
     assert!(poll.read(&mut bytes)? > 0);
