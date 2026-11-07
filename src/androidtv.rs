@@ -1657,6 +1657,136 @@ mod tests {
         worker.join().expect("server")?;
         Ok(())
     }
+
+    fn join_fixture<T>(worker: thread::JoinHandle<Result<T>>, name: &str) -> Result<T> {
+        // If a regression skips an expected request, the fixture can still be in accept().
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !worker.is_finished() {
+            assert!(Instant::now() < deadline, "missing {name} fixture request");
+            thread::sleep(Duration::from_millis(10));
+        }
+        worker.join().expect("fixture thread")
+    }
+
+    fn run_tcl_off_with_relay(
+        temp: &support::Directory,
+        tv: Value,
+        cutoff: Option<bool>,
+    ) -> Result<(Result<Value>, Vec<Value>)> {
+        let mut sessions = vec![(vec!["get_device_info"], None)];
+        if let Some(readback_ok) = cutoff {
+            sessions.push((
+                vec!["get_device_info", "set_device_info", "get_device_info"],
+                (!readback_ok).then_some(2),
+            ));
+        }
+        let (relay, worker) = crate::test_tapo::mock_sessions(
+            sessions,
+            json!({"model":"P100","device_id":"synthetic","device_on":true}),
+            None,
+        )?;
+        let path = temp.config(
+            "home.json",
+            &json!({"version":1,"adapters":{"tcl":tv,"plugs":{"settle_seconds":0,"timeout_seconds":1,
+                "plugs":[{"name":"screen_supply","model":"P100","host":"192.0.2.20","connect":relay,
+                    "device_id":"synthetic","auth_hash":"00".repeat(32)}]}},
+                "routines":{"tv":{"target":"tcl","plug":"screen_supply","startup_seconds":1,"ready_seconds":1}}}),
+        )?;
+        let bundle = crate::bundle::Bundle::load(&path)?.expect("bundle");
+        let mut devices = bundle.open_devices(None)?;
+        let result =
+            crate::routine::call(&mut devices, "routine_run", &json!({"routine":"tv_off"}));
+        Ok((result, join_fixture(worker, "relay")?))
+    }
+
+    #[test]
+    fn tcl_off_pre_control_timeout_leaves_relay_on_without_sending_controls() -> Result<()> {
+        use std::net::UdpSocket;
+        let temp = support::Directory::new()?;
+        // Keep the listening socket open so TCP connects, but never answer TLS.
+        let stalled_remote = TcpListener::bind("127.0.0.1:0")?;
+        let cast = TcpListener::bind("127.0.0.1:0")?;
+        cast.set_nonblocking(true)?;
+        let wake = UdpSocket::bind("127.0.0.1:0")?;
+        wake.set_nonblocking(true)?;
+        let (cert, key) = temp.certs()?;
+        let (result, requests) = run_tcl_off_with_relay(
+            &temp,
+            json!({"host":"127.0.0.1","model":"Smart TV","connect":stalled_remote.local_addr()?,
+                "server_cert_sha256":"00".repeat(32),"client_cert":cert,"client_key":key,
+                "timeout_seconds":1,"verify_seconds":2,
+                "wake":{"mac":"02:00:00:00:00:40","wake_address":wake.local_addr()?},
+                "cast_wake":{"server_cert_sha256":"11".repeat(32),"port":cast.local_addr()?.port()}}),
+            None,
+        )?;
+        let failure = result.expect_err("timed out before TV control").to_string();
+        assert!(failure.contains("outlet left on"), "{failure}");
+        assert!(
+            failure.contains("phase=connect;") || failure.contains("phase=connect_recovery;"),
+            "{failure}"
+        );
+        assert!(
+            failure.contains(concat!(
+                "outcome=not_sent; command_sent=false; ",
+                "wake_packet_sent=false; cast_command_sent=false;"
+            )),
+            "{failure}"
+        );
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0]["method"], "get_device_info");
+        assert!(!temp.0.join("tcl.power.state.json").exists());
+        assert_eq!(
+            wake.recv(&mut [0; 128]).expect_err("no wake packet").kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        assert_eq!(
+            cast.accept().expect_err("no Cast connection").kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn tcl_off_requires_both_tv_confirmation_and_relay_readback() -> Result<()> {
+        for (tv_confirmed, cutoff) in [(false, None), (true, Some(false)), (true, Some(true))] {
+            let temp = support::Directory::new()?;
+            let (address, worker, pin) =
+                server_as(true, Some(26), "Smart TV", "TCL", tv_confirmed, true)?;
+            let path = tcl_config(&temp, address, pin)?;
+            let tv = serde_json::from_slice(&std::fs::read(path)?)?;
+            let (result, requests) = run_tcl_off_with_relay(&temp, tv, cutoff)?;
+            join_fixture(worker, "TV")?;
+            match cutoff {
+                None => {
+                    let failure = result.expect_err("TV off was not confirmed").to_string();
+                    assert!(
+                        failure.contains("phase=verify; outcome=unknown; command_sent=true;"),
+                        "{failure}"
+                    );
+                    assert_eq!(requests.len(), 1);
+                }
+                Some(readback_ok) => {
+                    assert_eq!(requests.len(), 4);
+                    assert_eq!(requests[2]["params"], json!({"device_on":false}));
+                    assert_eq!(requests[3]["method"], "get_device_info");
+                    if readback_ok {
+                        let result = result?;
+                        assert_eq!(result["result"]["completed"], true);
+                        assert_eq!(result["result"]["power"], false);
+                        assert_eq!(result["result"]["verified"], true);
+                    } else {
+                        let failure = result.expect_err("relay readback failed").to_string();
+                        assert!(
+                            failure.contains("Plug verification read failed"),
+                            "{failure}"
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn tcl_uncertain_shutdown_is_blocked_after_restart_until_confirmed_off() -> Result<()> {
         let temp = support::Directory::new()?;

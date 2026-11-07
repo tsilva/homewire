@@ -31,8 +31,13 @@ pub mod weather;
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 #[cfg(test)]
+extern crate self as homewire;
+#[cfg(test)]
 #[path = "../tests/support/mod.rs"]
 pub(crate) mod test_support;
+#[cfg(test)]
+#[path = "../tests/support/tapo.rs"]
+mod test_tapo;
 
 pub fn error(message: impl Into<String>) -> Box<dyn std::error::Error + Send + Sync> {
     std::io::Error::other(message.into()).into()
