@@ -154,7 +154,7 @@ fn dlna_verifies_identity_before_soap_and_parses_readback() -> Result<()> {
                 } else if b.contains("GetPositionInfo") {
                     (
                         "GetPositionInfo",
-                        "<RelTime>00:00:12</RelTime><TrackDuration>00:03:00</TrackDuration><TrackURI>http://example.org/audio</TrackURI>",
+                        "<RelTime>00:00:12</RelTime><TrackDuration>00:03:00</TrackDuration><TrackURI>http://example.org/audio?a=1&amp;b=&#50;</TrackURI>",
                     )
                 } else if b.contains("GetVolume") {
                     ("GetVolume", "<CurrentVolume>23</CurrentVolume>")
@@ -177,6 +177,7 @@ fn dlna_verifies_identity_before_soap_and_parses_readback() -> Result<()> {
     let mut m = dlna::Manager::open(&path)?;
     let state = m.read_device(0)?;
     assert_eq!(state["volume_percent"], 23);
+    assert_eq!(state["url"], "http://example.org/audio?a=1&b=2");
     assert_eq!(state["muted"], false);
     worker.join().expect("server")?;
     drop(m);
