@@ -31,11 +31,31 @@ struct Services {
 fn elements(bytes: &[u8]) -> Result<Vec<(String, String)>> {
     use quick_xml::{Reader, events::Event};
     let mut r = Reader::from_reader(bytes);
-    r.config_mut().trim_text(true);
     let mut stack = Vec::new();
     let mut rows = Vec::new();
+    let mut text_start = None;
     loop {
-        match r.read_event()? {
+        let offset = r.buffer_position() as usize;
+        let event = r.read_event()?;
+        // The reader emits entity references separately from adjacent text.
+        if matches!(event, Event::Text(_) | Event::GeneralRef(_)) {
+            text_start.get_or_insert(offset);
+            continue;
+        }
+        if let Some(start) = text_start.take() {
+            let raw = std::str::from_utf8(&bytes[start..offset])?;
+            let raw = raw.trim_matches([' ', '\t', '\r', '\n']);
+            if !raw.is_empty() {
+                if rows.len() >= 1024 {
+                    return Err(error("XML node limit exceeded"));
+                }
+                rows.push((
+                    stack.join("/"),
+                    quick_xml::escape::unescape(raw)?.into_owned(),
+                ));
+            }
+        }
+        match event {
             Event::Start(e) => {
                 if stack.len() >= 24 {
                     return Err(error("XML nesting exceeds limit"));
@@ -61,12 +81,6 @@ fn elements(bytes: &[u8]) -> Result<Vec<(String, String)>> {
             }
             Event::End(_) => {
                 stack.pop();
-            }
-            Event::Text(t) => {
-                if rows.len() >= 1024 {
-                    return Err(error("XML node limit exceeded"));
-                }
-                rows.push((stack.join("/"), t.unescape()?.into_owned()));
             }
             Event::DocType(_) => return Err(error("XML document types are unsupported")),
             Event::Eof => break,
