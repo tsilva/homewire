@@ -304,11 +304,12 @@ mod tests {
                 entity: "switch.sample".into(),
             },
         ];
-        let control = std::sync::Mutex::new(&mut fake);
-        let reply = sequence(&steps, |_, step| {
-            step_run(step, &mut **control.lock().expect("control"))
-        });
-        drop(control);
+        let reply = {
+            let control = std::sync::Mutex::new(&mut fake);
+            sequence(&steps, |_, step| {
+                step_run(step, &mut **control.lock().expect("control"))
+            })
+        };
         assert_eq!(reply["completed"], false);
         assert_eq!(reply["steps"][1]["completed"], true);
         fake.calls.sort();
