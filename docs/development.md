@@ -24,7 +24,7 @@ branches and force pushes. Deletions remain allowed. Missing/corrupt inspection
 data and shallow clones fail closed; no device or network access is performed.
 The pre-commit hook rejects retired blobs and tracked private configuration
 paths, including force-added `.local/`, `.env`, `.access.local.toml` and
-`.infisical.json` files. Template `.env.example` files are allowed.
+personal access metadata files. Template `.env.example` files are allowed.
 
 Before each commit, review the full staged diff and commit message for household
 identifiers, network/location data, actual schedules, inventories, credentials

@@ -496,9 +496,9 @@ protected with mode 600. Android projection materializes the referenced key on
 the target and includes the TCL certificate; it never uploads tunnel configs.
 
 ```sh
-infisical run --env=prod -- target/release/homewire --tcl .local/tcl.json call entity_status '{"entities":["media_player.tcl"]}'
-infisical run --env=prod -- target/release/homewire --tcl .local/tcl.json call media_power '{"entity":"media_player.tcl","power":false}'
-infisical run --env=prod -- target/release/homewire --tcl .local/tcl.json call remote_key '{"entity":"media_player.tcl","key":"home"}'
+target/release/homewire --tcl .local/tcl.json call entity_status '{"entities":["media_player.tcl"]}'
+target/release/homewire --tcl .local/tcl.json call media_power '{"entity":"media_player.tcl","power":false}'
+target/release/homewire --tcl .local/tcl.json call remote_key '{"entity":"media_player.tcl","key":"home"}'
 ```
 
 ### TCL power and network standby

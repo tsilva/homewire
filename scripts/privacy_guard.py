@@ -78,7 +78,7 @@ def pre_push(stream, blocked):
 
 def private_path(path):
     parts = path.lower().split('/')
-    return any(part in ('.local', '.access.local.toml', '.infisical.json', '.env')
+    return any(part in ('.local', '.access.local.toml', '.infisical.json', '.runbox.yaml', '.env')
                or (part.startswith('.env.') and
                    not part.endswith(('.example', '.sample', '.template')))
                for part in parts)

@@ -14,3 +14,4 @@ __pycache__/
 
 # Betty build dependency pins are source, not runtime lock state.
 !/companion/betty/dependencies.lock.json
+/.internal/

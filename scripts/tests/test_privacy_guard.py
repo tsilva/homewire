@@ -131,7 +131,7 @@ class PrivacyGuardTests(unittest.TestCase):
         self.file.write_text('synthetic replacement content\n')
         self.assert_blocked(self.guard('staged'))
         self.git('reset', '-q', 'HEAD', '--', 'fixture.txt')
-        for name in ('.local/profile.json', '.access.local.toml', '.infisical.json',
+        for name in ('.local/profile.json', '.access.local.toml', '.infisical.json', '.runbox.yaml',
                      '.env', 'nested/.env.production'):
             with self.subTest(name=name):
                 path = self.repo / name
