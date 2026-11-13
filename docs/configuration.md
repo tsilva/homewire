@@ -190,8 +190,8 @@ ignore legacy `router.json` files and leave existing private files untouched.
 Remove obsolete router credential references from your active configuration.
 
 ```sh
-infisical run --env=prod -- target/release/homewire --config .local/home.json config-check
-infisical run --env=prod -- target/release/homewire --config .local/home.json serve
+target/release/homewire --config .local/home.json config-check
+target/release/homewire --config .local/home.json serve
 ```
 
 `config-check` validates adapter/service schemas, API credentials/TLS and stored
@@ -231,7 +231,7 @@ To migrate existing private files in place:
 
 ```sh
 python3 scripts/android/configuration.py --configs .local --output .local/home.json
-infisical run --env=prod -- target/release/homewire --config .local/home.json config-check
+target/release/homewire --config .local/home.json config-check
 ```
 
 The helper imports known adapter/service JSON, optional `computer-routine.json`
@@ -386,18 +386,16 @@ settling delay at 20 seconds.
 For testing through a TCP tunnel, `--connect 127.0.0.1:PORT` overrides only the
 connection address. The device identity and key remain in the private config.
 
-## Infisical configuration references
+## Environment configuration references
 
 A whole JSON string `${HOMEWIRE_SECRET_NAME}` resolves from the process environment.
 References must name uppercase Homewire variables; missing, empty, oversized or malformed
 values fail configuration loading without displaying the value. For PEM private-key paths,
 `env:HOMEWIRE_SECRET_NAME` reads the key directly from the environment.
 
-Run `infisical login` and `infisical init` to select your workspace. The resulting
-checkout-local `.infisical.json` is Git-ignored. Launch the native process through
-`infisical run --env=prod -- ...`. The Android installer
-also resolves JSON references in memory. For `api.json` `private_key` and `digi.json`
+Supply references through the process environment using your chosen credential
+provider. The Android installer also resolves JSON references in memory. For `api.json` `private_key` and `digi.json`
 `client_key`, it sends referenced PEM bytes to the corresponding protected device key file
 and rewrites only the destination JSON path. Host files remain references, while target
-files use the existing atomic mode-0600 transfer. Use Infisical when installing with
+files use the existing atomic mode-0600 transfer. Provide the referenced values when installing with
 unified `--config` or legacy `--configs`; deployment-only updates preserve existing target credentials.

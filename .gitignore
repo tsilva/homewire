@@ -11,3 +11,4 @@
 /companion/tv/build/
 __pycache__/
 *.py[cod]
+/.internal/
