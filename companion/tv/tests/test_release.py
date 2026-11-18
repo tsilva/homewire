@@ -130,6 +130,70 @@ class ReleaseTests(unittest.TestCase):
             self.assertEqual(receipt['failed_gate'], 'building')
             self.assertEqual(injected.call_count, 1)
 
+    def test_external_signer_builds_without_secret_environment_and_checks_certificate(self):
+        install.save_json(self.config, {'toolchain': {}, 'artifacts': 'artifacts'})
+        with self.assertRaisesRegex(ValueError, 'Invalid release configuration fields'):
+            release.release(self.args())
+        fake_signer = self.root / 'signer'
+        fake_signer.write_text('#!/bin/sh\nexit 0\n')
+        fake_signer.chmod(0o700)
+        args = self.args()
+        args.signer, args.signer_cert_sha256 = fake_signer, 'c' * 64
+        calls = []
+
+        def execute(command, env=None, **_):
+            calls.append(command)
+            self.assertNotIn('HOMEWIRE_TV_SIGNING_KEY_B64', env or {})
+            self.assertNotIn('HOMEWIRE_TV_SIGNING_PASSWORD', env or {})
+            if command[0] == 'git':
+                return b'fixture commit'
+            output = Path(command[command.index('--output') + 1])
+            if '--unsigned' in command:
+                output.write_bytes(b'unsigned fixture')
+            else:
+                self.assertEqual(command[0], fake_signer.resolve())
+                self.assertEqual(command[command.index('--input-sha256') + 1],
+                                 hashlib.sha256(b'unsigned fixture').hexdigest())
+                self.assertEqual(command[command.index('--certificate-sha256') + 1], 'c' * 64)
+                output.write_bytes(b'signed fixture')
+            return b''
+
+        identity = {'version': '0.1.1', 'version_code': 1001, 'signer_sha256': 'c' * 64}
+        with patch.dict(release.os.environ, {'HOMEWIRE_TV_SIGNING_KEY_B64': 'synthetic', 'HOMEWIRE_TV_SIGNING_PASSWORD': 'synthetic'}), \
+                patch.object(release.shutil, 'which', side_effect=AssertionError('External build requires no login or adb')), \
+                patch.object(build, 'environment', return_value={'HOMEWIRE_ANDROID_BUILD_TOOLS': '/fixture/tools'}) as environment, \
+                patch.object(build, 'apk_identity', return_value=identity), patch.object(release, 'run', side_effect=execute), \
+                patch.object(release, 'checks'), patch.object(release, 'injected') as legacy, patch.object(install, 'adb') as adb:
+            directory = release.release(args)
+        self.assertEqual(release.private_json(directory / 'receipt.json')['phase'], 'built')
+        self.assertEqual(len(calls), 4)
+        self.assertNotIn('HOMEWIRE_TV_SIGNING_KEY_B64', environment.call_args.kwargs['environ'])
+        legacy.assert_not_called()
+        adb.assert_not_called()
+
+    def test_external_signature_mismatch_fails_without_deployment_or_fallback(self):
+        fake_signer = self.root / 'signer'
+        fake_signer.write_text('#!/bin/sh\nexit 0\n')
+        fake_signer.chmod(0o700)
+        args = self.args(build_only=False)
+        args.signer, args.signer_cert_sha256 = fake_signer, 'c' * 64
+
+        def execute(command, _env=None, **_):
+            if command[0] != 'git':
+                Path(command[command.index('--output') + 1]).write_bytes(b'fixture apk')
+            return b''
+
+        with patch.object(release.shutil, 'which', return_value='/fixture/tool'), \
+                patch.object(build, 'environment', return_value={'HOMEWIRE_ANDROID_BUILD_TOOLS': '/fixture/tools'}), \
+                patch.object(build, 'apk_identity', return_value={'signer_sha256': 'a' * 64}), \
+                patch.object(release, 'run', side_effect=execute), patch.object(release, 'checks'), \
+                patch.object(release, 'injected') as legacy, patch.object(release, 'deploy') as deploy:
+            with self.assertRaisesRegex(release.GateError, 'pinned certificate'):
+                release.release(args)
+        self.assertEqual(release.private_json(self.root / 'artifacts/0.1.1/receipt.json')['phase'], 'failed')
+        legacy.assert_not_called()
+        deploy.assert_not_called()
+
     def test_connection_failure_retains_candidate_but_uncertain_install_blocks_reuse(self):
         receipt = {'phase': 'connecting'}
         release.failure(receipt, release.GateError('offline'))

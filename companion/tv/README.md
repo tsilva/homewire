@@ -78,6 +78,13 @@ pipes the signing key to apksigner and never writes credentials to disk or logs.
 A credential/authentication failure stops the release; renew Infisical login
 before starting another candidate.
 
+To sign through an operator-provided executable, pass `--signer /absolute/path`
+and `--signer-cert-sha256 DIGEST`. The launcher builds the APK unsigned and
+passes only its path, digest, output path and expected public certificate to the
+signer. It checks the output certificate and version before marking the build
+complete. With `--build-only`, the configuration can contain just `toolchain`
+and `artifacts`. Use the full paired-device configuration for deployment.
+
 Authorize ADB on the intended TV. `serial` selects it explicitly. The command
 connects the configured TCP serial automatically; the TV must already authorize
 this ADB host. TCP setup checks both ADB's reply and transport state, since

@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tarfile
@@ -24,6 +25,8 @@ import install
 ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parents[1]
 TOOL_KEYS = {'JAVA_HOME', 'HOMEWIRE_ANDROID_PLATFORM', 'HOMEWIRE_ANDROID_BUILD_TOOLS'}
+UNSIGNED_BUILD_ENV = TOOL_KEYS | {'HOME', 'PATH', 'TMPDIR', 'LANG', 'LC_ALL', 'PYTHONDONTWRITEBYTECODE',
+                                  'ANDROID_HOME', 'ANDROID_SDK_ROOT'}
 
 
 class GateError(RuntimeError):
@@ -52,21 +55,26 @@ def binding(value):
     return value
 
 
-def configuration(path):
+def configuration(path, *, external_build_only=False):
     value = private_json(path)
-    required = {'toolchain', 'signing', 'runtime', 'serial', 'profile', 'companion', 'artifacts'}
-    if set(value) - required - {'verify_connect', 'ssh_alias'} or not required <= set(value):
+    build_fields = {'toolchain', 'artifacts'}
+    release_fields = build_fields | {'signing', 'runtime', 'serial', 'profile', 'companion'}
+    required = build_fields if external_build_only else release_fields
+    if set(value) - release_fields - {'verify_connect', 'ssh_alias'} or not required <= set(value):
         raise ValueError('Invalid release configuration fields')
     if not isinstance(value['toolchain'], dict) or set(value['toolchain']) - TOOL_KEYS:
         raise ValueError('Invalid toolchain fields')
     for key in ('signing', 'runtime'):
-        binding(value[key])
-    if value['signing'] == value['runtime']:
+        if key in value:
+            binding(value[key])
+    if 'signing' in value and value['signing'] == value.get('runtime'):
         raise ValueError('Signing and runtime credentials require separate folders')
-    if not isinstance(value['serial'], str) or not 1 <= len(value['serial']) <= 256 or any(c.isspace() for c in value['serial']):
+    if 'serial' in value and (not isinstance(value['serial'], str) or not 1 <= len(value['serial']) <= 256
+                              or any(c.isspace() for c in value['serial'])):
         raise ValueError('Invalid explicit ADB serial')
     for key in ('profile', 'companion', 'artifacts'):
-        value[key] = str((Path(path).resolve().parent / value[key]).resolve())
+        if key in value:
+            value[key] = str((Path(path).resolve().parent / value[key]).resolve())
     for key, setting in value['toolchain'].items():
         value['toolchain'][key] = str((Path(path).resolve().parent / Path(setting).expanduser()).resolve())
     if 'verify_connect' in value:
@@ -78,7 +86,8 @@ def configuration(path):
             raise ValueError('Invalid private verification port')
     if 'ssh_alias' in value and (not re.fullmatch(r'[a-zA-Z0-9._-]{1,64}', value['ssh_alias']) or 'verify_connect' in value):
         raise ValueError('SSH routing requires a safe managed alias and no manual verification endpoint')
-    install.profile(value['profile'])
+    if 'profile' in value:
+        install.profile(value['profile'])
     return value
 
 
@@ -143,6 +152,47 @@ def injected(profile, command, env, gate):
 
 def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def selected_signer(path, fingerprint):
+    if path is None and fingerprint is None:
+        return None
+    if path is None or not isinstance(fingerprint, str) or not re.fullmatch(r'[a-f0-9]{64}', fingerprint):
+        raise ValueError('An external signer requires an executable and its pinned certificate SHA-256')
+    path = Path(path)
+    if not path.is_absolute():
+        raise ValueError('External signer must use an absolute executable path')
+    try:
+        resolved = path.resolve(strict=True)
+        mode = resolved.stat()
+    except (OSError, RuntimeError):
+        raise ValueError('External signer is unavailable') from None
+    if (not stat.S_ISREG(mode.st_mode) or mode.st_uid not in (0, os.getuid())
+            or mode.st_mode & 0o022 or not os.access(resolved, os.X_OK)):
+        raise ValueError('External signer has unsafe ownership or permissions')
+    return resolved, fingerprint
+
+
+def sign_external(signer, source, directory, version, env):
+    executable, fingerprint = signer
+    unsigned = directory / 'homewire-tv-unsigned.apk'
+    signed = directory / 'homewire-tv.apk'
+    clean = {key: value for key, value in env.items() if key in UNSIGNED_BUILD_ENV}
+    run([sys.executable, source / 'build.py', '--unsigned', '--version', version, '--output', unsigned],
+        clean, gate='Unsigned build', timeout=360)
+    expected = digest(unsigned)
+    # The neutral signer gets paths and a digest. Its operator owns access to
+    # the private signing identity separately from the application build.
+    run([executable, '--input', unsigned, '--input-sha256', expected, '--output', signed,
+         '--certificate-sha256', fingerprint], clean, gate='External signer', timeout=180)
+    if unsigned.is_symlink() or digest(unsigned) != expected:
+        raise GateError('External signer modified the unsigned input')
+    if signed.is_symlink() or not signed.is_file():
+        raise GateError('External signer did not produce a regular APK')
+    identity = build.apk_identity(signed, clean['HOMEWIRE_ANDROID_BUILD_TOOLS'], clean)
+    if identity['signer_sha256'] != fingerprint:
+        raise GateError('Signed APK does not match the pinned certificate')
+    return identity
 
 
 def snapshot(destination):
@@ -349,10 +399,15 @@ def deploy_existing(args):
 
 def release(args):
     config_path = args.config.resolve()
-    settings = configuration(config_path)
-    env = build.environment(settings['toolchain'])
+    signer = selected_signer(getattr(args, 'signer', None), getattr(args, 'signer_cert_sha256', None))
+    settings = configuration(config_path, external_build_only=signer is not None and args.build_only)
+    if signer:
+        env = build.environment(settings['toolchain'], environ={k: v for k, v in os.environ.items() if k in UNSIGNED_BUILD_ENV})
+    else:
+        env = build.environment(settings['toolchain'])
     env['PYTHONDONTWRITEBYTECODE'] = '1'
-    if not shutil.which('infisical') or (not args.build_only and not shutil.which('adb')):
+    if ((signer is None or not args.build_only) and not shutil.which('infisical')
+            or not args.build_only and not shutil.which('adb')):
         raise ValueError('Install Infisical CLI and Android platform-tools (adb)')
     code = build.version_code(args.version)
     artifact_root = Path(settings['artifacts'])
@@ -361,9 +416,10 @@ def release(args):
         raise ValueError('Artifact directory requires chmod 700')
     directory = artifact_root / args.version
     directory.mkdir(mode=0o700)  # Fail closed on any previously attempted version.
+    git_env = env if signer else None
     receipt = {'version': args.version, 'version_code': code, 'phase': 'preparing',
-               'source_commit': run(['git', 'rev-parse', 'HEAD']).decode().strip(),
-               'source_dirty': bool(run(['git', 'status', '--porcelain'])),
+               'source_commit': run(['git', 'rev-parse', 'HEAD'], git_env).decode().strip(),
+               'source_dirty': bool(run(['git', 'status', '--porcelain'], git_env)),
                'recovery_from': None}
     install.save_json(directory / 'receipt.json', receipt)
     try:
@@ -384,10 +440,14 @@ def release(args):
         checks(source, env)
         receipt['phase'] = 'building'
         install.save_json(directory / 'receipt.json', receipt)
-        print('Building with the persistent signing identity...', flush=True)
-        injected(settings['signing'], [sys.executable, source / 'build.py', '--version', args.version,
-                                      '--output', directory / 'homewire-tv.apk'], env, 'Signed build / Infisical authentication')
-        identity = build.apk_identity(directory / 'homewire-tv.apk', env['HOMEWIRE_ANDROID_BUILD_TOOLS'], env)
+        if signer:
+            print('Building unsigned APK and passing it to the selected signer...', flush=True)
+            identity = sign_external(signer, source, directory, args.version, env)
+        else:
+            print('Building with the persistent signing identity...', flush=True)
+            injected(settings['signing'], [sys.executable, source / 'build.py', '--version', args.version,
+                                          '--output', directory / 'homewire-tv.apk'], env, 'Signed build / Infisical authentication')
+            identity = build.apk_identity(directory / 'homewire-tv.apk', env['HOMEWIRE_ANDROID_BUILD_TOOLS'], env)
         if identity['version'] != args.version or identity['version_code'] != code:
             raise ValueError('Built APK version mismatch')
         receipt.update(identity, apk_sha256=digest(directory / 'homewire-tv.apk'), phase='built',
@@ -409,6 +469,8 @@ def main():
     parser.add_argument('--config', type=Path, default=REPO / '.local/tv-release.json')
     parser.add_argument('--version', help='New MAJOR.MINOR.PATCH; each component 0..999')
     parser.add_argument('--build-only', action='store_true', help='Signed build and tests without contacting the TV')
+    parser.add_argument('--signer', type=Path, help='Explicit executable that signs an already built APK')
+    parser.add_argument('--signer-cert-sha256', help='Expected public certificate SHA-256 for that signer')
     parser.add_argument('--rollback', type=Path, help='Rebuild this saved release source under a higher --version')
     parser.add_argument('--deploy-existing', type=Path, help='Deploy the exact APK from a successful --build-only run')
     parser.add_argument('--verify-reboot', action='store_true', help='Deliberately reboot once and prove boot startup')
@@ -420,8 +482,8 @@ def main():
             return
         if (not args.version and not args.deploy_existing) or (args.build_only and args.verify_reboot):
             parser.error('--version is required; --verify-reboot requires deployment')
-        if args.deploy_existing and (args.version or args.build_only or args.rollback):
-            parser.error('--deploy-existing cannot be combined with --version, --build-only or --rollback')
+        if args.deploy_existing and (args.version or args.build_only or args.rollback or args.signer or args.signer_cert_sha256):
+            parser.error('--deploy-existing cannot be combined with build or signer options')
         # A separate release invocation must never race an install on this profile.
         with args.config.with_suffix('.lock').open('a') as lock:
             os.chmod(lock.name, 0o600)

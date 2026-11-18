@@ -29,9 +29,9 @@ def properties(path):
                 for line in path.read_text().splitlines() if '=' in line and not line.startswith('#'))
 
 
-def environment(settings=None):
+def environment(settings=None, *, environ=None):
     settings = settings or {}
-    env = dict(os.environ)
+    env = dict(os.environ if environ is None else environ)
     for key in ('JAVA_HOME', 'HOMEWIRE_ANDROID_PLATFORM', 'HOMEWIRE_ANDROID_BUILD_TOOLS'):
         if settings.get(key):
             env[key] = str(Path(settings[key]).expanduser().resolve())
@@ -55,7 +55,7 @@ def environment(settings=None):
     if properties(tools / 'source.properties').get('Pkg.Revision') != '35.0.0':
         raise ValueError('Expected Android build-tools 35.0.0')
     javac = Path(env['JAVA_HOME']) / 'bin/javac'
-    result = subprocess.run([str(javac), '-version'], capture_output=True, text=True, check=True)
+    result = subprocess.run([str(javac), '-version'], capture_output=True, text=True, check=True, env=env)
     if not re.match(r'javac 17[.\s]', result.stdout + result.stderr):
         raise ValueError('Expected JDK 17')
     for name in ('aapt2', 'd8', 'zipalign', 'apksigner'):
