@@ -173,13 +173,9 @@ def selected_signer(path, fingerprint):
     return resolved, fingerprint
 
 
-def sign_external(signer, source, directory, version, env):
+def sign_aligned_apk(signer, unsigned, signed, env):
     executable, fingerprint = signer
-    unsigned = directory / 'homewire-tv-unsigned.apk'
-    signed = directory / 'homewire-tv.apk'
     clean = {key: value for key, value in env.items() if key in UNSIGNED_BUILD_ENV}
-    run([sys.executable, source / 'build.py', '--unsigned', '--version', version, '--output', unsigned],
-        clean, gate='Unsigned build', timeout=360)
     expected = digest(unsigned)
     # The neutral signer gets paths and a digest. Its operator owns access to
     # the private signing identity separately from the application build.
@@ -189,8 +185,17 @@ def sign_external(signer, source, directory, version, env):
         raise GateError('External signer modified the unsigned input')
     if signed.is_symlink() or not signed.is_file():
         raise GateError('External signer did not produce a regular APK')
+
+
+def sign_external(signer, source, directory, version, env):
+    unsigned = directory / 'homewire-tv-unsigned.apk'
+    signed = directory / 'homewire-tv.apk'
+    clean = {key: value for key, value in env.items() if key in UNSIGNED_BUILD_ENV}
+    run([sys.executable, source / 'build.py', '--unsigned', '--version', version, '--output', unsigned],
+        clean, gate='Unsigned build', timeout=360)
+    sign_aligned_apk(signer, unsigned, signed, clean)
     identity = build.apk_identity(signed, clean['HOMEWIRE_ANDROID_BUILD_TOOLS'], clean)
-    if identity['signer_sha256'] != fingerprint:
+    if identity['signer_sha256'] != signer[1]:
         raise GateError('Signed APK does not match the pinned certificate')
     return identity
 

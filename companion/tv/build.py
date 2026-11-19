@@ -96,12 +96,12 @@ def build(version=None, output=None, unsigned=False):
     return destination
 
 
-def apk_identity(path, tools, env=None):
+def apk_identity(path, tools, env=None, *, expected_package='eu.tsilva.homewire.tv'):
     badging = subprocess.run([str(Path(tools) / 'aapt2'), 'dump', 'badging', str(path)],
                              check=True, capture_output=True, text=True, env=env).stdout
     match = re.search(r"package: name='([^']+)' versionCode='([0-9]+)' versionName='([^']+)'", badging)
-    if not match or match[1] != 'eu.tsilva.homewire.tv':
-        raise ValueError('Unexpected TV APK identity')
+    if not match or match[1] != expected_package:
+        raise ValueError('Unexpected APK package identity')
     certificates = subprocess.run([str(Path(tools) / 'apksigner'), 'verify', '--print-certs', str(path)],
                                   check=True, capture_output=True, text=True, env=env).stdout
     signers = re.findall(r'Signer #[0-9]+ certificate SHA-256 digest: ([a-f0-9]{64})', certificates)
